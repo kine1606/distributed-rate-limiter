@@ -1,0 +1,11 @@
+-- Sliding-window counter, atomic check-and-update. Implemented in Week 1.
+--
+-- Contract:
+--   KEYS[1]  hash-tagged window key, e.g. {user:123}:sw
+--   ARGV[1]  limit (max units per window)
+--   ARGV[2]  window_ms
+--   ARGV[3]  requested units
+--   ARGV[4]  ttl_ms for PEXPIRE
+--   Time comes from redis.call('TIME') inside the script.
+--   Returns: { allowed (0|1), remaining, retry_after_ms }
+return redis.error_reply('NOT_IMPLEMENTED: sliding_window.lua (Week 1)')

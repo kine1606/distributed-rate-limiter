@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package ratelimiter.v1;
+
+// Distributed rate limiter. See docs/DESIGN.md for the lease-based architecture.
+service RateLimiter {
+  // Single check. Served from the local token lease when possible (no Redis round trip).
+  rpc Check(CheckRequest) returns (CheckResponse);
+
+  // Batched check; reduces per-RPC overhead for high-volume callers.
+  rpc CheckBatch(CheckBatchRequest) returns (CheckBatchResponse);
+}
+
+message CheckRequest {
+  string key = 1;   // Entity being limited, e.g. "user:123" or an API key.
+  string rule = 2;  // Rule name from the config file, e.g. "api_default".
+  uint32 cost = 3;  // Tokens to consume. 0 is treated as 1.
+}
+
+message CheckResponse {
+  bool allowed = 1;
+  uint32 remaining = 2;       // Tokens left (best effort when served from a local lease).
+  uint32 retry_after_ms = 3;  // 0 when allowed.
+  uint32 limit = 4;           // Configured burst/limit of the rule.
+}
+
+message CheckBatchRequest {
+  repeated CheckRequest requests = 1;
+}
+
+message CheckBatchResponse {
+  repeated CheckResponse responses = 1;  // Same order as the request.
+}

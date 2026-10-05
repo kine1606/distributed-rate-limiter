@@ -1,0 +1,15 @@
+# Rate limit rules. Reloaded on SIGHUP without dropping requests (Week 4).
+rules:
+  api_default:
+    algorithm: token_bucket
+    limit: 1000           # burst capacity (tokens)
+    refill_per_sec: 500   # sustained rate
+    strict: false         # false = serve from local lease; true = exact Redis check per request
+    failure_policy: fail_open
+
+  login_attempts:
+    algorithm: sliding_window
+    limit: 5
+    window_ms: 60000
+    strict: true          # low volume, high accuracy: bypass leasing
+    failure_policy: fail_closed

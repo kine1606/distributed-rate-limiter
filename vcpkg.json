@@ -1,0 +1,15 @@
+{
+  "name": "distributed-rate-limiter",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "grpc",
+    "protobuf",
+    "spdlog",
+    "yaml-cpp",
+    "gtest",
+    "benchmark",
+    "hiredis",
+    "redis-plus-plus",
+    "prometheus-cpp"
+  ]
+}

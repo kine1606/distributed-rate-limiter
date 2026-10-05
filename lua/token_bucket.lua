@@ -1,0 +1,12 @@
+-- Token bucket, atomic check-and-update. Implemented in Week 1.
+--
+-- Contract (stable; the C++ client and the tests are written against it):
+--   KEYS[1]  hash-tagged bucket key, e.g. {user:123}:tb   (single slot => Redis Cluster safe)
+--   ARGV[1]  capacity (burst)
+--   ARGV[2]  refill_per_sec
+--   ARGV[3]  requested tokens (1 for a direct check, chunk size for a lease refill)
+--   ARGV[4]  ttl_ms for PEXPIRE (idle keys expire)
+--   Time comes from redis.call('TIME') inside the script, never from the caller.
+--   State: HASH {tokens, last_refill_ms}
+--   Returns: { allowed (0|1), remaining, retry_after_ms }
+return redis.error_reply('NOT_IMPLEMENTED: token_bucket.lua (Week 1)')

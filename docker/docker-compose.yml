@@ -1,0 +1,50 @@
+# Local test environment: 3-master Redis Cluster + 3 limiter instances.
+# Usage (from repo root): docker compose -f docker/docker-compose.yml up --build
+name: ratelimiter
+
+x-redis-node: &redis-node
+  image: redis:7
+  command: >
+    redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf
+    --cluster-node-timeout 5000 --appendonly no --save ""
+  networks: [rl]
+
+x-limiter: &limiter
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  volumes:
+    - ../config:/etc/ratelimiter:ro
+  depends_on:
+    redis-cluster-init:
+      condition: service_completed_successfully
+  networks: [rl]
+
+services:
+  redis-1: *redis-node
+  redis-2: *redis-node
+  redis-3: *redis-node
+
+  redis-cluster-init:
+    image: redis:7
+    depends_on: [redis-1, redis-2, redis-3]
+    networks: [rl]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 2
+        redis-cli --cluster create redis-1:6379 redis-2:6379 redis-3:6379 \
+          --cluster-replicas 0 --cluster-yes
+
+  limiter-1:
+    <<: *limiter
+    ports: ["50051:50051"]
+  limiter-2:
+    <<: *limiter
+    ports: ["50052:50051"]
+  limiter-3:
+    <<: *limiter
+    ports: ["50053:50051"]
+
+networks:
+  rl: {}

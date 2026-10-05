@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    { "name": "release", "binaryDir": "${sourceDir}/build/release", "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "RL_NATIVE": "ON" } },
+    { "name": "debug", "binaryDir": "${sourceDir}/build/debug", "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "asan", "binaryDir": "${sourceDir}/build/asan", "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "RL_SANITIZER": "address", "RL_NATIVE": "OFF" } },
+    { "name": "tsan", "binaryDir": "${sourceDir}/build/tsan", "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "RL_SANITIZER": "thread", "RL_NATIVE": "OFF" } }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } },
+    { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true } }
+  ]
+}
