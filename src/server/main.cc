@@ -115,12 +115,12 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 
 }  // namespace
 
-// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [token_bucket.lua]
+// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [lua dir]
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
   const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6379";
-  const std::string lua_path = argc > 4 ? argv[4] : "lua/token_bucket.lua";
+  const std::string lua_dir = argc > 4 ? argv[4] : "lua";
 
   RuleTable rules;
   try {
@@ -137,12 +137,12 @@ int main(int argc, char** argv) {
   std::unique_ptr<HiredisBackend> redis;
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
-    redis = std::make_unique<HiredisBackend>(host, port, lua_path);
+    redis = std::make_unique<HiredisBackend>(host, port, lua_dir);
   } catch (const std::exception& e) {
     spdlog::critical("cannot set up redis backend: {}", e.what());
     return 1;
   }
-  spdlog::info("using redis at {} with {}", redis_addr, lua_path);
+  spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
 
   // Declared after `redis`, so it is destroyed first: the core never outlives its backend.
   auto core = std::make_shared<StrictCore>(*redis, std::move(rules));

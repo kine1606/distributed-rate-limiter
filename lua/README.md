@@ -1,6 +1,6 @@
 # Lua scripts
 
-> Weeks 1, 4, 5 · Flow steps A10, B5, B6, B7 · Status: `token_bucket.lua` and `quota.lua` done and tested
+> Weeks 1, 4, 5 · Flow steps A10, B5, B6, B7 · Status: `token_bucket.lua`, `fixed_window.lua`, `sliding_window.lua` and `quota.lua` done and tested
 
 ## What this module does
 
@@ -17,7 +17,8 @@ That atomicity is the whole reason for using Lua instead of `GET` then `SET` fro
 | `quota.lua` (extended) | Overage policies `hard`, `grace`, `overage_cap` | 4 | to do |
 | `dedupe` logic | Request ID: count a retried request once | 4 | to do |
 | `return_lease.lua` | Give unused leased tokens back on shutdown | 5 | to do |
-| `sliding_window.lua` | Cut from scope (the daily quota replaces it) | | delete the file or mark it future work |
+| `fixed_window.lua` | Counter per epoch-aligned window; cheapest, up to 2x limit across an edge | 2 | done |
+| `sliding_window.lua` | Sliding window *counter* (current + weighted previous window), O(1) | 2 | done |
 
 ## Rules every script follows
 
@@ -43,6 +44,11 @@ token_bucket.lua
   KEYS[1] = {cust:42}:tb
   ARGV    = capacity, refill_per_sec, requested, ttl_ms
   returns   { allowed 0|1, remaining, retry_after_ms }
+
+fixed_window.lua / sliding_window.lua
+  KEYS[1] = {user:42}:<rule>:fw   /   {user:42}:<rule>:sw
+  ARGV    = limit, window_ms, requested
+  returns   { allowed 0|1, remaining, retry_after_ms }   (TTL computed inside from the window)
 
 quota.lua
   KEYS[1] = {cust:42}:quota

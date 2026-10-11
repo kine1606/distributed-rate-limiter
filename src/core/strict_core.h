@@ -10,7 +10,7 @@
 namespace ratelimiter {
 
 // One Redis script call per check: exact, and the baseline the lease engine is measured against.
-// Only token_bucket rules are served; anything else answers kUnknownRule.
+// The backend picks the script from the rule's algorithm.
 class StrictCore final : public RateLimiterCore {
  public:
   // `redis` must outlive this core.
@@ -18,7 +18,7 @@ class StrictCore final : public RateLimiterCore {
 
   void Check(const CheckRequest& request, CheckCallback done) override {
     const auto it = rules_.find(std::string(request.rule));
-    if (it == rules_.end() || it->second.algorithm != Algorithm::kTokenBucket) {
+    if (it == rules_.end()) {
       CheckResult r;
       r.reason = Reason::kUnknownRule;
       done(r);

@@ -19,3 +19,16 @@ rules:
     limit: 5              # 5 requests back to back
     refill_per_sec: 1     # then 1 more per second
     failure_policy: fail_closed
+
+  # Same budget as `demo` (5 per 5 s) under the two window algorithms, for side-by-side comparison.
+  demo_fixed_window:
+    algorithm: fixed_window   # cheapest; up to 2x limit across a window edge
+    limit: 5
+    window_ms: 5000
+    failure_policy: fail_closed
+
+  demo_sliding_window:
+    algorithm: sliding_window # sliding window counter: smooths the window edge, O(1) state
+    limit: 5
+    window_ms: 5000
+    failure_policy: fail_closed

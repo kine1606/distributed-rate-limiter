@@ -23,7 +23,7 @@ class HiredisBackendTest : public ::testing::Test {
     }
     admin_ = redisConnect(host_.c_str(), port_);
     if (!admin_ || admin_->err) GTEST_SKIP() << "Redis not reachable at " << host_ << ":" << port_;
-    backend_ = std::make_unique<HiredisBackend>(host_, port_, std::string(RL_SOURCE_DIR) + "/lua/token_bucket.lua");
+    backend_ = std::make_unique<HiredisBackend>(host_, port_, std::string(RL_SOURCE_DIR) + "/lua");
   }
 
   void TearDown() override {
@@ -47,31 +47,41 @@ class HiredisBackendTest : public ::testing::Test {
 
 const Rule kFive{.name = "it_five", .limit = 5, .refill_per_sec = 1};
 
-TEST_F(HiredisBackendTest, AdmitsExactlyTheBurstThenDenies) {
-  Admin("DEL " + BucketKey("hb1", kFive.name));
-  for (int i = 4; i >= 0; --i) {
-    const auto r = EvalSync(*backend_, kFive, "hb1");
-    ASSERT_FALSE(r.redis_error);
-    EXPECT_TRUE(r.allowed);
-    EXPECT_EQ(r.remaining, static_cast<std::uint32_t>(i));
+// The same budget (5) under each algorithm. Windows are an hour long so no window boundary
+// falls inside the test.
+const Rule kAllAlgorithms[] = {
+    kFive,
+    {.name = "it_sw", .algorithm = Algorithm::kSlidingWindow, .limit = 5, .window_ms = 3'600'000},
+    {.name = "it_fw", .algorithm = Algorithm::kFixedWindow, .limit = 5, .window_ms = 3'600'000},
+};
+
+TEST_F(HiredisBackendTest, EveryAlgorithmAdmitsExactlyTheLimitThenDenies) {
+  for (const Rule& rule : kAllAlgorithms) {
+    SCOPED_TRACE(rule.name);
+    Admin("DEL " + RedisKey(rule, "hb1"));
+    for (int i = 4; i >= 0; --i) {
+      const auto r = EvalSync(*backend_, rule, "hb1");
+      ASSERT_FALSE(r.redis_error);
+      EXPECT_TRUE(r.allowed);
+      EXPECT_EQ(r.remaining, static_cast<std::uint32_t>(i));
+    }
+    const auto d = EvalSync(*backend_, rule, "hb1");
+    ASSERT_FALSE(d.redis_error);
+    EXPECT_FALSE(d.allowed);
+    EXPECT_GT(d.retry_after_ms, 0u);
   }
-  const auto d = EvalSync(*backend_, kFive, "hb1");
-  ASSERT_FALSE(d.redis_error);
-  EXPECT_FALSE(d.allowed);
-  EXPECT_GT(d.retry_after_ms, 0u);
-  EXPECT_LE(d.retry_after_ms, 1000u);
 }
 
 TEST_F(HiredisBackendTest, KeysOfDifferentUsersAreIndependent) {
-  Admin("DEL " + BucketKey("hb2a", kFive.name));
-  Admin("DEL " + BucketKey("hb2b", kFive.name));
+  Admin("DEL " + RedisKey(kFive, "hb2a"));
+  Admin("DEL " + RedisKey(kFive, "hb2b"));
   for (int i = 0; i < 5; ++i) EvalSync(*backend_, kFive, "hb2a");
   EXPECT_FALSE(EvalSync(*backend_, kFive, "hb2a").allowed);
   EXPECT_TRUE(EvalSync(*backend_, kFive, "hb2b").allowed);
 }
 
 TEST_F(HiredisBackendTest, RecoversWhenScriptCacheIsFlushed) {
-  Admin("DEL " + BucketKey("hb3", kFive.name));
+  Admin("DEL " + RedisKey(kFive, "hb3"));
   ASSERT_FALSE(EvalSync(*backend_, kFive, "hb3").redis_error);
   Admin("SCRIPT FLUSH");  // EVALSHA now gets NOSCRIPT; the backend must fall back to EVAL
   const auto r = EvalSync(*backend_, kFive, "hb3");
@@ -81,14 +91,16 @@ TEST_F(HiredisBackendTest, RecoversWhenScriptCacheIsFlushed) {
 }
 
 TEST(HiredisBackendDown, UnreachableRedisReportsErrorNotDenial) {
-  HiredisBackend backend("127.0.0.1", 1, std::string(RL_SOURCE_DIR) + "/lua/token_bucket.lua");
+  HiredisBackend backend("127.0.0.1", 1, std::string(RL_SOURCE_DIR) + "/lua");
   std::promise<ScriptResult> p;
   backend.Eval(kFive, "x", 1, [&p](const ScriptResult& r) { p.set_value(r); });
   EXPECT_TRUE(p.get_future().get().redis_error);
 }
 
-TEST(BucketKey, HashTagIsTheLimitedEntity) {
-  EXPECT_EQ(BucketKey("user:42", "api_default"), "{user:42}:api_default:tb");
+TEST(RedisKey, HashTagIsTheLimitedEntityAndSuffixIsTheAlgorithm) {
+  EXPECT_EQ(RedisKey(kFive, "user:42"), "{user:42}:it_five:tb");
+  EXPECT_EQ(RedisKey(kAllAlgorithms[1], "user:42"), "{user:42}:it_sw:sw");
+  EXPECT_EQ(RedisKey(kAllAlgorithms[2], "user:42"), "{user:42}:it_fw:fw");
 }
 
 }  // namespace

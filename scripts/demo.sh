@@ -34,9 +34,9 @@ if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
   started_redis=1
 fi
 wait_port 6379 redis
-redis-cli -p 6379 --scan --pattern '{user:*}:*:tb' | xargs -r redis-cli -p 6379 del >/dev/null  # fresh buckets
+redis-cli -p 6379 --scan --pattern '{user:*}:*' | xargs -r redis-cli -p 6379 del >/dev/null  # fresh buckets
 
-"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:6379 lua/token_bucket.lua &
+"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:6379 lua &
 pids+=($!)
 wait_port 50051 rate_limiter_server
 
@@ -62,6 +62,6 @@ sleep 1.1
 hit alice /api/hello
 hit alice /api/hello
 echo "== what Redis holds"
-for k in $(redis-cli -p 6379 --scan --pattern '{user:*}:*:tb'); do
+for k in $(redis-cli -p 6379 --scan --pattern '{user:*}:*'); do
   echo "$k  $(redis-cli -p 6379 hgetall "$k" | paste -sd' ')"
 done

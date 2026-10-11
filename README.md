@@ -55,8 +55,8 @@ you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scr
 ## Run
 
 ```bash
-# args: [listen] [rules.yaml] [redis host:port] [token_bucket.lua]   (one plain Redis, not Cluster)
-./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:6379 lua/token_bucket.lua
+# args: [listen] [rules.yaml] [redis host:port] [lua dir]   (one plain Redis, not Cluster)
+./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:6379 lua
 ```
 
 End-to-end demo (curl -> Python gateway on :8080 -> limiter -> Redis), starts Redis if needed:

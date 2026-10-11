@@ -10,6 +10,7 @@ namespace {
 Algorithm ParseAlgorithm(const std::string& rule, const std::string& value) {
   if (value == "token_bucket") return Algorithm::kTokenBucket;
   if (value == "sliding_window") return Algorithm::kSlidingWindow;
+  if (value == "fixed_window") return Algorithm::kFixedWindow;
   throw std::runtime_error("rule '" + rule + "': unknown algorithm '" + value + "'");
 }
 
@@ -46,6 +47,9 @@ RuleTable LoadRules(const std::string& path) {
     }
     if (rule.algorithm == Algorithm::kTokenBucket && rule.refill_per_sec <= 0.0) {
       throw std::runtime_error("rule '" + rule.name + "': token_bucket needs refill_per_sec > 0");
+    }
+    if (rule.algorithm != Algorithm::kTokenBucket && rule.window_ms == 0) {
+      throw std::runtime_error("rule '" + rule.name + "': 'window_ms' must be > 0");
     }
     table.emplace(rule.name, std::move(rule));
   }

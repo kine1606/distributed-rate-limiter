@@ -32,8 +32,9 @@ rules:
     failure_policy: fail_closed
 ```
 
-Hint: `Algorithm::kSlidingWindow` in `rule.h` can become `kQuota`, since the sliding window is cut
-from scope. Update `rule_config.cc`, the tests, and the enum together in one commit.
+Algorithms: `token_bucket` (needs `refill_per_sec`), `fixed_window` and `sliding_window` (need
+`window_ms`). All three are kept for the algorithm benchmark. If you add `kQuota`, append it to the
+`Algorithm` enum: its values index the script and key-suffix tables in `src/redis/hiredis_backend.cc`.
 
 ## SIGHUP reload (Week 5)
 

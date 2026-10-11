@@ -2,10 +2,7 @@
 
 #include <hiredis/hiredis.h>
 
-#include <array>
-#include <chrono>
 #include <cmath>
-#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -19,6 +16,12 @@ namespace {
 
 constexpr timeval kRedisTimeout{0, 200'000};  // 200 ms for connect and for each command
 constexpr auto kReconnectBackoff = std::chrono::milliseconds(500);
+
+// Indexed by Algorithm.
+constexpr std::array<const char*, 3> kScriptFiles{"token_bucket.lua", "sliding_window.lua", "fixed_window.lua"};
+constexpr std::array<const char*, 3> kKeySuffixes{"tb", "sw", "fw"};
+
+std::size_t Index(Algorithm a) { return static_cast<std::size_t>(a); }
 
 std::string ReadFile(const std::string& path) {
   std::ifstream f(path);
@@ -35,14 +38,20 @@ using ReplyPtr = std::unique_ptr<redisReply, ReplyDeleter>;
 
 }  // namespace
 
-std::string BucketKey(std::string_view key, std::string_view rule) {
-  return "{" + std::string(key) + "}:" + std::string(rule) + ":tb";
+std::string RedisKey(const Rule& rule, std::string_view key) {
+  return "{" + std::string(key) + "}:" + rule.name + ":" + kKeySuffixes[Index(rule.algorithm)];
 }
 
 void HiredisBackend::ContextDeleter::operator()(redisContext* c) const { redisFree(c); }
 
-HiredisBackend::HiredisBackend(std::string host, int port, std::string lua_path)
-    : host_(std::move(host)), port_(port), script_(ReadFile(lua_path)), worker_([this] { Run(); }) {}
+HiredisBackend::HiredisBackend(std::string host, int port, const std::string& lua_dir)
+    : host_(std::move(host)), port_(port) {
+  for (std::size_t i = 0; i < scripts_.size(); ++i) {
+    scripts_[i].file = kScriptFiles[i];
+    scripts_[i].source = ReadFile(lua_dir + "/" + kScriptFiles[i]);
+  }
+  worker_ = std::thread([this] { Run(); });
+}
 
 HiredisBackend::~HiredisBackend() {
   {
@@ -55,11 +64,22 @@ HiredisBackend::~HiredisBackend() {
 
 void HiredisBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
                           ScriptCallback done) {
-  // An idle bucket refills completely after capacity / rate seconds, so expiring it then loses
-  // nothing. One extra second of margin covers rounding.
-  const double full_after_ms = rule.limit / rule.refill_per_sec * 1000.0;
-  Job job{BucketKey(key, rule.name), rule.limit, rule.refill_per_sec, requested,
-          static_cast<std::int64_t>(std::ceil(full_after_ms)) + 1000, std::move(done)};
+  Job job{RedisKey(rule, key), rule.algorithm, {}, std::move(done)};
+  switch (rule.algorithm) {
+    case Algorithm::kTokenBucket: {
+      // An idle bucket refills completely after capacity / rate seconds, so expiring it then
+      // loses nothing. One extra second of margin covers rounding.
+      const double full_after_ms = rule.limit / rule.refill_per_sec * 1000.0;
+      const auto ttl_ms = static_cast<std::int64_t>(std::ceil(full_after_ms)) + 1000;
+      job.args = {std::to_string(rule.limit), std::to_string(rule.refill_per_sec),
+                  std::to_string(requested), std::to_string(ttl_ms)};
+      break;
+    }
+    case Algorithm::kSlidingWindow:
+    case Algorithm::kFixedWindow:  // both scripts compute their own TTL from the window
+      job.args = {std::to_string(rule.limit), std::to_string(rule.window_ms), std::to_string(requested)};
+      break;
+  }
   {
     std::lock_guard lock(mu_);
     if (!stop_) {
@@ -111,16 +131,18 @@ bool HiredisBackend::EnsureConnected() {
   }
   redisSetTimeout(ctx_.get(), kRedisTimeout);
 
-  // Redis returns the script's SHA1; EVALSHA then sends 40 bytes instead of the whole script.
-  ReplyPtr r(static_cast<redisReply*>(
-      redisCommand(ctx_.get(), "SCRIPT LOAD %b", script_.data(), script_.size())));
-  if (!r || r->type != REDIS_REPLY_STRING) {
-    spdlog::error("SCRIPT LOAD failed on {}:{}", host_, port_);
-    ctx_.reset();
-    return false;
+  // Redis returns each script's SHA1; EVALSHA then sends 40 bytes instead of the whole script.
+  for (auto& s : scripts_) {
+    ReplyPtr r(static_cast<redisReply*>(
+        redisCommand(ctx_.get(), "SCRIPT LOAD %b", s.source.data(), s.source.size())));
+    if (!r || r->type != REDIS_REPLY_STRING) {
+      spdlog::error("SCRIPT LOAD {} failed on {}:{}", s.file, host_, port_);
+      ctx_.reset();
+      return false;
+    }
+    s.sha.assign(r->str, r->len);
   }
-  sha_.assign(r->str, r->len);
-  spdlog::info("connected to redis {}:{}, token_bucket.lua sha {}", host_, port_, sha_);
+  spdlog::info("connected to redis {}:{}, {} scripts loaded", host_, port_, scripts_.size());
   logged_down_ = false;
   return true;
 }
@@ -129,27 +151,24 @@ ScriptResult HiredisBackend::Execute(const Job& job) {
   ScriptResult out;
   out.redis_error = true;
   if (!EnsureConnected()) return out;
+  const Script& script = scripts_[Index(job.algorithm)];
 
-  const std::string capacity = std::to_string(job.capacity);
-  const std::string rate = std::to_string(job.refill_per_sec);
-  const std::string requested = std::to_string(job.requested);
-  const std::string ttl = std::to_string(job.ttl_ms);
-
-  // EVALSHA <sha> 1 <key> capacity rate requested ttl  (see lua/token_bucket.lua)
-  auto call = [&](const char* cmd, const std::string& body) {
-    std::array<const char*, 8> argv{cmd,           body.c_str(), "1",
-                                    job.redis_key.c_str(), capacity.c_str(), rate.c_str(),
-                                    requested.c_str(), ttl.c_str()};
-    std::array<std::size_t, 8> lens{std::strlen(cmd), body.size(), 1, job.redis_key.size(),
-                                    capacity.size(), rate.size(), requested.size(), ttl.size()};
+  // EVALSHA <sha> 1 <key> <args...>
+  auto call = [&](std::string_view cmd, const std::string& body) {
+    std::vector<const char*> argv{cmd.data(), body.c_str(), "1", job.redis_key.c_str()};
+    std::vector<std::size_t> lens{cmd.size(), body.size(), 1, job.redis_key.size()};
+    for (const auto& a : job.args) {
+      argv.push_back(a.c_str());
+      lens.push_back(a.size());
+    }
     return ReplyPtr(static_cast<redisReply*>(
         redisCommandArgv(ctx_.get(), static_cast<int>(argv.size()), argv.data(), lens.data())));
   };
 
-  ReplyPtr r = call("EVALSHA", sha_);
+  ReplyPtr r = call("EVALSHA", script.sha);
   if (r && r->type == REDIS_REPLY_ERROR && std::string_view(r->str, r->len).starts_with("NOSCRIPT")) {
     // Script cache flushed or a fresh node: EVAL runs it and caches it again.
-    r = call("EVAL", script_);
+    r = call("EVAL", script.source);
   }
   if (!r) {  // I/O error or timeout: the connection is unusable, reconnect on the next call
     spdlog::error("redis {}:{} call failed: {}", host_, port_, ctx_->errstr);
@@ -157,7 +176,7 @@ ScriptResult HiredisBackend::Execute(const Job& job) {
     return out;
   }
   if (r->type != REDIS_REPLY_ARRAY || r->elements != 3) {
-    spdlog::error("token_bucket.lua bad reply: {}",
+    spdlog::error("{} bad reply: {}", script.file,
                   r->type == REDIS_REPLY_ERROR ? std::string(r->str, r->len) : "not a 3-element array");
     return out;
   }

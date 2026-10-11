@@ -24,6 +24,15 @@ TEST(RuleConfig, LoadsShippedExample) {
   ASSERT_EQ(rules.count("login_attempts"), 1u);
   EXPECT_TRUE(rules["login_attempts"].strict);
   EXPECT_EQ(rules["login_attempts"].algorithm, ratelimiter::Algorithm::kSlidingWindow);
+  ASSERT_EQ(rules.count("demo_fixed_window"), 1u);
+  EXPECT_EQ(rules["demo_fixed_window"].algorithm, ratelimiter::Algorithm::kFixedWindow);
+  EXPECT_EQ(rules["demo_fixed_window"].window_ms, 5000u);
+}
+
+TEST(RuleConfig, RejectsZeroWindow) {
+  auto p = WriteTemp("rl_zero_window.yaml",
+                     "rules:\n  bad:\n    algorithm: fixed_window\n    limit: 5\n    window_ms: 0\n");
+  EXPECT_THROW(ratelimiter::LoadRules(p), std::runtime_error);
 }
 
 TEST(RuleConfig, RejectsZeroLimit) {

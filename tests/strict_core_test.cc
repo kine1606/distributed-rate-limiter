@@ -28,8 +28,7 @@ class FakeBackend final : public RedisBackend {
 RuleTable Rules() {
   Rule open{.name = "open", .limit = 10, .refill_per_sec = 1, .failure_policy = FailurePolicy::kFailOpen};
   Rule closed{.name = "closed", .limit = 10, .refill_per_sec = 1, .failure_policy = FailurePolicy::kFailClosed};
-  Rule window{.name = "window", .algorithm = Algorithm::kSlidingWindow, .limit = 5};
-  return {{"open", open}, {"closed", closed}, {"window", window}};
+  return {{"open", open}, {"closed", closed}};
 }
 
 CheckResult RunCheck(StrictCore& core, std::string_view key, std::string_view rule, std::uint32_t cost = 1) {
@@ -77,14 +76,6 @@ TEST(StrictCore, UnknownRuleNeverReachesRedis) {
   const auto r = RunCheck(core, "user:1", "no_such_rule");
   EXPECT_FALSE(r.allowed);
   EXPECT_EQ(r.reason, Reason::kUnknownRule);
-  EXPECT_TRUE(redis.calls.empty());
-}
-
-TEST(StrictCore, SlidingWindowRuleIsNotServedYet) {
-  FakeBackend redis;
-  StrictCore core(redis, Rules());
-
-  EXPECT_EQ(RunCheck(core, "user:1", "window").reason, Reason::kUnknownRule);
   EXPECT_TRUE(redis.calls.empty());
 }
 

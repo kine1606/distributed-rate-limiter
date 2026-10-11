@@ -19,7 +19,7 @@ struct CheckRequest {
 enum class Reason : std::uint8_t {
   kAllowed,
   kRateLimited,   // bucket empty: retry after retry_after_ms
-  kUnknownRule,   // rule name not in the config (or its algorithm is not served yet)
+  kUnknownRule,   // rule name not in the config
   kUnavailable,   // Redis unreachable and the rule is fail_closed
 };
 
