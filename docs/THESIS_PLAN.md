@@ -1,14 +1,16 @@
-# Thesis plan (Oct 5 - Nov 20, 2026)
+# Thesis plan (Oct 12 to Dec 15, 2026)
 
-The full plan (scope decisions, week-by-week tasks, thesis chapters, risks, milestones) is in the
-shared planning doc. Weekly gates:
+The full plan (scope, risks, evaluation design) is in the shared planning doc. The day-to-day
+checklist with links to every module is [ROADMAP.md](ROADMAP.md).
 
 | Week | Dates | Focus | Gate |
 | --- | --- | --- | --- |
-| 1 | Oct 5-11 | Toolchain, Lua scripts, Redis Cluster compose | Both scripts pass edge-case tests |
-| 2 | Oct 12-18 | gRPC server, strict baseline | Baseline numbers saved |
-| 3 | Oct 19-25 | Lease fast path, batching | Lease throughput clearly above baseline |
-| 4 | Oct 26-Nov 1 | Reliability, metrics, hot reload | Kill Redis, see documented behavior |
-| 5 | Nov 2-8 | TSan/ASan, accuracy test, fault tests | All tests green; feature freeze Nov 8 |
-| 6 | Nov 9-15 | Final benchmarks, thesis chapters 4-6 | Full draft |
-| 7 | Nov 16-20 | Buffer, advisor feedback, slides | Delivered |
+| 1 | Oct 12-18 | Redis client spike, cluster, Lua scripts, proto v1 | Both scripts pass every edge case; proto v1 agreed |
+| 2 | Oct 19-25 | Strict engine end to end, baseline | Free customer stopped at exactly 200 via gRPC; baseline saved |
+| 3 | Oct 26-Nov 1 | Lease fast path, batching | Lease mode clearly faster than strict |
+| 4 | Nov 2-8 | Overage, request ID, deny cache, usage events | Request 2,001 gives three outcomes on three policies |
+| 5 | Nov 9-15 | Reliability, metrics, Chapter 3 | Kill Redis, observe documented behaviour |
+| 6 | Nov 16-22 | TSan/ASan, evaluation tests, freeze Nov 22 | All tests green |
+| 7 | Nov 23-29 | Benchmark matrix, profile, Chapter 4 | Matrix and flamegraph saved |
+| 8 | Nov 30-Dec 6 | Final numbers, Chapter 5 | Full draft by Dec 6 |
+| 9 | Dec 7-15 | Advisor feedback, slides, demo | Submit Dec 15 |

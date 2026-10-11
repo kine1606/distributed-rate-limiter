@@ -1,7 +1,7 @@
 # Claude Code project instructions
 
 Read `AGENTS.md` for the engineering rules (layer decoupling, modern C++, resilience, thread safety)
-and `docs/THESIS_PLAN.md` for the schedule. The spec summary is in `README.md`.
+and `docs/ROADMAP.md` for the week-by-week checklist. Each module folder has a `README.md` with its skeleton, build order and hints; read it before changing that module. The spec summary is in `README.md`.
 
 ## Subagents (`.agents/agents/`)
 

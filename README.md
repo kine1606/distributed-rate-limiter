@@ -5,30 +5,34 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: skeleton (Week 1 start).** The server runs end to end with an allow-all stub engine.
-The Lua scripts are contracts only; the Redis client, lease manager and reliability layers are
-built in the stages below.
+**Status: Week 1.** The server runs end to end with an allow-all stub engine. `lua/quota.lua` and
+`lua/token_bucket.lua` are implemented and tested against real Redis. **Start with
+[docs/ROADMAP.md](docs/ROADMAP.md)**: it is the week-by-week checklist, and every module folder has a
+`README.md` with a skeleton, build order and hints.
 
 ## Layout
 
 ```text
-proto/rate_limiter.proto      Check / CheckBatch API
-include/ratelimiter/          Public domain types and the RateLimiterCore interface (no gRPC/protobuf here)
-src/server/                   gRPC callback-API server (main.cc)
-src/config/                   YAML rule loader
-src/core/                     Engines (currently AllowAllCore stub)
-src/redis/                    RedisBackend interface; concrete async cluster client goes here
-src/lease/                    Local lease fast path (Week 3)
-src/reliability/              Circuit breaker, backpressure, failure policy (Week 4)
-src/metrics/                  Prometheus metrics (Week 4)
-lua/                          token_bucket.lua, sliding_window.lua (contracts now, logic in Week 1)
-config/rules.yaml             Example rules (hot-reload planned via SIGHUP)
-tests/                        GoogleTest; tests/lua for script tests against real Redis
-bench/                        Google Benchmark + load generator notes
-docker/                       Dockerfile and compose: 3-master Redis Cluster + 3 limiter instances
-scripts/                      build.sh, test.sh
-docs/                         DESIGN.md, THESIS_PLAN.md
-results/                      Raw benchmark output (git-ignored)
+proto/                  Check / CheckBatch API                         proto/README.md
+include/ratelimiter/    Domain types, RateLimiterCore (no gRPC here)
+src/server/             gRPC callback-API server                       src/server/README.md
+src/core/               Engines: Strict, Leased, Composite             src/core/README.md
+src/plan/               Customer plans, plan cache                     src/plan/README.md
+src/lease/              Local lease fast path, deny cache              src/lease/README.md
+src/redis/              Redis backend, script registry, batcher        src/redis/README.md
+src/usage/              Usage events                                   src/usage/README.md
+src/reliability/        Circuit breaker, retries, failure policy       src/reliability/README.md
+src/metrics/            Prometheus metrics, logging rules              src/metrics/README.md
+src/config/             YAML rules, SIGHUP reload                      src/config/README.md
+lua/                    quota.lua, token_bucket.lua                    lua/README.md
+config/rules.yaml       Rule templates
+tools/                  seed_plans, rlctl, usage_report, plots         tools/README.md
+tests/                  GoogleTest unit, script, integration, eval     tests/README.md
+bench/                  Google Benchmark, load generator               bench/README.md
+docker/                 Redis Cluster + limiter instances              docker/README.md
+examples/               Spring Boot demo gateway (bonus)               examples/gateway-springboot/README.md
+docs/                   ROADMAP, CUSTOMER_PLANS, DESIGN, EVALUATION, THESIS_PLAN, thesis/OUTLINE
+results/                Raw benchmark output (git-ignored)             results/README.md
 ```
 
 ## Build and test
@@ -70,10 +74,6 @@ Micro: `./build/release/bench/bench_core`. Load test: use [`ghz`](https://ghz.sh
 
 ## Build stages
 
-1. Lua + Redis correctness (scripts, cluster compose, script tests)
-2. gRPC server with direct Redis calls (strict-mode baseline)
-3. Local lease + batching
-4. Reliability and observability
-5. Benchmarks and the accuracy-bound test
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the nine-week plan (Oct 12 to Dec 15, 2026).
 
 Engineering rules for contributors and agents are in `AGENTS.md`.
