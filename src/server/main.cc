@@ -14,6 +14,8 @@
 #include <spdlog/spdlog.h>
 
 #include "config/rule_config.h"
+#include "core/allow_all_core.h"
+#include "core/leased_core.h"
 #include "core/strict_core.h"
 #include "rate_limiter.grpc.pb.h"
 #include "ratelimiter/core.h"
@@ -115,12 +117,15 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 
 }  // namespace
 
-// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [lua dir]
+// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [lua dir] [engine]
+//   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
+//   Redis; measures pure gRPC overhead)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
   const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6379";
   const std::string lua_dir = argc > 4 ? argv[4] : "lua";
+  const std::string engine = argc > 5 ? argv[5] : "leased";
 
   RuleTable rules;
   try {
@@ -145,7 +150,18 @@ int main(int argc, char** argv) {
   spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
 
   // Declared after `redis`, so it is destroyed first: the core never outlives its backend.
-  auto core = std::make_shared<StrictCore>(*redis, std::move(rules));
+  std::shared_ptr<RateLimiterCore> core;
+  if (engine == "leased") {
+    core = std::make_shared<LeasedCore>(*redis, std::move(rules));
+  } else if (engine == "strict") {
+    core = std::make_shared<StrictCore>(*redis, std::move(rules));
+  } else if (engine == "allow_all") {
+    core = std::make_shared<AllowAllCore>();
+  } else {
+    spdlog::critical("unknown engine '{}' (leased | strict | allow_all)", engine);
+    return 1;
+  }
+  spdlog::info("engine: {}", engine);
   RateLimiterService service(core);
 
   grpc::EnableDefaultHealthCheckService(true);
@@ -170,5 +186,6 @@ int main(int argc, char** argv) {
   server->GetHealthCheckService()->SetServingStatus(false);
   server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
   server->Wait();
+  redis.reset();  // stop Redis I/O while the core lives: an early refill may still be in flight
   return 0;
 }

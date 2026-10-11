@@ -94,10 +94,14 @@ add_library(rl_redis STATIC src/redis/hiredis_backend.cc)
 target_include_directories(rl_redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_redis PUBLIC rl_api ${RL_HIREDIS} spdlog::spdlog Threads::Threads)
 
+add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc)
+target_include_directories(rl_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(rl_engine PUBLIC rl_api Threads::Threads)
+
 # --- executables -----------------------------------------------------------------------
 add_executable(rate_limiter_server src/server/main.cc)
 target_include_directories(rate_limiter_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(rate_limiter_server PRIVATE rl_proto rl_api rl_config rl_redis spdlog::spdlog Threads::Threads)
+target_link_libraries(rate_limiter_server PRIVATE rl_proto rl_api rl_config rl_redis rl_engine spdlog::spdlog Threads::Threads)
 
 if(RL_BUILD_TESTS)
   enable_testing()

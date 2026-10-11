@@ -1,6 +1,6 @@
 # gRPC server
 
-> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server with `AllowAllCore`
+> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server; engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`
 
 ## What this module does
 

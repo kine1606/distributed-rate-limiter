@@ -1,6 +1,6 @@
 # Engines (`RateLimiterCore` implementations)
 
-> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `AllowAllCore` stub only
+> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `StrictCore` and `LeasedCore` done (`LeasedCore` is the server default and routes `strict: true` rules to `StrictCore`); `CompositeCore` not started
 
 ## What this module does
 
