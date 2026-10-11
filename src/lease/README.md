@@ -1,6 +1,6 @@
 # Lease fast path and deny cache
 
-> Week 3 (leases), Week 4 (deny cache) · Flow steps A5, A7, A8 · Status: not started
+> Week 3 (leases), Week 4 (deny cache) · Flow steps A5, A7, A8 · Status: `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean), single-flight + early refill + local deny live in `src/core/leased_core.cc`; fixed chunk (10% of limit), no adaptive sizing, waiter bound or eviction yet
 
 ## What this module does
 

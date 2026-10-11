@@ -8,7 +8,7 @@ service RateLimiter {
   rpc Check(CheckRequest) returns (CheckResponse);
 
   // Batched check; reduces per-RPC overhead for high-volume callers.
-  rpc CheckBatch(CheckBatchRequest) returns (CheckBatchResponse);+
+  rpc CheckBatch(CheckBatchRequest) returns (CheckBatchResponse);
 }
 
 message CheckRequest {

@@ -1,6 +1,6 @@
 # Redis client, backend and batcher
 
-> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: interface only (`redis_backend.h`)
+> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: `hiredis_backend.{h,cc}`: one connection, one worker thread, queued calls pipelined in batches of up to 1,024; no cluster support
 
 ## What this module does
 

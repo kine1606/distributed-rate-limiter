@@ -14,8 +14,18 @@ struct CheckRequest {
   std::uint32_t cost{1};
 };
 
+// Why a check ended the way it did. The gRPC layer maps kUnknownRule and kUnavailable to
+// error statuses; the other values travel in a normal response.
+enum class Reason : std::uint8_t {
+  kAllowed,
+  kRateLimited,   // bucket empty: retry after retry_after_ms
+  kUnknownRule,   // rule name not in the config
+  kUnavailable,   // Redis unreachable and the rule is fail_closed
+};
+
 struct CheckResult {
   bool allowed{false};
+  Reason reason{Reason::kAllowed};
   std::uint32_t remaining{0};
   std::uint32_t retry_after_ms{0};
   std::uint32_t limit{0};
