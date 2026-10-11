@@ -9,6 +9,15 @@
 
 namespace ratelimiter {
 
+// What a check answers when Redis could not be asked: the rule's failure policy.
+inline CheckResult RedisDownResult(const Rule& rule) {
+  CheckResult r;
+  r.allowed = rule.failure_policy == FailurePolicy::kFailOpen;
+  r.reason = r.allowed ? Reason::kAllowed : Reason::kUnavailable;
+  r.limit = rule.limit;
+  return r;
+}
+
 // One Redis script call per check: exact, and the baseline the lease engine is measured against.
 // The backend picks the script from the rule's algorithm.
 class StrictCore final : public RateLimiterCore {
@@ -17,7 +26,7 @@ class StrictCore final : public RateLimiterCore {
   StrictCore(RedisBackend& redis, RuleTable rules) : redis_(redis), rules_(std::move(rules)) {}
 
   void Check(const CheckRequest& request, CheckCallback done) override {
-    const auto it = rules_.find(std::string(request.rule));
+    const auto it = rules_.find(request.rule);
     if (it == rules_.end()) {
       CheckResult r;
       r.reason = Reason::kUnknownRule;
@@ -28,17 +37,16 @@ class StrictCore final : public RateLimiterCore {
 
     // Eval copies the key before returning, so request's string_views may die after this call.
     redis_.Eval(rule, request.key, request.cost, [&rule, done = std::move(done)](const ScriptResult& s) {
-      CheckResult r;
-      r.limit = rule.limit;
       if (s.redis_error) {
-        r.allowed = rule.failure_policy == FailurePolicy::kFailOpen;
-        r.reason = r.allowed ? Reason::kAllowed : Reason::kUnavailable;
-      } else {
-        r.allowed = s.allowed;
-        r.reason = s.allowed ? Reason::kAllowed : Reason::kRateLimited;
-        r.remaining = s.remaining;
-        r.retry_after_ms = s.retry_after_ms;
+        done(RedisDownResult(rule));
+        return;
       }
+      CheckResult r;
+      r.allowed = s.allowed;
+      r.reason = s.allowed ? Reason::kAllowed : Reason::kRateLimited;
+      r.limit = rule.limit;
+      r.remaining = s.remaining;
+      r.retry_after_ms = s.retry_after_ms;
       done(r);
     });
   }

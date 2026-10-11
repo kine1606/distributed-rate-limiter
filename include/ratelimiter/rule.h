@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace ratelimiter {
@@ -22,6 +24,12 @@ struct Rule {
   FailurePolicy failure_policy{FailurePolicy::kFailClosed};
 };
 
-using RuleTable = std::unordered_map<std::string, Rule>;
+// Transparent hash: a rule is found by the request's std::string_view without building a string.
+struct StringHash {
+  using is_transparent = void;
+  std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+};
+
+using RuleTable = std::unordered_map<std::string, Rule, StringHash, std::equal_to<>>;
 
 }  // namespace ratelimiter
