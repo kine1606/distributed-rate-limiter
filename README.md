@@ -55,8 +55,19 @@ you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scr
 ## Run
 
 ```bash
-./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml
+# args: [listen] [rules.yaml] [redis host:port] [token_bucket.lua]   (one plain Redis, not Cluster)
+./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:6379 lua/token_bucket.lua
 ```
+
+End-to-end demo (curl -> Python gateway on :8080 -> limiter -> Redis), starts Redis if needed:
+
+```bash
+sudo apt-get install -y libhiredis-dev   # once
+scripts/demo.sh
+```
+
+Gateway alone: `python3 examples/gateway-python/gateway.py`, then
+`curl -H 'X-User-Id: alice' localhost:8080/api/hello` (rule `demo`: 5 burst, 1/s; 429 after that).
 
 `SIGINT`/`SIGTERM` marks health NOT_SERVING and drains in-flight requests for up to 5 seconds.
 

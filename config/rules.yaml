@@ -13,3 +13,9 @@ rules:
     window_ms: 60000
     strict: true          # low volume, high accuracy: bypass leasing
     failure_policy: fail_closed
+
+  demo:                   # small bucket so a few curls through the demo gateway hit 429
+    algorithm: token_bucket
+    limit: 5              # 5 requests back to back
+    refill_per_sec: 1     # then 1 more per second
+    failure_policy: fail_closed

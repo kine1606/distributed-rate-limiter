@@ -9,13 +9,15 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
 #include "config/rule_config.h"
-#include "core/allow_all_core.h"
+#include "core/strict_core.h"
 #include "rate_limiter.grpc.pb.h"
 #include "ratelimiter/core.h"
+#include "redis/hiredis_backend.h"
 
 namespace {
 
@@ -51,6 +53,14 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       return reactor;
     }
     core_->Check(ToDomain(*req), [reactor, resp](const CheckResult& r) {
+      if (r.reason == Reason::kUnknownRule) {
+        reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"));
+        return;
+      }
+      if (r.reason == Reason::kUnavailable) {
+        reactor->Finish(grpc::Status(grpc::StatusCode::UNAVAILABLE, "rate limit store unavailable"));
+        return;
+      }
       Fill(r, resp);
       reactor->Finish(grpc::Status::OK);
     });
@@ -96,11 +106,21 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   std::shared_ptr<RateLimiterCore> core_;
 };
 
+// Splits "host:port"; the port defaults to 6379.
+std::pair<std::string, int> ParseHostPort(const std::string& addr) {
+  const auto colon = addr.rfind(':');
+  if (colon == std::string::npos) return {addr, 6379};
+  return {addr.substr(0, colon), std::stoi(addr.substr(colon + 1))};
+}
+
 }  // namespace
 
+// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [token_bucket.lua]
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
+  const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6379";
+  const std::string lua_path = argc > 4 ? argv[4] : "lua/token_bucket.lua";
 
   RuleTable rules;
   try {
@@ -114,7 +134,18 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
 
-  auto core = std::make_shared<AllowAllCore>();  // replaced by the real engine in later stages
+  std::unique_ptr<HiredisBackend> redis;
+  try {
+    const auto [host, port] = ParseHostPort(redis_addr);
+    redis = std::make_unique<HiredisBackend>(host, port, lua_path);
+  } catch (const std::exception& e) {
+    spdlog::critical("cannot set up redis backend: {}", e.what());
+    return 1;
+  }
+  spdlog::info("using redis at {} with {}", redis_addr, lua_path);
+
+  // Declared after `redis`, so it is destroyed first: the core never outlives its backend.
+  auto core = std::make_shared<StrictCore>(*redis, std::move(rules));
   RateLimiterService service(core);
 
   grpc::EnableDefaultHealthCheckService(true);

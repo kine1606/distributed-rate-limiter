@@ -27,6 +27,7 @@ class RedisBackend {
 
   // Runs the rule's Lua script atomically. `requested` is 1 for a direct strict check
   // and the chunk size for a lease refill (same script serves both).
+  // `key` is copied before Eval returns, so the caller's buffer may die right after.
   virtual void Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
                     ScriptCallback done) = 0;
 };
