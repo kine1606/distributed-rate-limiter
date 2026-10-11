@@ -16,6 +16,8 @@ namespace {
 
 constexpr timeval kRedisTimeout{0, 200'000};  // 200 ms for connect and for each command
 constexpr auto kReconnectBackoff = std::chrono::milliseconds(500);
+// Bounds one pipeline: ~1k scripts run in a few ms, far below kRedisTimeout even under overload.
+constexpr std::size_t kMaxBatch = 1024;
 
 // Indexed by Algorithm.
 constexpr std::array<const char*, 3> kScriptFiles{"token_bucket.lua", "sliding_window.lua", "fixed_window.lua"};
@@ -95,21 +97,26 @@ void HiredisBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t 
 
 void HiredisBackend::Run() {
   for (;;) {
-    std::unique_lock lock(mu_);
-    cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
-    if (stop_) {
-      std::deque<Job> rest = std::move(queue_);
-      lock.unlock();
-      ScriptResult err;
-      err.redis_error = true;
-      for (auto& job : rest) job.done(err);
-      return;
+    std::deque<Job> batch;
+    {
+      std::unique_lock lock(mu_);
+      cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+      if (stop_ || queue_.size() <= kMaxBatch) {
+        batch.swap(queue_);  // take everything queued: one lock per batch, not per call
+      } else {
+        const auto end = queue_.begin() + static_cast<std::ptrdiff_t>(kMaxBatch);
+        batch.assign(std::make_move_iterator(queue_.begin()), std::make_move_iterator(end));
+        queue_.erase(queue_.begin(), end);
+      }
+      if (stop_) {  // fail everything still queued; Eval now answers new calls inline
+        lock.unlock();
+        ScriptResult err;
+        err.redis_error = true;
+        for (auto& job : batch) job.done(err);
+        return;
+      }
     }
-    Job job = std::move(queue_.front());
-    queue_.pop_front();
-    lock.unlock();
-
-    job.done(Execute(job));
+    ExecuteBatch(batch);
   }
 }
 
@@ -147,44 +154,91 @@ bool HiredisBackend::EnsureConnected() {
   return true;
 }
 
-ScriptResult HiredisBackend::Execute(const Job& job) {
+// Builds "<cmd> <body> 1 <key> <args...>" (EVALSHA <sha> or EVAL <source>) and passes it to `send`.
+template <typename Send>
+auto WithArgv(const std::string& key, const std::vector<std::string>& args, std::string_view cmd,
+              const std::string& body, Send send) {
+  std::array<const char*, 8> argv{cmd.data(), body.c_str(), "1", key.c_str()};
+  std::array<std::size_t, 8> lens{cmd.size(), body.size(), 1, key.size()};
+  std::size_t n = 4;
+  for (const auto& a : args) {
+    argv[n] = a.c_str();
+    lens[n++] = a.size();
+  }
+  return send(static_cast<int>(n), argv.data(), lens.data());
+}
+
+ScriptResult HiredisBackend::Parse(const redisReply* r, const char* file) {
   ScriptResult out;
-  out.redis_error = true;
-  if (!EnsureConnected()) return out;
-  const Script& script = scripts_[Index(job.algorithm)];
-
-  // EVALSHA <sha> 1 <key> <args...>
-  auto call = [&](std::string_view cmd, const std::string& body) {
-    std::vector<const char*> argv{cmd.data(), body.c_str(), "1", job.redis_key.c_str()};
-    std::vector<std::size_t> lens{cmd.size(), body.size(), 1, job.redis_key.size()};
-    for (const auto& a : job.args) {
-      argv.push_back(a.c_str());
-      lens.push_back(a.size());
-    }
-    return ReplyPtr(static_cast<redisReply*>(
-        redisCommandArgv(ctx_.get(), static_cast<int>(argv.size()), argv.data(), lens.data())));
-  };
-
-  ReplyPtr r = call("EVALSHA", script.sha);
-  if (r && r->type == REDIS_REPLY_ERROR && std::string_view(r->str, r->len).starts_with("NOSCRIPT")) {
-    // Script cache flushed or a fresh node: EVAL runs it and caches it again.
-    r = call("EVAL", script.source);
-  }
-  if (!r) {  // I/O error or timeout: the connection is unusable, reconnect on the next call
-    spdlog::error("redis {}:{} call failed: {}", host_, port_, ctx_->errstr);
-    ctx_.reset();
-    return out;
-  }
   if (r->type != REDIS_REPLY_ARRAY || r->elements != 3) {
-    spdlog::error("{} bad reply: {}", script.file,
+    spdlog::error("{} bad reply: {}", file,
                   r->type == REDIS_REPLY_ERROR ? std::string(r->str, r->len) : "not a 3-element array");
+    out.redis_error = true;
     return out;
   }
-  out.redis_error = false;
   out.allowed = r->element[0]->integer == 1;
   out.remaining = static_cast<std::uint32_t>(r->element[1]->integer);
   out.retry_after_ms = static_cast<std::uint32_t>(r->element[2]->integer);
   return out;
+}
+
+void HiredisBackend::ExecuteBatch(std::deque<Job>& batch) {
+  ScriptResult err;
+  err.redis_error = true;
+  if (!EnsureConnected()) {
+    for (auto& job : batch) job.done(err);
+    return;
+  }
+
+  // Pipeline: buffer every call, then read the replies in order. The whole batch costs one round
+  // trip, so throughput no longer stops at 1 / RTT.
+  for (const auto& job : batch) {
+    WithArgv(job.redis_key, job.args, "EVALSHA", scripts_[Index(job.algorithm)].sha,
+             [&](int argc, const char** argv, const std::size_t* lens) {
+               return redisAppendCommandArgv(ctx_.get(), argc, argv, lens);
+             });
+  }
+  std::vector<Job*> noscript;
+  std::size_t i = 0;
+  for (; i < batch.size(); ++i) {
+    void* raw = nullptr;
+    if (redisGetReply(ctx_.get(), &raw) != REDIS_OK) break;
+    ReplyPtr r(static_cast<redisReply*>(raw));
+    if (r->type == REDIS_REPLY_ERROR && std::string_view(r->str, r->len).starts_with("NOSCRIPT")) {
+      noscript.push_back(&batch[i]);  // retried below, once the pipeline is drained
+      continue;
+    }
+    batch[i].done(Parse(r.get(), scripts_[Index(batch[i].algorithm)].file));
+  }
+  if (i < batch.size()) {  // I/O error or timeout: the connection is unusable, reconnect next batch
+    spdlog::error("redis {}:{} call failed: {}", host_, port_, ctx_->errstr);
+    ctx_.reset();
+    for (; i < batch.size(); ++i) batch[i].done(err);
+    for (Job* job : noscript) job->done(err);
+    return;
+  }
+
+  // Script cache flushed or a fresh node: EVAL runs the script and caches it again. Rare, so these
+  // go one at a time.
+  for (Job* job : noscript) {
+    if (!ctx_) {  // an earlier retry lost the connection; the next batch reconnects
+      job->done(err);
+      continue;
+    }
+    const Script& script = scripts_[Index(job->algorithm)];
+    ReplyPtr r(static_cast<redisReply*>(
+        WithArgv(job->redis_key, job->args, "EVAL", script.source,
+                 [&](int argc, const char** argv, const std::size_t* lens) {
+                   return redisCommandArgv(ctx_.get(), argc, argv, lens);
+                 })));
+    if (!r) {
+      spdlog::error("redis {}:{} call failed: {}", host_, port_, ctx_->errstr);
+      ctx_.reset();
+      job->done(err);
+      continue;
+    }
+    job->done(Parse(r.get(), script.file));
+  }
 }
 
 }  // namespace ratelimiter

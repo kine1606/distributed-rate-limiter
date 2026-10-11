@@ -14,13 +14,13 @@
 #include "redis/redis_backend.h"
 
 struct redisContext;
+struct redisReply;
 
 namespace ratelimiter {
 
-// Simplest working RedisBackend: one plain (non-cluster) Redis connection, owned by one worker
-// thread that runs the rule's Lua script for each queued call in order. Callers never block; the
-// callback runs on the worker thread. No pipelining or batching: correctness first, the batcher
-// replaces this in Week 3.
+// RedisBackend on one plain (non-cluster) Redis connection, owned by one worker thread. The worker
+// takes every queued call at once and pipelines them: one round trip per batch. Callers never
+// block; callbacks run on the worker thread.
 class HiredisBackend final : public RedisBackend {
  public:
   // `lua_dir` holds token_bucket.lua, sliding_window.lua and fixed_window.lua.
@@ -53,8 +53,9 @@ class HiredisBackend final : public RedisBackend {
   };
 
   void Run();
-  ScriptResult Execute(const Job& job);
+  void ExecuteBatch(std::deque<Job>& batch);
   bool EnsureConnected();
+  static ScriptResult Parse(const redisReply* r, const char* file);
 
   const std::string host_;
   const int port_;

@@ -3,6 +3,7 @@
 #include <hiredis/hiredis.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <future>
 #include <string>
@@ -88,6 +89,48 @@ TEST_F(HiredisBackendTest, RecoversWhenScriptCacheIsFlushed) {
   EXPECT_FALSE(r.redis_error);
   EXPECT_TRUE(r.allowed);
   EXPECT_EQ(r.remaining, 3u);
+}
+
+// Calls fired without waiting share pipelined batches; every reply must reach its own caller.
+// Two keys with different limits, interleaved: a reply delivered to the wrong caller shows up
+// as a wrong admitted count.
+TEST_F(HiredisBackendTest, PipelinedRepliesReachTheirOwnCallers) {
+  const Rule a{.name = "it_pipe_a", .limit = 300, .refill_per_sec = 0.001};
+  const Rule b{.name = "it_pipe_b", .limit = 700, .refill_per_sec = 0.001};
+  Admin("DEL " + RedisKey(a, "hp"));
+  Admin("DEL " + RedisKey(b, "hp"));
+
+  std::atomic<int> allowed_a{0}, allowed_b{0}, errors{0}, pending{2000};
+  std::promise<void> all_done;
+  auto count = [&](std::atomic<int>& allowed) {
+    return [&](const ScriptResult& r) {
+      if (r.redis_error) ++errors;
+      if (r.allowed) ++allowed;
+      if (--pending == 0) all_done.set_value();
+    };
+  };
+  for (int i = 0; i < 1000; ++i) {
+    backend_->Eval(a, "hp", 1, count(allowed_a));
+    backend_->Eval(b, "hp", 1, count(allowed_b));
+  }
+  all_done.get_future().get();
+  EXPECT_EQ(errors.load(), 0);
+  EXPECT_EQ(allowed_a.load(), 300);
+  EXPECT_EQ(allowed_b.load(), 700);
+}
+
+TEST_F(HiredisBackendTest, ScriptFlushDuringABurstIsRetriedWithEval) {
+  Admin("SCRIPT FLUSH");
+  std::atomic<int> errors{0}, pending{200};
+  std::promise<void> all_done;
+  for (int i = 0; i < 200; ++i) {
+    backend_->Eval(kFive, "hb4:" + std::to_string(i), 1, [&](const ScriptResult& r) {
+      if (r.redis_error) ++errors;
+      if (--pending == 0) all_done.set_value();
+    });
+  }
+  all_done.get_future().get();
+  EXPECT_EQ(errors.load(), 0);
 }
 
 TEST(HiredisBackendDown, UnreachableRedisReportsErrorNotDenial) {
