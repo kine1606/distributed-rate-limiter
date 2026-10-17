@@ -40,17 +40,18 @@ Status legend: `[x]` done, `[ ]` to do, `(bonus)` drop first if late.
 The goal of this week is a trustworthy storage layer and an agreed API. Everything later builds on
 these two, so they get tested hardest.
 
-- [ ] Redis client spike: async cluster, pipelined `EVALSHA`, connection pool. Decide and write the
+- [x] Redis client spike: async cluster, pipelined `EVALSHA`, connection pool. Decide and write the
       justification. See [src/redis/README.md](../src/redis/README.md#week-1-the-client-spike).
-- [ ] Bring up the 3-master Redis Cluster and check slot routing with hash-tagged keys, then add
+- [x] Bring up the 3-master Redis Cluster and check slot routing with hash-tagged keys, then add
       the development profile so WSL can reach it on ports 7001 to 7003.
       See [docker/README.md](../docker/README.md).
 - [x] `lua/quota.lua`: daily quota, UTC day from Redis `TIME`, stores `used`.
 - [x] `lua/token_bucket.lua`: burst bucket with a `requested` argument.
 - [x] `tests/lua_scripts_test.cc`: 13 cases against real Redis (rollover, upgrade, downgrade,
       cost greater than limit, expiry, concurrency).
-- [ ] Run the Lua tests on your machine against Docker Redis (`scripts/test.sh release`).
+- [x] Run the Lua tests on your machine against Docker Redis (`scripts/test.sh release`).
 - [ ] Proto v1: your redesign, then review. See [proto/README.md](../proto/README.md).
+      Drafted 2026-10-17 and tested through gRPC; review and tag `proto-v1` still to do.
 - [ ] Thesis: start Chapter 2 notes on token bucket, Redis Lua atomicity and Redis Cluster slots.
 
 Gate: both scripts pass every edge case on your machine; proto v1 agreed.

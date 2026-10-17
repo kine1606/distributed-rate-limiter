@@ -38,9 +38,52 @@ flowchart LR
 
 ## 3. Redis client choice (Week 1)
 
-> HINT: What you tested in the spike (async cluster, pipelining, pool), the measured calls/s for 1,
-> 4 and 8 threads, how it behaved when a master died, and the decision. If you fell back to hiredis,
-> say what redis-plus-plus lacked.
+**Decision:** the cluster backend (Week 2) uses redis-plus-plus `AsyncRedisCluster`. The existing
+`HiredisBackend` stays for single-node runs and as the measured baseline until the switch.
+
+**What was tested.** `src/redis/spike/spike_cluster_pipeline.cc` loads `token_bucket.lua` on every
+master, then keeps up to 1,000 `EVALSHA` calls in flight per sending thread against the 3-master
+dev cluster (`docker/docker-compose.dev.yml`), over 10,000 keys spread across all slots. Laptop,
+one run per cell, raw output in `results/2026-10-17_redis_client_spike/`.
+
+| Sending threads | pool 1 | pool 4 | pool 8 |
+| --- | --- | --- | --- |
+| 1 | 290,800 | 276,498 | 279,200 |
+| 4 | 354,470 | 316,394 | 311,878 |
+| 8 | 356,790 | 359,793 | 342,122 |
+
+Calls per second, all three masters together.
+
+**Reading.** Pipelining comes for free: issuing async calls without waiting already batches them on
+each node's connection, so one thread on one connection per master reaches 290k calls/s. The pool
+size does not matter, because every connection is driven by the client's single libuv event-loop
+thread. At about 360k calls/s that thread uses 90% of a core and each master about 105%, so this is
+the limit of the three masters on this laptop (about 120k script calls/s each), not of the client.
+Week 3's batcher therefore only needs to add bounding and metrics (src/redis/README.md, last hint).
+
+**When a master died** (`stop redis-2` mid-run, no replicas):
+
+| Time after the stop | What the client saw |
+| --- | --- |
+| 0 to 5 s | Only keys on the dead master fail (`Connection reset by peer`, `Server closed the connection`); the other two keep serving |
+| after `cluster-node-timeout` (5 s) | `cluster_state:fail`: every master answers `CLUSTERDOWN The cluster is down`, so healthy slots fail too |
+| after restart | Node rejoins with its slots but empty (no persistence): its keys get `NOSCRIPT` until `EVAL` reloads the script, and their counters restart from zero |
+
+That gives Week 5 its list: map connection errors and `CLUSTERDOWN` to `kUnavailable`; add replicas
+so a replica is promoted before the node timeout matters; decide whether to set
+`cluster-require-full-coverage no` so one lost master does not stop the other two; and keep the
+`NOSCRIPT` to `EVAL` fallback, because a restarted or promoted node has no scripts. A related finding
+from the Docker run: with the limiters' `redis` container stopped, each `HiredisBackend` reconnect
+blocks its only thread on DNS lookup for about 3.6 s (the hiredis connect timeout does not cover
+DNS), so fail-open checks answered `REASON_UNVERIFIED` 3.6 s late. Connects must not block the
+thread that answers calls.
+
+**Why not stay on hiredis.** The pipelining numbers would be similar; the difference is the
+cluster. hiredis would need our own slot map (`CLUSTER SLOTS`, CRC16 of the hash tag), one
+connection and event loop per master, `MOVED`/`ASK` handling and slot map refresh after a
+failover: all logic redis-plus-plus already implements and tests. The cost is a dependency that
+Ubuntu does not package, so `scripts/setup.sh` builds it from source (the Docker image will too,
+once the server links it).
 
 ## 4. Data model (Week 1, extended Week 4)
 
