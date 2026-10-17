@@ -16,11 +16,18 @@ x-limiter: &limiter
   volumes:
     - ../config:/etc/ratelimiter:ro
   depends_on:
-    redis-cluster-init:
-      condition: service_completed_successfully
+    redis: {condition: service_started}
+    redis-cluster-init: {condition: service_completed_successfully}
   networks: [rl]
 
 services:
+  # shortcut: the limiters share this one plain Redis because HiredisBackend cannot talk to a
+  # cluster; point them at redis-1:6379 once the Week 2 cluster backend exists, then drop this.
+  redis:
+    image: redis:7
+    command: redis-server --appendonly no --save ""
+    networks: [rl]
+
   redis-1: *redis-node
   redis-2: *redis-node
   redis-3: *redis-node
@@ -32,9 +39,9 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        sleep 2
-        redis-cli --cluster create redis-1:6379 redis-2:6379 redis-3:6379 \
-          --cluster-replicas 0 --cluster-yes
+        for h in redis-1 redis-2 redis-3; do until redis-cli -h $$h ping >/dev/null 2>&1; do sleep 0.2; done; done
+        redis-cli -h redis-1 cluster info | grep -q cluster_state:ok ||
+          redis-cli --cluster create redis-1:6379 redis-2:6379 redis-3:6379 --cluster-replicas 0 --cluster-yes
 
   limiter-1:
     <<: *limiter
