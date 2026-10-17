@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: config, core stub and 13 Lua tests passing
+> Every week · Status: 60 tests passing (24 Lua script tests against Redis on 127.0.0.1:6380)
 
 ## How tests are organised
 
@@ -10,7 +10,7 @@ run before a push or at a weekly gate.
 | Level | What it proves | Needs | Run with |
 | --- | --- | --- | --- |
 | Unit | One class is correct (parser, key builder, chunk policy, breaker) | nothing | `ctest -L unit` |
-| Script | Lua scripts are correct against real Redis | one Redis on 6379 | `ctest -L redis` |
+| Script | Lua scripts are correct against real Redis | one plain Redis on 6380 | `ctest -L redis` |
 | Integration | The server, Redis Cluster and engines work together | Docker cluster | `ctest -L integration` |
 | Evaluation | The thesis claims hold (accuracy, flood, faults) | Docker, several instances | scripts in `tests/eval/` |
 

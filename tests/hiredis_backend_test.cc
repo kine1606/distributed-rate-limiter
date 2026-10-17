@@ -1,5 +1,5 @@
 // HiredisBackend against a REAL Redis. Address: env RL_TEST_REDIS="host:port"
-// (default 127.0.0.1:6379). Skipped, not failed, when Redis is unreachable.
+// (default 127.0.0.1:6380). Skipped, not failed, when Redis is unreachable.
 #include <hiredis/hiredis.h>
 #include <gtest/gtest.h>
 
@@ -41,7 +41,7 @@ class HiredisBackendTest : public ::testing::Test {
   }
 
   std::string host_ = "127.0.0.1";
-  int port_ = 6379;
+  int port_ = 6380;
   redisContext* admin_ = nullptr;
   std::unique_ptr<HiredisBackend> backend_;
 };

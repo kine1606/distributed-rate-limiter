@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end demo: curl -> gateway (HTTP :8080) -> rate_limiter_server (gRPC :50051) -> Redis (:6379).
+# End-to-end demo: curl -> gateway (HTTP :8080) -> rate_limiter_server (gRPC :50051) -> Redis (:6380).
 # Starts Redis if it is not already running, the limiter and the gateway, sends a burst of requests,
 # then stops what it started.  Usage: scripts/demo.sh [build preset, default release]
 set -euo pipefail
@@ -14,7 +14,7 @@ cleanup() {
   rm -rf "$tmp"
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
-  if [[ $started_redis == 1 ]]; then redis-cli -p 6379 shutdown nosave >/dev/null 2>&1 || true; fi
+  if [[ $started_redis == 1 ]]; then redis-cli -p 6380 shutdown nosave >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
 
@@ -29,14 +29,14 @@ wait_port() {  # wait_port <port> <name>
 
 [[ -x $server ]] || scripts/build.sh "$preset"
 
-if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
-  redis-server --port 6379 --save "" --appendonly no --daemonize yes >/dev/null
+if ! redis-cli -p 6380 ping >/dev/null 2>&1; then
+  redis-server --port 6380 --save "" --appendonly no --daemonize yes >/dev/null
   started_redis=1
 fi
-wait_port 6379 redis
-redis-cli -p 6379 --scan --pattern '{user:*}:*' | xargs -r redis-cli -p 6379 del >/dev/null  # fresh buckets
+wait_port 6380 redis
+redis-cli -p 6380 --scan --pattern '{user:*}:*' | xargs -r redis-cli -p 6380 del >/dev/null  # fresh buckets
 
-"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:6379 lua &
+"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:6380 lua &
 pids+=($!)
 wait_port 50051 rate_limiter_server
 
@@ -62,6 +62,6 @@ sleep 1.1
 hit alice /api/hello
 hit alice /api/hello
 echo "== what Redis holds"
-for k in $(redis-cli -p 6379 --scan --pattern '{user:*}:*'); do
-  echo "$k  $(redis-cli -p 6379 hgetall "$k" | paste -sd' ')"
+for k in $(redis-cli -p 6380 --scan --pattern '{user:*}:*'); do
+  echo "$k  $(redis-cli -p 6380 hgetall "$k" | paste -sd' ')"
 done

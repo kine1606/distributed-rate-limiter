@@ -121,7 +121,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
-  const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6379";
+  const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6380";
   const std::string lua_dir = argc > 4 ? argv[4] : "lua";
   const std::string engine = argc > 5 ? argv[5] : "leased";
 

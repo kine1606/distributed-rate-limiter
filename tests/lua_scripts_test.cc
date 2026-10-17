@@ -1,5 +1,5 @@
 // Lua script tests against a REAL Redis (no mocks: the whole point is Redis semantics).
-// Redis address: env RL_TEST_REDIS="host:port" (default 127.0.0.1:6379).
+// Redis address: env RL_TEST_REDIS="host:port" (default 127.0.0.1:6380).
 // If Redis is unreachable the tests are skipped, not failed.
 #include <hiredis/hiredis.h>
 #include <gtest/gtest.h>
@@ -33,7 +33,7 @@ class LuaTest : public ::testing::Test {
  protected:
   void SetUp() override {
     std::string host = "127.0.0.1";
-    int port = 6379;
+    int port = 6380;
     if (const char* e = std::getenv("RL_TEST_REDIS")) {
       std::string a = e;
       auto c = a.find(':');
@@ -215,7 +215,7 @@ TEST_F(LuaTest, ConcurrentCallersNeverOverAdmit) {
   std::vector<std::thread> ts;
   for (int t = 0; t < 8; ++t) {
     ts.emplace_back([&] {
-      redisContext* c = redisConnect("127.0.0.1", 6379);
+      redisContext* c = redisConnect("127.0.0.1", 6380);
       if (const char* e = std::getenv("RL_TEST_REDIS")) {
         redisFree(c);
         std::string a = e;
