@@ -1,6 +1,6 @@
 # Customer plan phase (Part B)
 
-> Built across Weeks 2, 4 and 5 · Flow steps B1 to B9 on the Quota Service Flow page · Status: Lua side of B5 to B7 done
+> Built across Weeks 2, 4 and 5 · Flow steps B1 to B9 on the Quota Service Flow page · Status: B1 done (missing plan = Free, seeding); B2 limit and remaining from the plan through gRPC; Lua side of B5 to B7 done
 
 ## What this phase is
 
@@ -73,7 +73,7 @@ preset. Nothing in the limiter changes; the next request for that customer reads
 - **Limiter:** a customer with no plan hash is treated as Free, so even a request that races the
   sign-up is safe.
 - **You build:** `rlctl create` (Week 4), `seed_plans` for bulk test data (Week 2).
-- **Test:** unknown customer gets Free limits (`plan_test.cc`, Week 2).
+- **Test:** done: unknown customer gets Free limits (`plan_test.cc`, `StrictCoreTest.CustomerWithoutPlanGetsFree`).
 
 ### B2. Daily usage and visibility
 
@@ -82,7 +82,8 @@ Each allowed request increments `used` in `{cust:N}:quota` through `quota.lua`. 
 
 - **Limiter:** fills `remaining`, `limit`, `reset_after_ms` from the script result.
 - **You build:** response mapping in `src/server/convert.h` (Weeks 2 and 4).
-- **Test:** values in the response match `HGETALL {cust:N}:quota` after N calls.
+- **Test:** values in the response match `HGETALL {cust:N}:quota` after N calls. Partly done:
+  `GrpcQuotaIT` checks `limit`, `remaining` and `reset_after_ms` against the plan and `used`.
 
 ### B3. Warning at 80% (described, not built)
 

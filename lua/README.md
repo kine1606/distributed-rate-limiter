@@ -41,7 +41,7 @@ Cluster routing or makes results wrong under load.
 
 ```text
 token_bucket.lua
-  KEYS[1] = {cust:42}:tb
+  KEYS[1] = {cust:42}:burst:tb          (src/redis/keys.h builds every key)
   ARGV    = capacity, refill_per_sec, requested, ttl_ms
   returns   { allowed 0|1, remaining, retry_after_ms }
 
@@ -51,7 +51,7 @@ fixed_window.lua / sliding_window.lua
   returns   { allowed 0|1, remaining, retry_after_ms }   (TTL computed inside from the window)
 
 quota.lua
-  KEYS[1] = {cust:42}:quota
+  KEYS[1] = {cust:42}:daily_quota:q
   ARGV    = daily_limit, cost
   returns   { allowed 0|1, used, remaining, reset_after_ms }
 ```
@@ -62,7 +62,7 @@ Extend `quota.lua` instead of writing a second script, so one call still makes o
 
 ```text
 quota.lua (v2)
-  KEYS[1] = {cust:42}:quota
+  KEYS[1] = {cust:42}:daily_quota:q
   ARGV    = daily_limit, cost, policy ("hard" | "grace" | "cap"), extra
             -- extra = grace amount (e.g. 10% of limit) or overage cap
   state     HASH { day, used, overage_used }
@@ -109,7 +109,7 @@ not burn part of a customer's burst.
 
 ```text
 return_lease.lua
-  KEYS[1] = {cust:42}:tb
+  KEYS[1] = {cust:42}:burst:tb          (src/redis/keys.h builds every key)
   ARGV    = capacity, tokens_to_return
   effect    tokens = min(capacity * 1000, tokens + returned * 1000)
 ```

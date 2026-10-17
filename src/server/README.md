@@ -1,6 +1,6 @@
 # gRPC server
 
-> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server; engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`; proto v1 conversions and request validation in `convert.h`
+> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server in `service.h` (header-only, run in-process by `tests/grpc_quota_it.cc`); `main.cc` builds `RedisPPBackend` (cluster, default 127.0.0.1:7001), `PlanStore` and the engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`; proto v1 conversions and request validation in `convert.h`
 
 ## What this module does
 
@@ -21,7 +21,7 @@ SIGINT/SIGTERM drain for up to 5 seconds.
 | File | Change | Week |
 | --- | --- | --- |
 | `main.cc` | Build `RedisBackend`, `PlanStore`, `StrictCore`; flags for Redis address | 2 |
-| `service.{h,cc}` | Move `RateLimiterService` out of `main.cc` once it grows | 2 |
+| `service.h` | done: `RateLimiterService`, header-only so the gRPC test runs it in-process | 2 |
 | `convert.h` | done: `Invalid`, `ToDomain`, `Fill`, `ToProto(Reason)`; tested in `tests/convert_test.cc` | 2, 4 |
 | `server_options.h` | Thread count, max in-flight, addresses, from flags or env | 5 |
 
@@ -50,7 +50,7 @@ grpc::ServerUnaryReactor* RateLimiterService::Check(grpc::CallbackServerContext*
 
 ## Build it in this order
 
-1. **Week 2:** add command-line flags (`--listen`, `--redis`, `--rules`, `--lua-dir`) and build
+1. **Week 2:** (flags skipped: the positional arguments are enough so far) add command-line flags (`--listen`, `--redis`, `--rules`, `--lua-dir`) and build
    `StrictCore` instead of `AllowAllCore`. Keep `AllowAllCore` available behind a flag; it is
    useful to measure pure gRPC overhead in the benchmark.
 2. **Week 2:** move the conversions into `convert.h` and unit-test them, especially the `Reason`
@@ -78,6 +78,6 @@ grpc::ServerUnaryReactor* RateLimiterService::Check(grpc::CallbackServerContext*
 
 ## Done when
 
-- [ ] Week 2: server runs with `StrictCore` against the Docker cluster; `grpcurl` call works.
+- [x] Week 2: server runs with `StrictCore` against the Docker cluster; `grpcurl` call works.
 - [ ] Week 4: all proto v1 fields filled and tested through a real gRPC client.
 - [ ] Week 5: shutdown drains without dropping in-flight calls (test with load running).

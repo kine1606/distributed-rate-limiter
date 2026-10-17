@@ -1,6 +1,6 @@
 # Plans
 
-> Week 2 (PlanStore), Week 4 (PlanCache and invalidation) · Flow steps A4, B1, B5, B6, B9 · Status: not started
+> Week 2 (PlanStore), Week 4 (PlanCache and invalidation) · Flow steps A4, B1, B5, B6, B9 · Status: Week 2 done: `plan.h` (`Plan`, `ParsePlan` with Free defaults) and `plan_store.h` (`HGETALL` per check); cache not started
 
 ## What this module does
 
@@ -91,6 +91,6 @@ class PlanCache {
 
 ## Done when
 
-- [ ] Week 2: strict engine reads the plan; Free default tested.
+- [x] Week 2: strict engine reads the plan; Free default tested (`plan_test.cc`, `strict_core_test.cc`).
 - [ ] Week 4: upgrade applies on all instances within one second (integration test).
 - [ ] Week 4: cache hit ratio exported as a metric.

@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 60 tests passing (24 Lua script tests against Redis on 127.0.0.1:6380)
+> Every week · Status: 76 tests passing: 44 unit, 24 script (plain Redis on 127.0.0.1:6380), 8 integration (dev cluster on 127.0.0.1:7001); one executable per level
 
 ## How tests are organised
 
@@ -11,23 +11,23 @@ run before a push or at a weekly gate.
 | --- | --- | --- | --- |
 | Unit | One class is correct (parser, key builder, chunk policy, breaker) | nothing | `ctest -L unit` |
 | Script | Lua scripts are correct against real Redis | one plain Redis on 6380 | `ctest -L redis` |
-| Integration | The server, Redis Cluster and engines work together | Docker cluster | `ctest -L integration` |
+| Integration | The server, Redis Cluster and engines work together | dev cluster on 7001 (`RL_TEST_CLUSTER`) | `ctest -L integration` |
 | Evaluation | The thesis claims hold (accuracy, flood, faults) | Docker, several instances | scripts in `tests/eval/` |
 
-Hint: add `LABELS` to each test in `tests/CMakeLists.txt` with `set_tests_properties`, so you can
-run one level at a time. Script and integration tests skip, not fail, when Redis is unreachable
-(`GTEST_SKIP()`), the way `lua_scripts_test.cc` already does.
+Each level is its own executable (`rl_unit_tests`, `rl_redis_tests`, `rl_integration_tests`) with
+a ctest label. Script and integration tests skip, not fail, when Redis is unreachable
+(`GTEST_SKIP()`).
 
 ## Files to create
 
 | File | Level | Week | Covers |
 | --- | --- | --- | --- |
-| `lua_scripts_test.cc` | script | 1 | done: 13 cases |
-| `keys_test.cc` | unit | 2 | Hash-tag key builders |
-| `plan_test.cc` | unit | 2 | Plan parsing, Free default, broken hash |
-| `strict_core_test.cc` | unit | 2 | `StrictCore` on `FakeBackend` |
-| `redis_backend_it.cc` | integration | 2 | Backend against the cluster, `NOSCRIPT` fallback |
-| `grpc_quota_it.cc` | integration | 2 | Week 2 gate: exactly 200 through gRPC |
+| `lua_scripts_test.cc` | script | 1 | done: 24 cases |
+| `keys_test.cc` | unit | 2 | done: hash-tag key builders |
+| `plan_test.cc` | unit | 2 | done: plan parsing, Free default, broken hash |
+| `strict_core_test.cc` | unit | 2 | done: `StrictCore` on `FakeBackend`, plan rules |
+| `redis_backend_it.cc` | integration | 2 | done: backend against the cluster, `NOSCRIPT` fallback |
+| `grpc_quota_it.cc` | integration | 2 | done: Week 2 gate, exactly 200 through gRPC |
 | `lease_test.cc` | unit + TSan | 3 | `TryTake`, single-flight, chunk policy |
 | `composite_core_test.cc` | unit | 4 | Every branch of the A2 decision tree |
 | `overage_test.cc` | script | 4 | Request 2,001 on three policies |
@@ -43,6 +43,12 @@ scripts/test.sh asan     # use-after-free, leaks: catches dangling string_views
 
 Hint: TSan slows code 5 to 15 times, so give timing-based tests generous timeouts under TSan, or
 skip pure timing assertions there. Never "fix" a TSan report by adding a sleep.
+
+Two TSan facts on this setup. The test binaries run under `setarch -R` (set in `tests/CMakeLists.txt`),
+because GCC 13's TSan aborts with "unexpected memory mapping" under the WSL2 kernel's address
+randomisation. And `grpc_quota_it.cc` skips itself under TSan: Ubuntu's gRPC is not instrumented,
+so its arena allocator shows up as a race in every call (861 reports, none with both sides in our
+code). The backend integration tests, which have no gRPC, run under TSan and are clean.
 
 ## Writing a good test here
 

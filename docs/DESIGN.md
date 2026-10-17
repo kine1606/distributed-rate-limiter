@@ -38,8 +38,9 @@ flowchart LR
 
 ## 3. Redis client choice (Week 1)
 
-**Decision:** the cluster backend (Week 2) uses redis-plus-plus `AsyncRedisCluster`. The existing
-`HiredisBackend` stays for single-node runs and as the measured baseline until the switch.
+**Decision:** the backend uses redis-plus-plus `AsyncRedisCluster`. Week 2 made the switch:
+`RedisPPBackend` (`src/redis/redispp_backend.cc`) replaced the single-node `HiredisBackend`, which
+measured the Week 1 numbers and remains in the git history.
 
 **What was tested.** `src/redis/spike/spike_cluster_pipeline.cc` loads `token_bucket.lua` on every
 master, then keeps up to 1,000 `EVALSHA` calls in flight per sending thread against the 3-master
@@ -82,23 +83,58 @@ thread that answers calls.
 cluster. hiredis would need our own slot map (`CLUSTER SLOTS`, CRC16 of the hash tag), one
 connection and event loop per master, `MOVED`/`ASK` handling and slot map refresh after a
 failover: all logic redis-plus-plus already implements and tests. The cost is a dependency that
-Ubuntu does not package, so `scripts/setup.sh` builds it from source (the Docker image will too,
-once the server links it).
+Ubuntu does not package, so `scripts/setup.sh` and the Docker image build it from source.
+
+**What the implementation had to work around (Week 2).** The cluster client has callback versions
+of ordinary commands (`HGETALL`, used for plans) but only future versions of `EVALSHA` and `EVAL`,
+and waiting on a future would need a thread per call. Scripts therefore go through
+`cluster.redis(key)`, a handle to the node that owns the key's slot, which does have callback
+`EVALSHA`. Two consequences. First, the slot map loads in the background, so the backend makes one
+routed call at startup and waits for it (at most 2 s) before serving. Second, a script sent to a
+node that lost the slot gets `MOVED` as an error instead of a redirect; after a failover, scripts on
+the moved slots fail (the rule's failure policy answers) until the client refreshes its slot map,
+every 10 s or on the next routed command that sees `MOVED`. Week 5's failover tests decide whether
+that window needs a retry through a routed command. The script SHA1 is computed locally (OpenSSL),
+so no `SCRIPT LOAD` is needed: the first `EVALSHA` on a node without the script gets `NOSCRIPT`, and
+the backend sends `EVAL` once, which runs the script and caches it there.
 
 ## 4. Data model (Week 1, extended Week 4)
 
-| Key | Type and fields | Written by | Expires |
+| Key (example) | Type and fields | Written by | Expires |
 | --- | --- | --- | --- |
-| `{cust:N}:plan` | HASH plan, daily, burst, refill, overage, extra, failure | `rlctl` | never |
-| `{cust:N}:quota` | HASH day, used, overage_used | `quota.lua` | end of day + 1 h |
-| `{cust:N}:tb` | HASH tokens (milli), last_refill_ms | `token_bucket.lua` | TTL after last use |
-| `{cust:N}:req:<id>` | STRING encoded result | `quota.lua` | 5 min |
+| `{cust:42}:plan` | HASH plan, daily, burst, refill, overage, extra, failure | `tools/seed_plans.sh`, later `rlctl` | never |
+| `{cust:42}:daily_quota:q` | HASH day, used (overage_used from Week 4) | `quota.lua` | end of the UTC day + 1 h |
+| `{cust:42}:burst:tb` | HASH tokens (milli-tokens), last_refill_ms | `token_bucket.lua` | when the bucket would be full again, + 1 s |
+| `{user:42}:demo_sliding_window:sw` | HASH current and previous window counts | `sliding_window.lua` | from the window length |
+| `{user:42}:demo_fixed_window:fw` | counter of the current window | `fixed_window.lua` | end of the window |
+| `{cust:42}:req:<id>` | STRING encoded result | `quota.lua` (Week 4) | 5 min |
 
-> HINT: Explain the hash tag (all keys of a customer in one slot, so one script can use several of
-> them), why `used` instead of `remaining` (plan changes never rewrite history), why milli-tokens
-> (no float drift), and why Redis `TIME` instead of the caller's clock (one clock for all
-> instances; clock skew cannot corrupt state; the cost is that time comes from one node, which is
-> acceptable because each key lives on one node anyway).
+Every key is built in `src/redis/keys.h` as `{<entity>}:<rule>:<algorithm>`, except the plan.
+
+**The hash tag is the limited entity.** Redis Cluster places a key by the part in braces only, so
+every key of one customer lives on one master, and a single script may touch several of them
+atomically (Week 4's deduplication needs the quota and request keys together). Gateways send the
+entity id, never a key (proto question 1), so the format exists in one place. The rule name lets
+several rules of one algorithm coexist for a customer, and the algorithm suffix means a rule whose
+algorithm changes starts fresh instead of misreading state of another shape.
+
+**`used`, not `remaining`.** The quota hash stores what was consumed, and the limit arrives as an
+argument on every call, read from the current plan. A plan change therefore rewrites nothing: an
+upgrade from 200 to 2,000 turns `used` 200 into 1,800 remaining on the next request (step B5), and a
+downgrade below today's usage denies with remaining 0, never a negative number (step B6).
+
+**Milli-tokens.** The token bucket stores integers in thousandths of a token. A refill adds
+elapsed milliseconds × rate milli-tokens, an exact integer, so millions of refills accumulate no
+floating-point drift.
+
+**Redis `TIME`, not the limiter's clock.** Each script reads the clock of the node that owns the
+key, so every limiter instance agrees on "now" and on the UTC day, and a limiter with a skewed clock
+cannot corrupt state. The cost, time from one node, is acceptable because each key lives on exactly
+one node anyway. A failover to a replica whose clock is behind is handled by clamping elapsed time
+at zero, so tokens never go negative.
+
+**A TTL on every write.** Idle buckets and yesterday's quota expire on their own, so memory follows
+the active customers, not every customer ever seen.
 
 ## 5. Quota and overage logic (Week 4)
 
@@ -138,11 +174,38 @@ once the server links it).
 
 ## 9. Capacity math for 1M checks/s (Week 2 estimate, Week 8 final)
 
-> HINT: Per-instance throughput T (measured), lease hit ratio h (measured), checks per refill c.
-> Instances = 1,000,000 / T. Redis calls/s = 1,000,000 × (strict share + (1 − h) for leased
-> traffic) / batch factor. Masters needed = Redis calls/s ÷ measured calls/s per master. Write every
-> assumption: same per-instance number on server hardware, network RTT, linear scaling as measured
-> from 1 to 4 instances.
+Week 2 estimate. Every input is a laptop measurement with the load generator on the same machine;
+the outputs are **estimates, not measurements**.
+
+| Input | Value | Source |
+| --- | --- | --- |
+| Strict quota checks, 1 instance, where the curve flattens | 25,301 checks/s at p99 84.8 ms (c = 1,024; range 21,616 to 27,840) | Week 2 baseline, median of 5 |
+| Strict quota checks at a usable latency | 10,024 checks/s at p99 10.5 ms (c = 64) | Week 2 ramp, 1 run |
+| gRPC alone (`allow_all`), same load | 34,362 checks/s (load-generator bound) | Week 2 baseline, median of 5 |
+| Leased burst checks, 1 instance | at least 31,461 checks/s (load-generator bound, within 3% of `allow_all`) | 2026-10-12, 1 run |
+| Script calls one Redis master absorbs | about 120,000/s | Week 1 spike |
+| Redis calls per strict check | 2 today (plan read, quota script); 1 with the Week 4 plan cache | design |
+| Redis calls per leased check | 1 per refill; a refill carries a chunk of 10% of the limit | design |
+
+Estimate for 1,000,000 checks/s:
+
+- **All checks strict (daily quota):** 2,000,000 Redis calls/s today, so about 17 masters at 120k
+  each; about 9 once the plan cache removes the plan read. Instances: 1,000,000 / 25,301 ≈
+  40 at the flattening point (p99 around 85 ms), or about 100 at p99 10 ms. The
+  instance count, not Redis, is the cost of strict mode.
+- **All checks leased (burst):** Redis sees refills only. With `api_default` (limit 1,000, chunk
+  100) a refill serves up to 100 checks, so about 10,000 refills/s: a fraction of one master.
+  Instances: 1,000,000 / 31,461 ≈ 32, an upper bound on the count because 31,461 is a lower bound on
+  what one instance does (ghz, not the limiter, was the limit).
+- **One API call = burst (leased) + quota (strict), as CompositeCore will do:** the quota half
+  dominates. Redis needs about 9 masters (with the plan cache); the instance count follows the
+  strict path until Week 3 and 4 measure the composite.
+
+Assumptions, each to be checked: per-instance throughput on server hardware equals the laptop's;
+throughput scales linearly with instances (measured from 1 to 4 instances in Week 7); keys spread
+evenly over slots (a single hot customer stays on one master: the lease protects it); the Docker
+network's sub-millisecond RTT. A real network adds latency, which leases hide and strict checks do
+not.
 
 ## 10. Tuning guide (Week 7)
 

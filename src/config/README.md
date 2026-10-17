@@ -1,6 +1,6 @@
 # Rule config and hot reload
 
-> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: YAML loader with tests
+> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: Week 2 schema done: `algorithm: quota` and `limit_from: plan.daily | plan.burst`, validated with clear errors
 
 ## What this module does
 
@@ -10,31 +10,34 @@ apart means a sign-up or an upgrade never needs a config change or a restart.
 
 ## Schema after Week 2
 
+As built (`config/rules.yaml` has the full file):
+
 ```yaml
 rules:
   daily_quota:              # checked strictly against Redis on every request
     algorithm: quota
-    strict: true
-    limit_from: plan.daily  # numbers come from the customer's plan
+    limit_from: plan.daily  # the limit comes from the customer's plan hash
+    strict: true            # required for quota rules
   burst:
     algorithm: token_bucket
-    strict: false           # served from the local lease
-    limit_from: plan.burst
-    refill_from: plan.refill
-    lease:
-      min_chunk: 8
-      max_fraction: 0.10
-  login_attempts:           # a fixed rule not tied to a plan, kept as a strict example
-    algorithm: token_bucket
-    strict: true
+    limit_from: plan.burst  # capacity plan.burst, refill plan.refill per second
+    strict: true            # per-customer leases need the plan cache (Week 4)
+  login_attempts:           # a fixed rule not tied to a plan
+    algorithm: sliding_window
     limit: 5
-    refill_per_sec: 0.083
+    window_ms: 60000
+    strict: true
     failure_policy: fail_closed
 ```
 
-Algorithms: `token_bucket` (needs `refill_per_sec`), `fixed_window` and `sliding_window` (need
-`window_ms`). All three are kept for the algorithm benchmark. If you add `kQuota`, append it to the
-`Algorithm` enum: its values index the script and key-suffix tables in `src/redis/hiredis_backend.cc`.
+Algorithms: `token_bucket` (needs `refill_per_sec` unless `limit_from: plan.burst`), `fixed_window`
+and `sliding_window` (need `window_ms`), `quota` (needs `strict: true`; `limit` or
+`limit_from: plan.daily`). `limit_from` must fit the algorithm: `plan.daily` only with `quota`,
+`plan.burst` only with `token_bucket`. `Algorithm` values index the script and key-suffix tables in
+`src/redis/redispp_backend.cc` and `src/redis/keys.h`, so new ones are appended.
+
+Not built from the original sketch: `refill_from` (`plan.burst` always brings `plan.refill`) and the
+`lease:` block (the chunk policy is Week 3's adaptive sizing).
 
 ## SIGHUP reload (Week 5)
 
@@ -67,5 +70,5 @@ load per request, and reloads are rare. Measure it in the microbenchmark if you 
 
 ## Done when
 
-- [ ] Week 2: new schema loaded and tested; invalid files produce a clear error.
+- [x] Week 2: new schema loaded and tested; invalid files produce a clear error.
 - [ ] Week 5: reload under load with zero failed requests.

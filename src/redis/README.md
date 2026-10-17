@@ -1,6 +1,6 @@
 # Redis client, backend and batcher
 
-> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 1 spike done, redis-plus-plus `AsyncRedisCluster` chosen (`docs/DESIGN.md` section 3); `hiredis_backend.{h,cc}`: one connection, one worker thread, queued calls pipelined in batches of up to 1,024; no cluster support
+> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Batcher not started
 
 ## What this module does
 
@@ -14,10 +14,10 @@ client library without touching the engines.
 | File | Contains | Week |
 | --- | --- | --- |
 | `spike/spike_cluster_pipeline.cc` | Throwaway program that proves the client works | 1 |
-| `redis_backend.h` | Interface (exists; generalise it as below) | 2 |
-| `script_registry.{h,cc}` | Loads Lua files, keeps SHAs, reloads on `NOSCRIPT` | 2 |
-| `redispp_backend.{h,cc}` | `RedisBackend` on redis-plus-plus `AsyncRedisCluster` | 2 |
-| `fake_backend.h` | In-memory fake for engine unit tests | 2 |
+| `redis_backend.h` | Interface: `Eval(rule, key, requested)` and `HGetAll(key)` | done |
+| `keys.h` | Every Redis key (`RedisKey`, `PlanKey`) | done |
+| `redispp_backend.{h,cc}` | `RedisBackend` on redis-plus-plus `AsyncRedisCluster`; loads the scripts and their SHA1 (no separate registry was needed) | done |
+| fakes | `FakeBackend` / `ManualBackend` live in the engine tests that use them | done |
 | `batcher.{h,cc}` | Per-node queues, flush by size or time | 3 |
 
 ## Week 1: the client spike
@@ -168,6 +168,6 @@ layer that only adds bounding and metrics, which is a perfectly good result to r
 ## Done when
 
 - [x] Week 1: spike numbers written into `docs/DESIGN.md`; client chosen.
-- [ ] Week 2: backend passes the integration test; `NOSCRIPT` fallback tested by running
-      `SCRIPT FLUSH` mid-test.
+- [x] Week 2: backend passes the integration test; `NOSCRIPT` fallback tested by running
+      `SCRIPT FLUSH` mid-test (`QuotaCountsExactlyAcrossTheClusterWhileScriptsAreFlushed`).
 - [ ] Week 3: batcher benchmark table saved in `results/`; TSan clean.

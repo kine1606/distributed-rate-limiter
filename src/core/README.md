@@ -1,6 +1,6 @@
 # Engines (`RateLimiterCore` implementations)
 
-> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `StrictCore` and `LeasedCore` done (`LeasedCore` is the server default and routes `strict: true` rules to `StrictCore`); `CompositeCore` not started
+> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `StrictCore` (plan-aware: `limit_from` rules read the customer's plan, quota denials are `kQuotaExhausted`) and `LeasedCore` done; `LeasedCore` is the server default and routes strict and plan rules to `StrictCore`; `CompositeCore` not started
 
 ## What this module does
 
@@ -128,6 +128,6 @@ sends one `Check`. Which one you expose is your proto v1 decision; implement the
 
 ## Done when
 
-- [ ] Week 2: `StrictCore` unit tests on `FakeBackend`; gRPC gate test (exactly 200) passes.
+- [x] Week 2: `StrictCore` unit tests on `FakeBackend`; gRPC gate test (exactly 200) passes.
 - [ ] Week 3: `LeasedCore` unit tests; benchmark vs strict saved in `results/`.
 - [ ] Week 4: `CompositeCore` covers every branch of the A2 decision tree with a test.
