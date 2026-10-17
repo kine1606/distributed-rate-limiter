@@ -1,6 +1,6 @@
 # Benchmarks
 
-> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: one placeholder microbenchmark
+> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); one placeholder microbenchmark
 
 ## What this module does
 
@@ -23,14 +23,14 @@ These rules make your numbers trustworthy, which matters more than making them b
 ## Week 2: baseline
 
 ```bash
-# 1 instance, StrictCore, Free customers spread over 10,000 keys
-ghz --insecure --proto proto/rate_limiter.proto \
-    --call ratelimiter.v1.RateLimiter.Check \
-    -d '{"key":"cust:{{randomInt 1 10000}}","rule":"daily_quota","cost":1}' \
-    -c 64 -z 30s --connections 4 \
-    -O json -o results/2026-10-xx_strict_1inst_c64.json \
-    127.0.0.1:50051
+# 1 instance, StrictCore, Free customers spread over 10,000 keys. Flushes the dev cluster, seeds the
+# plans, starts the server, warms up 10 s, measures 30 s; summary in results/<date>_<label>.txt
+bench/ghz_run.sh strict 64 'cust:{{randomInt 1 10000}}' daily_quota baseline_strict_c64_r1
+bench/ghz_run.sh allow_all 64 'cust:{{randomInt 1 10000}}' daily_quota baseline_allow_all_c64_r1
 ```
+
+The script computes p50, p99 and p99.9 from every request in the ghz JSON (`details`), records the
+CPU of the server, of the three Redis containers (cgroup counters) and of ghz, then gzips the JSON.
 
 Hint: increase `-c` (concurrent workers) until throughput stops growing; that plateau is the
 number to report, together with the latency at that point. Report p50, p99 and p999 from the ghz
@@ -85,6 +85,6 @@ See [loadgen/README.md](loadgen/README.md). Start with `ghz`; write the custom C
 
 ## Done when
 
-- [ ] Week 2: baseline JSON files and setup notes in `results/`.
+- [x] Week 2: baseline JSON files and setup notes in `results/`.
 - [ ] Week 3: lease microbenchmarks saved.
 - [ ] Week 7: matrix and flamegraph saved; Chapter 5 tables generated from them.
