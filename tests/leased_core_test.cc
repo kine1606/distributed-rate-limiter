@@ -28,6 +28,7 @@ class ManualBackend final : public RedisBackend {
     pending_.push_back({rule.name, std::string(key), requested, std::move(done)});
     ++total_;
   }
+  void HGetAll(std::string, HashCallback done) override { done({}); }  // every customer is Free
 
   // Answers the oldest pending call; returns what it had asked for.
   std::uint32_t Reply(ScriptResult r) {
@@ -71,7 +72,8 @@ RuleTable Rules() {
   Rule burst{.name = "burst", .limit = 100, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
   Rule open{.name = "open", .limit = 100, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailOpen};
   Rule exact{.name = "exact", .limit = 100, .refill_per_sec = 10, .strict = true};
-  return {{"burst", burst}, {"open", open}, {"exact", exact}};
+  Rule plan{.name = "plan", .limit_from = PlanLimit::kBurst};  // not strict, but limits come per customer
+  return {{"burst", burst}, {"open", open}, {"exact", exact}, {"plan", plan}};
 }
 
 // Starts a check; the result appears once the engine answers (inline or after a Reply).
@@ -91,7 +93,8 @@ CheckResult CheckNow(LeasedCore& core, std::string_view key, std::string_view ru
 
 TEST(LeasedCore, FirstCheckWaitsForOneRefillThenHitsStayLocal) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending first;
   first.Start(core, "u1", "burst");
@@ -116,7 +119,8 @@ TEST(LeasedCore, FirstCheckWaitsForOneRefillThenHitsStayLocal) {
 
 TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   std::atomic<int> denied{0}, answered{0};
   std::vector<std::thread> threads;
@@ -146,7 +150,8 @@ TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
 
 TEST(LeasedCore, ShortRedisHandsOverExactlyWhatIsLeft) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending p;
   p.Start(core, "u2", "burst");
@@ -167,7 +172,8 @@ TEST(LeasedCore, ShortRedisHandsOverExactlyWhatIsLeft) {
 
 TEST(LeasedCore, UsedUpFullChunkRefillsAgainForTheRest) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   std::vector<Pending> checks(15);
   for (auto& p : checks) p.Start(core, "u3", "burst");
@@ -185,7 +191,8 @@ TEST(LeasedCore, UsedUpFullChunkRefillsAgainForTheRest) {
 
 TEST(LeasedCore, RedisDownAppliesTheRulesFailurePolicy) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending closed, open;
   closed.Start(core, "u4", "burst");
@@ -200,7 +207,8 @@ TEST(LeasedCore, RedisDownAppliesTheRulesFailurePolicy) {
 
 TEST(LeasedCore, StrictRulesAskRedisOnEveryCheck) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
   for (int i = 0; i < 3; ++i) {
     Pending p;
     p.Start(core, "u5", "exact", 2);
@@ -213,12 +221,28 @@ TEST(LeasedCore, StrictRulesAskRedisOnEveryCheck) {
 
 TEST(LeasedCore, UnknownRuleAndImpossibleCostNeverReachRedis) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
   EXPECT_EQ(CheckNow(core, "u6", "nope").reason, Reason::kUnknownRule);
   const auto r = CheckNow(core, "u6", "burst", 101);
   EXPECT_FALSE(r.allowed);
   EXPECT_EQ(r.retry_after_ms, 0u);  // waiting would not help
   EXPECT_EQ(redis.Total(), 0);
+}
+
+TEST(LeasedCore, PlanRulesGoToTheExactPath) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+
+  Pending p;
+  p.Start(core, "cust:1", "plan", 1);
+  ASSERT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(redis.PendingRequested(), 1u);  // the check's own cost, not a lease chunk
+  redis.Reply(Granted());
+  ASSERT_TRUE(p.result.has_value());
+  EXPECT_TRUE(p.result->allowed);
+  EXPECT_EQ(p.result->limit, 2u);  // Free burst
 }
 
 }  // namespace

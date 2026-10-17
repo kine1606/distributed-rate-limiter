@@ -36,12 +36,14 @@ CheckResult Denied(const Rule& rule, std::int64_t wait_ns) {
 
 }  // namespace
 
-LeasedCore::LeasedCore(RedisBackend& redis, RuleTable rules, std::size_t lease_capacity)
-    : redis_(redis), rules_(std::move(rules)), strict_(redis, rules_), leases_(lease_capacity) {}
+LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity)
+    : redis_(redis), rules_(std::move(rules)), strict_(redis, plans, rules_), leases_(lease_capacity) {}
 
 void LeasedCore::Check(const CheckRequest& request, CheckCallback done) {
   const auto it = rules_.find(request.rule);
-  if (it == rules_.end() || it->second.strict) {
+  // shortcut: plan rules go strict, because a lease holds one rule's limit, not each customer's;
+  // per-customer leases come with the plan cache (Week 4).
+  if (it == rules_.end() || it->second.strict || it->second.limit_from != PlanLimit::kNone) {
     strict_.Check(request, std::move(done));
     return;
   }

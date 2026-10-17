@@ -19,6 +19,7 @@ struct CheckRequest {
 enum class Reason : std::uint8_t {
   kAllowed,
   kRateLimited,   // bucket empty: retry after retry_after_ms
+  kQuotaExhausted,  // daily quota used up: retry after reset_after_ms (00:00 UTC)
   kUnknownRule,   // rule name not in the config
   kUnavailable,   // Redis unreachable and the rule is fail_closed: denied
   kUnverified,    // Redis unreachable and the rule is fail_open: allowed without counting

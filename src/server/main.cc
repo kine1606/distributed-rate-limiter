@@ -17,10 +17,10 @@
 #include "core/allow_all_core.h"
 #include "core/leased_core.h"
 #include "core/strict_core.h"
-#include "rate_limiter.grpc.pb.h"
+#include "plan/plan_store.h"
 #include "ratelimiter/core.h"
-#include "redis/hiredis_backend.h"
-#include "server/convert.h"
+#include "redis/redispp_backend.h"
+#include "server/service.h"
 
 namespace {
 
@@ -28,83 +28,6 @@ using namespace ratelimiter;  // NOLINT
 
 std::atomic<bool> g_stop{false};
 extern "C" void HandleSignal(int) { g_stop.store(true, std::memory_order_relaxed); }
-
-// Shared state for one CheckBatch call: the RPC finishes when the last sub-check completes,
-// which may happen on different threads once Redis refills are involved.
-struct BatchState {
-  BatchState(grpc::ServerUnaryReactor* r, std::size_t n) : reactor(r), pending(n) {}
-  grpc::ServerUnaryReactor* reactor;
-  std::atomic<std::size_t> pending;
-  std::atomic<bool> unknown_rule{false};  // published to the last sub-check by `pending`
-};
-
-grpc::Status UnknownRule() { return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"); }
-
-class RateLimiterService final : public v1::RateLimiter::CallbackService {
- public:
-  explicit RateLimiterService(std::shared_ptr<RateLimiterCore> core) : core_(std::move(core)) {}
-
-  grpc::ServerUnaryReactor* Check(grpc::CallbackServerContext* ctx, const v1::CheckRequest* req,
-                                  v1::CheckResponse* resp) override {
-    auto* reactor = ctx->DefaultReactor();
-    if (const char* bad = Invalid(*req)) {
-      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
-      return reactor;
-    }
-    core_->Check(ToDomain(*req), [reactor, resp](const CheckResult& r) {
-      if (r.reason == Reason::kUnknownRule) {
-        reactor->Finish(UnknownRule());
-        return;
-      }
-      Fill(r, resp);  // a Redis outage is a reason in an OK response, not a status (see the proto)
-      reactor->Finish(grpc::Status::OK);
-    });
-    return reactor;
-  }
-
-  grpc::ServerUnaryReactor* CheckBatch(grpc::CallbackServerContext* ctx,
-                                       const v1::CheckBatchRequest* req,
-                                       v1::CheckBatchResponse* resp) override {
-    auto* reactor = ctx->DefaultReactor();
-    const int n = req->requests_size();
-    if (n == 0) {
-      reactor->Finish(grpc::Status::OK);
-      return reactor;
-    }
-    if (n > kMaxBatch) {
-      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "at most 1000 entries per batch"));
-      return reactor;
-    }
-    for (const auto& r : req->requests()) {
-      if (const char* bad = Invalid(r)) {
-        reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
-        return reactor;
-      }
-    }
-    resp->mutable_responses()->Reserve(n);
-    for (int i = 0; i < n; ++i) resp->add_responses();
-
-    auto state = std::make_shared<BatchState>(reactor, static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
-      core_->Check(ToDomain(req->requests(i)), [state, slot](const CheckResult& r) {
-        if (r.reason == Reason::kUnknownRule) {
-          state->unknown_rule.store(true, std::memory_order_relaxed);
-        } else {
-          Fill(r, slot);
-        }
-        if (state->pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          state->reactor->Finish(state->unknown_rule.load(std::memory_order_relaxed) ? UnknownRule()
-                                                                                     : grpc::Status::OK);
-        }
-      });
-    }
-    return reactor;
-  }
-
- private:
-  std::shared_ptr<RateLimiterCore> core_;
-};
 
 // Splits "host:port"; the port defaults to 6379.
 std::pair<std::string, int> ParseHostPort(const std::string& addr) {
@@ -115,13 +38,13 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 
 }  // namespace
 
-// Usage: rate_limiter_server [listen] [rules.yaml] [redis host:port] [lua dir] [engine]
+// Usage: rate_limiter_server [listen] [rules.yaml] [redis cluster node host:port] [lua dir] [engine]
 //   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
 //   Redis; measures pure gRPC overhead)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
-  const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:6380";
+  const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:7001";
   const std::string lua_dir = argc > 4 ? argv[4] : "lua";
   const std::string engine = argc > 5 ? argv[5] : "leased";
 
@@ -137,22 +60,23 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
 
-  std::unique_ptr<HiredisBackend> redis;
+  std::unique_ptr<RedisPPBackend> redis;
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
-    redis = std::make_unique<HiredisBackend>(host, port, lua_dir);
+    redis = std::make_unique<RedisPPBackend>(host, port, lua_dir);
   } catch (const std::exception& e) {
     spdlog::critical("cannot set up redis backend: {}", e.what());
     return 1;
   }
   spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
 
-  // Declared after `redis`, so it is destroyed first: the core never outlives its backend.
+  // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
+  PlanStore plans(*redis);
   std::shared_ptr<RateLimiterCore> core;
   if (engine == "leased") {
-    core = std::make_shared<LeasedCore>(*redis, std::move(rules));
+    core = std::make_shared<LeasedCore>(*redis, plans, std::move(rules));
   } else if (engine == "strict") {
-    core = std::make_shared<StrictCore>(*redis, std::move(rules));
+    core = std::make_shared<StrictCore>(*redis, plans, std::move(rules));
   } else if (engine == "allow_all") {
     core = std::make_shared<AllowAllCore>();
   } else {

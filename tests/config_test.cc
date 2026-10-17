@@ -50,3 +50,35 @@ TEST(RuleConfig, RejectsMissingRulesMap) {
   auto p = WriteTemp("rl_no_rules.yaml", "other: 1\n");
   EXPECT_THROW(ratelimiter::LoadRules(p), std::runtime_error);
 }
+
+TEST(RuleConfig, LoadsPlanRules) {
+  auto rules = ratelimiter::LoadRules(std::string(RL_SOURCE_DIR) + "/config/rules.yaml");
+  ASSERT_EQ(rules.count("daily_quota"), 1u);
+  EXPECT_EQ(rules["daily_quota"].algorithm, ratelimiter::Algorithm::kQuota);
+  EXPECT_EQ(rules["daily_quota"].limit_from, ratelimiter::PlanLimit::kDaily);
+  EXPECT_TRUE(rules["daily_quota"].strict);
+  ASSERT_EQ(rules.count("burst"), 1u);
+  EXPECT_EQ(rules["burst"].limit_from, ratelimiter::PlanLimit::kBurst);
+}
+
+TEST(RuleConfig, QuotaWithFixedLimitIsAllowed) {
+  auto p = WriteTemp("rl_fixed_quota.yaml", "rules:\n  q:\n    algorithm: quota\n    limit: 50\n    strict: true\n");
+  EXPECT_EQ(ratelimiter::LoadRules(p)["q"].limit, 50u);
+}
+
+TEST(RuleConfig, RejectsLeasedQuota) {
+  auto p = WriteTemp("rl_leased_quota.yaml", "rules:\n  q:\n    algorithm: quota\n    limit_from: plan.daily\n");
+  EXPECT_THROW(ratelimiter::LoadRules(p), std::runtime_error);
+}
+
+TEST(RuleConfig, RejectsLimitFromThatDoesNotFitTheAlgorithm) {
+  auto daily = WriteTemp("rl_daily_tb.yaml",
+                         "rules:\n  b:\n    algorithm: token_bucket\n    limit_from: plan.daily\n    strict: true\n");
+  EXPECT_THROW(ratelimiter::LoadRules(daily), std::runtime_error);
+  auto burst = WriteTemp("rl_burst_quota.yaml",
+                         "rules:\n  b:\n    algorithm: quota\n    limit_from: plan.burst\n    strict: true\n");
+  EXPECT_THROW(ratelimiter::LoadRules(burst), std::runtime_error);
+  auto unknown = WriteTemp("rl_unknown_from.yaml",
+                           "rules:\n  b:\n    algorithm: quota\n    limit_from: plan.weekly\n    strict: true\n");
+  EXPECT_THROW(ratelimiter::LoadRules(unknown), std::runtime_error);
+}

@@ -55,6 +55,7 @@ TEST(Convert, FillCopiesEveryField) {
 // A wrong mapping turns "Redis is down" into "slow down" at the gateway (503 vs 429).
 TEST(Convert, ReasonMapping) {
   EXPECT_EQ(FillFrom({.reason = Reason::kRateLimited}).reason(), v1::REASON_RATE_LIMITED);
+  EXPECT_EQ(FillFrom({.reason = Reason::kQuotaExhausted}).reason(), v1::REASON_QUOTA_EXHAUSTED);
   EXPECT_EQ(FillFrom({.reason = Reason::kUnavailable}).reason(), v1::REASON_UNAVAILABLE);
   EXPECT_EQ(FillFrom({.allowed = true, .reason = Reason::kUnverified}).reason(), v1::REASON_UNVERIFIED);
   EXPECT_EQ(ToProto(Reason::kUnknownRule), v1::REASON_UNSPECIFIED);  // sent as INVALID_ARGUMENT

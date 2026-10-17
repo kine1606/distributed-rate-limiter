@@ -30,6 +30,7 @@ inline v1::Reason ToProto(Reason r) {
   switch (r) {
     case Reason::kAllowed: return v1::REASON_OK;
     case Reason::kRateLimited: return v1::REASON_RATE_LIMITED;
+    case Reason::kQuotaExhausted: return v1::REASON_QUOTA_EXHAUSTED;
     case Reason::kUnavailable: return v1::REASON_UNAVAILABLE;
     case Reason::kUnverified: return v1::REASON_UNVERIFIED;
     case Reason::kUnknownRule: break;  // answered with INVALID_ARGUMENT, never filled

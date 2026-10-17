@@ -47,7 +47,7 @@ message CheckRequest {
   string rule = 2;
 
   // Units to consume. 0 means 1, since proto3 cannot tell 0 from unset and callers may omit it.
-  // A cost above the rule's limit can never pass: it is denied (REASON_RATE_LIMITED), not rejected.
+  // A cost above the rule's limit can never pass: it is denied, not rejected.
   uint32 cost = 3;
 
   // (5) Was this a retry: an id the gateway generates once per logical API call (a UUID, or the

@@ -1,5 +1,19 @@
-# Rate limit rules. Reloaded on SIGHUP without dropping requests (Week 4).
+# Rate limit rules. Reloaded on SIGHUP without dropping requests (Week 5).
+# Rules are templates; per-customer numbers come from the plan hash {cust:N}:plan when a rule says
+# limit_from (docs/CUSTOMER_PLANS.md). Keys: cust:42 style ids, e.g. Check{key: "cust:42", rule: "daily_quota"}.
 rules:
+  daily_quota:            # a customer's daily quota (Free 200, Pay 2,000), resets 00:00 UTC
+    algorithm: quota
+    limit_from: plan.daily
+    strict: true          # exact: one Redis call per check (quota rules must be strict)
+    failure_policy: fail_closed
+
+  burst:                  # a customer's burst limit: plan.burst tokens, refilled plan.refill per second
+    algorithm: token_bucket
+    limit_from: plan.burst
+    strict: true          # per-customer leases arrive with the plan cache (Week 4)
+    failure_policy: fail_closed
+
   api_default:
     algorithm: token_bucket
     limit: 1000           # burst capacity (tokens)
