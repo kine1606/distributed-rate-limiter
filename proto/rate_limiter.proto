@@ -17,9 +17,9 @@ package ratelimiter.v1;
 //                       gateway's deadline passed. The gateway applies its own fallback.
 // A Redis outage is not a status. It travels in an OK response as REASON_UNAVAILABLE (rule fails
 // closed) or REASON_UNVERIFIED (rule fails open), because CheckBatch must report it per entry (one
-// dead Redis master affects only its own slots), because gRPC retry policies retry status
-// UNAVAILABLE automatically and would multiply load on a struggling Redis, and because it keeps
-// "limiter down" and "Redis down" apart in gateway metrics.
+// dead Redis master affects only its own slots), because UNAVAILABLE is the status that gRPC
+// client retry policies are usually set to retry, which would multiply load on a struggling Redis,
+// and because it keeps "limiter down" and "Redis down" apart in gateway metrics.
 service RateLimiter {
   // One API call of one caller: one decision.
   rpc Check(CheckRequest) returns (CheckResponse);
@@ -66,7 +66,7 @@ enum Reason {
   REASON_OK = 1;               // allowed within every limit
   REASON_RATE_LIMITED = 2;     // denied by a short-term limit (token bucket, fixed or sliding window);
                                // retry after retry_after_ms. HTTP 429.
-  REASON_QUOTA_EXHAUSTED = 3;  // denied: daily quota used up until reset_after_ms. HTTP 429. Week 4.
+  REASON_QUOTA_EXHAUSTED = 3;  // denied: daily quota used up until reset_after_ms. HTTP 429.
   REASON_OVERAGE = 4;          // allowed beyond the daily quota under the plan's grace or cap policy;
                                // billed as overage. Week 4.
   REASON_SUSPENDED = 5;        // denied: account suspended; waiting does not help. HTTP 403. Week 4.
