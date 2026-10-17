@@ -1,6 +1,6 @@
 # API contract (`rate_limiter.proto`)
 
-> Week 1 (design), Week 4 (CheckBatch for quota plus burst) · Flow steps A3, A13 · Status: v0 in place, v1 is yours to design
+> Week 1 (design), Week 4 (CheckBatch for quota plus burst) · Flow steps A3, A13 · Status: v1 drafted (every question answered in the file's comments, all fields filled by the server); review and tag `proto-v1` pending
 
 ## What this module does
 
@@ -8,9 +8,6 @@ The proto file is the contract between the gateway (gRPC client) and the limiter
 Everything the gateway needs to turn a decision into an HTTP response must be in `CheckResponse`,
 and everything the limiter needs to decide must be in `CheckRequest`. Changing field numbers later
 breaks every client, so this is the one file worth getting right in Week 1.
-
-> **Fix first:** the current file has a stray `+` after the `CheckBatch` line
-> (`returns (CheckBatchResponse);+`). `protoc` rejects it, so the build fails until it is removed.
 
 ## Questions to answer before you write v1
 
@@ -87,8 +84,8 @@ message CheckBatchResponse { repeated CheckResponse responses = 1; }  // same or
 
 ## Done when
 
-- [ ] `protoc` compiles it (the CMake build passes).
-- [ ] Every question above has a written answer in a comment.
-- [ ] `src/server/main.cc` fills every new response field (even if with a placeholder value until
-      the engine exists).
+- [x] `protoc` compiles it (the CMake build passes).
+- [x] Every question above has a written answer in a comment.
+- [x] `src/server/main.cc` fills every new response field (even if with a placeholder value until
+      the engine exists). Conversions live in `src/server/convert.h`, tested in `tests/convert_test.cc`.
 - [ ] Reviewed together; tag the commit `proto-v1`.

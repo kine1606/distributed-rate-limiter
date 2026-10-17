@@ -86,7 +86,7 @@ TEST(StrictCore, RedisDownFailOpenAllows) {
 
   const auto r = RunCheck(core, "user:1", "open");
   EXPECT_TRUE(r.allowed);
-  EXPECT_EQ(r.reason, Reason::kAllowed);
+  EXPECT_EQ(r.reason, Reason::kUnverified);
 }
 
 TEST(StrictCore, RedisDownFailClosedIsUnavailable) {

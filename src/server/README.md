@@ -1,6 +1,6 @@
 # gRPC server
 
-> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server; engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`
+> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server; engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`; proto v1 conversions and request validation in `convert.h`
 
 ## What this module does
 
@@ -22,7 +22,7 @@ SIGINT/SIGTERM drain for up to 5 seconds.
 | --- | --- | --- |
 | `main.cc` | Build `RedisBackend`, `PlanStore`, `StrictCore`; flags for Redis address | 2 |
 | `service.{h,cc}` | Move `RateLimiterService` out of `main.cc` once it grows | 2 |
-| `convert.h` | `ToDomain(const v1::CheckRequest&)`, `Fill(const CheckResult&, v1::CheckResponse*)` | 2, 4 |
+| `convert.h` | done: `Invalid`, `ToDomain`, `Fill`, `ToProto(Reason)`; tested in `tests/convert_test.cc` | 2, 4 |
 | `server_options.h` | Thread count, max in-flight, addresses, from flags or env | 5 |
 
 ## Skeleton

@@ -13,7 +13,7 @@ namespace ratelimiter {
 inline CheckResult RedisDownResult(const Rule& rule) {
   CheckResult r;
   r.allowed = rule.failure_policy == FailurePolicy::kFailOpen;
-  r.reason = r.allowed ? Reason::kAllowed : Reason::kUnavailable;
+  r.reason = r.allowed ? Reason::kUnverified : Reason::kUnavailable;
   r.limit = rule.limit;
   return r;
 }

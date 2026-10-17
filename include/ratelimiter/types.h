@@ -14,13 +14,14 @@ struct CheckRequest {
   std::uint32_t cost{1};
 };
 
-// Why a check ended the way it did. The gRPC layer maps kUnknownRule and kUnavailable to
-// error statuses; the other values travel in a normal response.
+// Why a check ended the way it did. The gRPC layer maps kUnknownRule to INVALID_ARGUMENT; the
+// other values travel in a normal response (proto/rate_limiter.proto, enum Reason).
 enum class Reason : std::uint8_t {
   kAllowed,
   kRateLimited,   // bucket empty: retry after retry_after_ms
   kUnknownRule,   // rule name not in the config
-  kUnavailable,   // Redis unreachable and the rule is fail_closed
+  kUnavailable,   // Redis unreachable and the rule is fail_closed: denied
+  kUnverified,    // Redis unreachable and the rule is fail_open: allowed without counting
 };
 
 struct CheckResult {
@@ -29,6 +30,7 @@ struct CheckResult {
   std::uint32_t remaining{0};
   std::uint32_t retry_after_ms{0};
   std::uint32_t limit{0};
+  std::uint32_t reset_after_ms{0};  // daily quota rules only: until 00:00 UTC
 };
 
 // Completion callback. The fast path invokes it inline; the slow path (lease refill,

@@ -20,6 +20,7 @@
 #include "rate_limiter.grpc.pb.h"
 #include "ratelimiter/core.h"
 #include "redis/hiredis_backend.h"
+#include "server/convert.h"
 
 namespace {
 
@@ -34,14 +35,10 @@ struct BatchState {
   BatchState(grpc::ServerUnaryReactor* r, std::size_t n) : reactor(r), pending(n) {}
   grpc::ServerUnaryReactor* reactor;
   std::atomic<std::size_t> pending;
+  std::atomic<bool> unknown_rule{false};  // published to the last sub-check by `pending`
 };
 
-void Fill(const CheckResult& r, v1::CheckResponse* out) {
-  out->set_allowed(r.allowed);
-  out->set_remaining(r.remaining);
-  out->set_retry_after_ms(r.retry_after_ms);
-  out->set_limit(r.limit);
-}
+grpc::Status UnknownRule() { return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"); }
 
 class RateLimiterService final : public v1::RateLimiter::CallbackService {
  public:
@@ -50,20 +47,16 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   grpc::ServerUnaryReactor* Check(grpc::CallbackServerContext* ctx, const v1::CheckRequest* req,
                                   v1::CheckResponse* resp) override {
     auto* reactor = ctx->DefaultReactor();
-    if (req->key().empty() || req->rule().empty()) {
-      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "key and rule are required"));
+    if (const char* bad = Invalid(*req)) {
+      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
       return reactor;
     }
     core_->Check(ToDomain(*req), [reactor, resp](const CheckResult& r) {
       if (r.reason == Reason::kUnknownRule) {
-        reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"));
+        reactor->Finish(UnknownRule());
         return;
       }
-      if (r.reason == Reason::kUnavailable) {
-        reactor->Finish(grpc::Status(grpc::StatusCode::UNAVAILABLE, "rate limit store unavailable"));
-        return;
-      }
-      Fill(r, resp);
+      Fill(r, resp);  // a Redis outage is a reason in an OK response, not a status (see the proto)
       reactor->Finish(grpc::Status::OK);
     });
     return reactor;
@@ -78,9 +71,13 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       reactor->Finish(grpc::Status::OK);
       return reactor;
     }
+    if (n > kMaxBatch) {
+      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "at most 1000 entries per batch"));
+      return reactor;
+    }
     for (const auto& r : req->requests()) {
-      if (r.key().empty() || r.rule().empty()) {
-        reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "key and rule are required"));
+      if (const char* bad = Invalid(r)) {
+        reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
         return reactor;
       }
     }
@@ -91,9 +88,14 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     for (int i = 0; i < n; ++i) {
       v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
       core_->Check(ToDomain(req->requests(i)), [state, slot](const CheckResult& r) {
-        Fill(r, slot);
+        if (r.reason == Reason::kUnknownRule) {
+          state->unknown_rule.store(true, std::memory_order_relaxed);
+        } else {
+          Fill(r, slot);
+        }
         if (state->pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          state->reactor->Finish(grpc::Status::OK);
+          state->reactor->Finish(state->unknown_rule.load(std::memory_order_relaxed) ? UnknownRule()
+                                                                                     : grpc::Status::OK);
         }
       });
     }
@@ -101,10 +103,6 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   }
 
  private:
-  static CheckRequest ToDomain(const v1::CheckRequest& r) {
-    return CheckRequest{r.key(), r.rule(), r.cost() == 0 ? 1u : r.cost()};
-  }
-
   std::shared_ptr<RateLimiterCore> core_;
 };
 
