@@ -1,7 +1,7 @@
 # Development Redis reachable from WSL:   docker compose -f docker/docker-compose.dev.yml up -d
-#   127.0.0.1:7001-7003  3-master cluster, for the server, the spike and integration tests
-#   127.0.0.1:6380       plain throwaway Redis for the script tests, the demo and bench/ghz_run.sh,
-#                        which flush it: never point those at a Redis that holds real data
+#   127.0.0.1:7001-7003  3-master cluster for the server, demo, spike and integration tests;
+#                        bench/ghz_run.sh runs FLUSHALL on every master, so keep only test data here
+#   127.0.0.1:6380       plain throwaway Redis for the Lua script tests
 # The nodes share redis-1's network namespace, so the 127.0.0.1 address they announce is right for
 # each other (cluster bus) and for WSL clients (published ports). Separate containers announcing
 # 127.0.0.1 would break the bus, because each container's loopback is its own.
@@ -38,3 +38,4 @@ services:
         for p in 7001 7002 7003; do until redis-cli -p $$p ping >/dev/null 2>&1; do sleep 0.2; done; done
         redis-cli -p 7001 cluster info | grep -q cluster_state:ok ||
           redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 --cluster-replicas 0 --cluster-yes
+        until redis-cli -p 7001 cluster info | grep -q cluster_state:ok; do sleep 0.2; done  # converged before limiters start

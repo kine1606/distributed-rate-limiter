@@ -1,6 +1,6 @@
 # Docker environment
 
-> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: Week 1 done: base cluster verified (`cluster_state:ok`, hash-tagged keys in one slot); development profile `docker-compose.dev.yml` reachable from WSL; 3 limiters build and run, sharing one plain Redis until the Week 2 cluster backend
+> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: Week 1 done: base cluster verified (`cluster_state:ok`, hash-tagged keys in one slot); development profile `docker-compose.dev.yml` reachable from WSL. Week 2: the 3 limiters run on the cluster (image builds redis-plus-plus), and share one daily quota across instances
 
 ## What this module does
 
@@ -40,7 +40,7 @@ must announce an address WSL can use.
 docker compose -f docker/docker-compose.dev.yml up -d
 redis-cli -c -p 7001 cluster info          # cluster_state:ok, from WSL
 redis-cli -p 7001 cluster nodes            # 127.0.0.1:7001-7003, three masters
-redis-cli -p 6380 ping                     # plain throwaway Redis for script tests, demo, ghz_run.sh
+redis-cli -p 6380 ping                     # plain throwaway Redis for the Lua script tests
 ```
 
 How it works: redis-2, redis-3 and the init container join redis-1's network namespace
@@ -53,16 +53,17 @@ stop redis-2 or redis-3; stopping redis-1 takes the shared network down with it.
 separate containers, so any node can be killed there.
 
 The init containers (both files) create the cluster only if `cluster_state` is not already `ok`, so
-`up` can be run again without failing on "node is not empty".
+`up` can be run again without failing on "node is not empty", and exit only once the cluster has
+converged, so the limiters never start against a cluster that still answers `CLUSTERDOWN`.
 
-The plain Redis on 6380 replaces port 6379 for everything that writes or flushes test data, so a
+The dev cluster and the plain Redis on 6380 replace port 6379 for everything that writes or flushes
+test data (`bench/ghz_run.sh` flushes the cluster), so a
 system Redis on 6379 is never touched.
 
 ## Changes to make over the weeks
 
 | Change | Why | Week |
 | --- | --- | --- |
-| Point the limiters at `redis-1:6379` and remove the plain `redis` service | `HiredisBackend` cannot talk to a cluster, so the limiters share one plain Redis until the cluster backend exists | 2 |
 | Development profile with ports and announce addresses | Run the server and tests from WSL | 1 |
 | Add one replica per master (`--cluster-replicas 1`, 6 nodes) | Failover tests need a replica to promote | 5 |
 | Lower `cluster-node-timeout` to 3000 if failover feels slow | Faster fault tests | 5 |
