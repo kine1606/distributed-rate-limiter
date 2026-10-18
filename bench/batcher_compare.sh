@@ -10,7 +10,7 @@ runs=${RUNS:-3} port=${REDIS_PORT:-7001} lg=${LG:-12 16}
 out="results/$(date +%F)_batcher"
 mkdir -p "$out"
 sum="$out/summary.txt"
-: >"$sum"
+echo "# $0 RUNS=$runs REDIS_PORT=$port LG=\"$lg\" at commit $(git rev-parse --short HEAD); ghz $(ghz --version); loadgen options in each line" >"$sum"
 key='cust:{{randomInt 1 10000}}'
 
 start_server() {  # start_server <mode> <log>; mode off|timer|adaptive

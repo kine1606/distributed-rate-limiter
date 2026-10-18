@@ -46,4 +46,6 @@ for the lease accuracy bound).
 
 - [x] You know, with a number, the maximum rate your load generator can produce: 71,364 calls/s against
       `allow_all` at 12 channels x 16 in flight, where the server (3.3 cores) and the generator share the laptop.
-- [ ] Every result file records which generator and options produced it.
+- [x] Every result file records which generator and options produced it: loadgen prints its options in
+      its JSON line, ghz keeps them under `options` in its JSON report, and each `summary.txt` starts
+      with the script, its settings, the commit and the ghz version.

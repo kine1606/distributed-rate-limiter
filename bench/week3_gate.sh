@@ -11,7 +11,7 @@ runs=${RUNS:-5} port=${REDIS_PORT:-7001} lg=${LG:-12 16}
 out="results/$(date +%F)_week3_gate"
 mkdir -p "$out"
 sum="$out/summary.txt"
-: >"$sum"
+echo "# $0 RUNS=$runs REDIS_PORT=$port LG=\"$lg\" at commit $(git rev-parse --short HEAD); ghz $(ghz --version); loadgen options in each line" >"$sum"
 key='cust:{{randomInt 1 10000}}'
 
 flush_and_seed() {

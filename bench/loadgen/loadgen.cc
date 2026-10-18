@@ -147,11 +147,12 @@ int main(int argc, char** argv) {
     errors += s->errors;
   }
   std::printf(
-      "{\"target\":\"%s\",\"rule\":\"%s\",\"channels\":%d,\"in_flight\":%d,\"keys\":%d,\"seconds\":%.1f,"
+      "{\"generator\":\"loadgen\",\"target\":\"%s\",\"rule\":\"%s\",\"channels\":%d,\"in_flight\":%d,"
+      "\"keys\":%d,\"warmup_s\":%d,\"seconds\":%.1f,"
       "\"calls_per_s\":%.0f,\"ok\":%llu,\"allowed\":%llu,\"errors\":%llu,\"p50_ms\":%.3f,\"p99_ms\":%.3f,"
       "\"p999_ms\":%.3f}\n",
-      target.c_str(), rule.c_str(), channels, channels * in_flight, keys, elapsed, static_cast<double>(ok) / elapsed,
-      static_cast<unsigned long long>(ok), static_cast<unsigned long long>(allowed),
+      target.c_str(), rule.c_str(), channels, channels * in_flight, keys, warmup, elapsed,
+      static_cast<double>(ok) / elapsed, static_cast<unsigned long long>(ok), static_cast<unsigned long long>(allowed),
       static_cast<unsigned long long>(errors), Percentile(hist, 0.50), Percentile(hist, 0.99),
       Percentile(hist, 0.999));
   return 0;
