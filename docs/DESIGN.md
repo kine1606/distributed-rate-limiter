@@ -6,11 +6,38 @@ the two consistent. Replace every `HINT` block with real content and delete the 
 
 ## 1. Problem and goals (Week 2)
 
-> HINT: Two halves, from the plan. Per customer, a correctness problem: exact daily quotas
-> (Free 200, Pay 2,000), retries never double counted, upgrades applied on the next request, one
-> reset moment for every instance. Across the platform, a throughput problem: about 1M checks/s,
-> p50 < 500 µs and p99 < 2 ms server-side, floods from over-quota clients, hot enterprise keys.
-> State the non-goals: billing, accounts, UI, multi-region.
+The service answers one question for every API call a customer makes: may this call pass now?
+The answer has two halves with opposite requirements.
+
+**Per customer, a correctness problem.** A plan sells a daily quota (Free 200, Pay 2,000 calls per
+UTC day). That number is what the customer pays for, so it must be enforced exactly:
+
+| Goal | Measurable form | Checked by |
+| --- | --- | --- |
+| G1 No over-admission | concurrent calls from any number of limiter instances never admit more than the quota | `GrpcQuotaIT` (exactly 200 of 400 concurrent calls), evaluation test 1 |
+| G2 Retries counted once | a call resent with the same `request_id` within 5 minutes is not counted again | Week 4 deduplication tests |
+| G3 Plan changes apply on the next call | an upgrade raises the limit on the next request on every instance and keeps today's usage | `QuotaUpgradeMidDayKeepsUsageAndAppliesImmediately` (script); end to end with the plan cache (Week 4) |
+| G4 One reset moment | every instance resets every customer at the same instant, 00:00 UTC by the Redis clock | `QuotaResetsOnNewUtcDay`, evaluation test 2 |
+
+**Across the platform, a throughput problem.** Most traffic is burst-limited calls from customers
+far below their quota, and the limiter is on the path of every one of them:
+
+| Goal | Measurable form | Status |
+| --- | --- | --- |
+| G5 Throughput | about 1,000,000 checks/s across the cluster by adding instances and Redis masters | target; extrapolated from per-instance measurements (section 9), never reported as measured |
+| G6 Latency | server-side p50 < 500 µs and p99 < 2 ms for a check | target; only the lease path can reach it (strict p99 is 10 ms at c=64 on the laptop) |
+| G7 Bounded inaccuracy | burst over-admission at most N × C per refill interval (N instances, chunk C), measured | derived in section 6, measured in Week 6 |
+| G8 Overload and floods | an over-quota client is refused locally (deny cache) and an overloaded instance answers `RESOURCE_EXHAUSTED` instead of queueing | Weeks 4 and 5 |
+| G9 Documented failure behaviour | with Redis slow or down, each plan behaves as its failure policy says (paid fail open, free fail closed) | Week 5, evaluation test 9 |
+
+The split between the two halves is the central design decision: the quota (G1 to G4) is checked
+strictly in Redis on every call, while the burst limit (G5 to G7) is served from local leases and
+may be wrong by a bounded, measured amount.
+
+**Non-goals.** Billing, invoicing and payment (the limiter emits usage events; a billing system
+would consume them); accounts, sign-up and API key issuance (simulated by `tools/seed_plans.sh` and
+later `rlctl`); any user interface; multiple regions (one Redis Cluster, one region); per-customer
+time zones for the reset (one UTC reset for everyone, a product decision in CUSTOMER_PLANS.md).
 
 ## 2. Architecture (Week 3, final in Week 5)
 

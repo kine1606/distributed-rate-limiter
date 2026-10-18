@@ -50,9 +50,10 @@ these two, so they get tested hardest.
 - [x] `tests/lua_scripts_test.cc`: 13 cases against real Redis (rollover, upgrade, downgrade,
       cost greater than limit, expiry, concurrency).
 - [x] Run the Lua tests on your machine against Docker Redis (`scripts/test.sh release`).
-- [ ] Proto v1: your redesign, then review. See [proto/README.md](../proto/README.md).
-      Drafted 2026-10-17 and tested through gRPC; review and tag `proto-v1` still to do.
-- [ ] Thesis: start Chapter 2 notes on token bucket, Redis Lua atomicity and Redis Cluster slots.
+- [x] Proto v1: your redesign, then review. See [proto/README.md](../proto/README.md).
+      Reviewed and tagged `proto-v1` on 2026-10-18.
+- [x] Thesis: start Chapter 2 notes on token bucket, Redis Lua atomicity and Redis Cluster slots.
+      Done as the Chapter 2 draft (`docs/thesis/ch2_background.md`).
 
 Gate: both scripts pass every edge case on your machine; proto v1 agreed.
 
@@ -73,7 +74,8 @@ baseline that every later optimisation is compared against, and it proves the qu
 - [x] Baseline benchmark with `ghz` on 1 instance; raw output in `results/`.
       Strict quota: 25,301 checks/s median of 5 at c=1,024 (p99 85 ms); 10,024 at p99 10 ms (c=64).
       See [bench/README.md](../bench/README.md#week-2-baseline).
-- [ ] Thesis: Chapter 1 and Chapter 2 drafts.
+- [x] Thesis: Chapter 1 and Chapter 2 drafts (`docs/thesis/ch1_introduction.md`,
+      `ch2_background.md`, sources in `references.md`; entries marked L still need their details checked).
 
 Gate: a free customer is stopped at exactly 200 through gRPC; baseline numbers saved.
 

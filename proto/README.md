@@ -1,6 +1,6 @@
 # API contract (`rate_limiter.proto`)
 
-> Week 1 (design), Week 4 (CheckBatch for quota plus burst) · Flow steps A3, A13 · Status: v1 drafted (every question answered in the file's comments, all fields filled by the server); review and tag `proto-v1` pending
+> Week 1 (design), Week 4 (CheckBatch for quota plus burst) · Flow steps A3, A13 · Status: v1 reviewed and tagged `proto-v1`
 
 ## What this module does
 
@@ -88,4 +88,4 @@ message CheckBatchResponse { repeated CheckResponse responses = 1; }  // same or
 - [x] Every question above has a written answer in a comment.
 - [x] `src/server/main.cc` fills every new response field (even if with a placeholder value until
       the engine exists). Conversions live in `src/server/convert.h`, tested in `tests/convert_test.cc`.
-- [ ] Reviewed together; tag the commit `proto-v1`.
+- [x] Reviewed; tagged `proto-v1` (2026-10-18).
