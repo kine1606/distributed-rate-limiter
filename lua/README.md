@@ -54,7 +54,8 @@ quota.lua (v2, Week 4)
   KEYS[1] = {cust:42}:daily_quota:q
   KEYS[2] = {cust:42}:daily_quota:req:<request_id>   (optional)
   ARGV    = daily_limit, cost, policy ("hard" | "grace" | "cap", default hard), extra (default 0)
-  returns   { allowed 0|1, used, remaining, reset_after_ms, overage 0|1 }
+  returns   { allowed 0|1, used, remaining, reset_after_ms, overage 0|1, replayed 0|1 }
+            (replayed = 1: a retried request ID's stored answer; usage events skip it)
 
 return_lease.lua
   KEYS[1] = {cust:42}:burst:tb

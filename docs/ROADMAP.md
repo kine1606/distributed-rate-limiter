@@ -152,16 +152,30 @@ Goal: quota-service behaviour, plus the change that makes the 1M checks/s argume
       deny. See [src/core/README.md](../src/core/README.md#week-4-compositecore).
       Done: rule `customer` in `config/rules.yaml`, one plan read per call, a test per branch; request
       2,001 gives three answers on three policies through gRPC (first part of the gate).
-- [ ] `PlanCache` with Pub/Sub invalidation and a 5 s TTL (2 h). See [src/plan/README.md](../src/plan/README.md).
+- [x] `PlanCache` with Pub/Sub invalidation and a 5 s TTL (2 h). See [src/plan/README.md](../src/plan/README.md).
+      Done: the cache lives in `PlanStore` (single flight; a read racing a change is sent again);
+      `PlanListener` subscribes to `plan-changes`. An upgrade reached two instances 22 ms after
+      `rlctl` started (`tests/plan_change_it.cc`, steps B5 and B9). On the strict baseline command
+      the cache alone gives 16,738 to 19,480 checks/s (median of 5 each, same session; the Week 2
+      binary measured 15,851 that day, so compare within a session only).
 - [ ] Leased quota for large plans (3 h, Should): `quota_mode: auto`, strict below a daily limit of
       about 100,000, leased above with chunk <= 0.1% of the daily limit.
-- [ ] Usage events, JSON lines per customer per minute (2 h). See [src/usage/README.md](../src/usage/README.md).
-- [ ] `tools/rlctl` (1 h). See [tools/README.md](../tools/README.md).
+- [x] Usage events, JSON lines per customer per minute (2 h). See [src/usage/README.md](../src/usage/README.md).
+      Done: `RL_USAGE_FILE`; a retried request ID is recorded once (`quota.lua` marks replays);
+      `tools/usage_report.py` totals matched Redis `used` exactly in a smoke run.
+- [x] `tools/rlctl` (1 h). See [tools/README.md](../tools/README.md).
+      Done: create, upgrade, downgrade, suspend, show; the plan catalogue moved to `tools/plans.sh`.
 - [ ] Thesis: quota and overage section of Chapter 3.
 
 Gate: request 2,001 gives three outcomes on three policies; an enterprise customer on leased quota
 stays within limit + N × C; every step B1 to B9 in [CUSTOMER_PLANS.md](CUSTOMER_PLANS.md) has a test
 or a "described, not built" note. Cut first: leased quota (becomes future work item one).
+
+Gate status: partly met.
+Gate result (2026-10-18): request 2,001 gives three outcomes through gRPC
+(`GrpcQuotaIT.Request2001GivesThreeAnswersOnThreePolicies`); every step B1 to B9 has a test or a
+"described, not built" note ([CUSTOMER_PLANS.md](CUSTOMER_PLANS.md)). Not yet: the enterprise
+customer on leased quota, because leased quota is not built.
 
 ## Week 5 (Nov 9 to 15): Reliability, observability and honest measurement
 

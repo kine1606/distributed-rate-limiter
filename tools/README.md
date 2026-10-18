@@ -1,6 +1,6 @@
 # Admin tools
 
-> Week 2 (seed script), Week 4 (rlctl, usage report) · Flow steps B1, B5, B6, B9 · Status: `seed_plans.sh` done (plan catalogue at its top; 20,010 plans in 0.3 s); `rlctl` and usage report not started
+> Week 2 (seed script), Week 4 (rlctl, usage report) · Flow steps B1, B5, B6, B9 · Status: `seed_plans.sh` done (20,010 plans in 0.3 s); Week 4 done: `rlctl`, `usage_report.py`, and the plan catalogue moved to `plans.sh`, which both scripts source
 
 ## What this module does
 
@@ -13,9 +13,10 @@ not on the hot path.
 
 | File | Purpose | Week |
 | --- | --- | --- |
+| `plans.sh` | The plan catalogue (`PLAN[name]`), sourced by `seed_plans.sh` and `rlctl` | 4 |
 | `seed_plans.sh` | Create many customers on Free, Pay and Enterprise for tests and benchmarks | 2 |
-| `rlctl` (Python or bash) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer | 4 |
-| `usage_report.py` | Sum usage-event files per customer across instances | 4 |
+| `rlctl` (bash, `redis-cli`) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer | 4 |
+| `usage_report.py` | Sum usage-event files per customer across instances (`--self-check` tests it) | 4 |
 | `plots/*.py` | Turn `results/` files into thesis figures | 7, 8 |
 
 ## Skeleton
@@ -26,11 +27,12 @@ REDIS_PORT=7002 tools/seed_plans.sh 1000000   # any cluster node works as the en
 ```
 
 ```text
-rlctl create   cust:42 --plan free
+rlctl create   cust:42 --plan free       # refuses a customer that already has a plan
 rlctl upgrade  cust:42 --plan pay        # HSET plan hash, then PUBLISH plan-changes cust:42
 rlctl downgrade cust:42 --plan free      # same; "end of cycle" is simulated by running it later
-rlctl suspend  cust:42
+rlctl suspend  cust:42                   # restore with `rlctl upgrade cust:42 --plan pay`
 rlctl show     cust:42                   # plan hash + today's quota hash
+tools/usage_report.py usage-*.jsonl      # one row per customer: billed, then each outcome
 ```
 
 ## Plan presets
@@ -60,5 +62,6 @@ limiter instance busy, which is where the lease accuracy bound matters.
 ## Done when
 
 - [x] Week 2: one command seeds the test customers.
-- [ ] Week 4: `rlctl upgrade` applies on all instances within one second (with the plan cache).
-- [ ] Week 4: `usage_report.py` totals used by the accuracy test.
+- [x] Week 4: `rlctl upgrade` applies on all instances within one second (with the plan cache):
+      `tests/plan_change_it.cc` runs `rlctl` itself (22 ms measured).
+- [x] Week 4: `usage_report.py` totals match Redis `used` (the accuracy test reuses it in Week 6).

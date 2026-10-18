@@ -5,7 +5,9 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: Weeks 1 and 2 done (proto v1 awaiting review), Week 3 started.** The limiter runs on a
+**Status: Weeks 1 to 3 done (Week 3 gate partly met); Week 4: overage policies, request IDs,
+deny cache, `CompositeCore`, plan cache with Pub/Sub, usage events and `tools/rlctl` done; leased
+quota and the Chapter 3 quota section to do.** The limiter runs on a
 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3) and enforces per-customer
 daily quotas from plan hashes in Redis: a Free customer is stopped at exactly 200 through gRPC
 (`tests/grpc_quota_it.cc`). The default engine serves non-strict rules from a lock-free local lease

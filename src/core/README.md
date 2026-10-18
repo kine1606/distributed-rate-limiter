@@ -1,6 +1,6 @@
 # Engines (`RateLimiterCore` implementations)
 
-> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `StrictCore` (plan-aware: `limit_from` rules read the customer's plan, quota denials are `kQuotaExhausted`) and `LeasedCore` done; `LeasedCore` is the server default and routes strict and plan rules to `StrictCore`; `CompositeCore` done (customer rules: suspended, deny cache, burst, quota with overage and request ID, burst given back on a quota denial), in front of the chosen engine in `main.cc`; usage recording waits for `src/usage`
+> Week 2 (StrictCore), Week 3 (LeasedCore), Week 4 (CompositeCore) · Flow steps A6, A11 · Status: `StrictCore` (plan-aware: `limit_from` rules read the customer's plan, quota denials are `kQuotaExhausted`) and `LeasedCore` done; `LeasedCore` is the server default and routes strict and plan rules to `StrictCore`; `CompositeCore` done (customer rules: suspended, deny cache, burst, quota with overage and request ID, burst given back on a quota denial), in front of the chosen engine in `main.cc`; records each customer decision once through a `UsageObserver` (`src/usage`), skipping and never deny-caching a replayed answer
 
 ## What this module does
 

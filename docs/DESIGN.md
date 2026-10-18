@@ -129,7 +129,7 @@ the backend sends `EVAL` once, which runs the script and caches it there.
 
 | Key (example) | Type and fields | Written by | Expires |
 | --- | --- | --- | --- |
-| `{cust:42}:plan` | HASH plan, daily, burst, refill, overage, extra, failure | `tools/seed_plans.sh`, later `rlctl` | never |
+| `{cust:42}:plan` | HASH plan, daily, burst, refill, overage, extra, failure | `tools/seed_plans.sh`, `tools/rlctl` (then `PUBLISH plan-changes cust:42`) | never |
 | `{cust:42}:daily_quota:q` | HASH day, used, overage_used | `quota.lua` | end of the UTC day + 1 h |
 | `{cust:42}:burst:tb` | HASH tokens (milli-tokens), last_refill_ms | `token_bucket.lua` | when the bucket would be full again, + 1 s |
 | `{user:42}:demo_sliding_window:sw` | HASH current and previous window counts | `sliding_window.lua` | from the window length |
@@ -198,8 +198,8 @@ it. Both counters reset with the UTC day. Tested in `tests/lua_scripts_test.cc` 
 the customer until now + `reset_after_ms`, the reset Redis returned, so the entry ends when the
 Redis counter does. Each entry also keeps a stamp of the plan's quota terms (daily, policy, extra).
 A check under a different plan ignores and drops the entry, so an upgrade lifts the denial on the
-very next request, before plan-change messages exist and without trusting them to arrive. Until the
-plan cache, a denied customer still costs one plan read per request, but no script call.
+very next request, without trusting plan-change messages to arrive. With the plan cache, a denied
+customer costs no Redis call at all until the reset or a plan change.
 
 **Request ID deduplication.** A non-empty `request_id` makes `quota.lua` store its answer under
 `{cust:42}:daily_quota:req:<id>` for 5 minutes, with the same hash tag as the counter, so one atomic
@@ -210,9 +210,28 @@ again. The rule name is part of the key so two quota rules never share an answer
 - The deny cache answers before Redis. A retry of a request that was allowed, arriving after the
   quota ran out on this instance, is denied locally. It is not counted twice, but its answer differs
   from the original.
-- A retried denial replayed after an upgrade puts the customer back in the deny cache under the new
-  plan until the reset. It needs a lost denial, an upgrade and the retry within the gateway's retry
-  window; marking replayed answers would close it.
+- Closed: a retried denial replayed after an upgrade used to put the customer back in the deny
+  cache under the new plan. `quota.lua` now marks replayed answers, and `CompositeCore` neither
+  caches nor records them.
+
+**Plan cache and plan changes** (`src/plan/plan_store.cc`, `src/redis/plan_listener.cc`). Each
+instance keeps a customer's plan for 5 s (`RL_PLAN_TTL_MS`), so a check costs one script call
+instead of a plan read and a script call. A miss sends one `HGETALL` however many checks wait for
+it. `rlctl` writes the plan hash first, then publishes the customer ID on `plan-changes`; every
+instance drops its cached plan and deny-cache entry. A read in flight when the message arrives is
+thrown away and sent again, because it may have read the old hash. A subscriber that reconnects
+drops every cached plan, since Pub/Sub keeps no messages for an absent subscriber. The bound: a plan
+change applies within the message delay normally (22 ms measured from starting `rlctl` to both of
+two instances, `tests/plan_change_it.cc`), and within the 5 s TTL if a message is lost while the
+connection looks healthy.
+
+**Usage events** (`src/usage/usage_log.cc`, steps A13 and B8). With `RL_USAGE_FILE` set, every customer
+decision is recorded once, with its reason and cost, into a bounded buffer that a background
+thread sums per customer and minute and appends to a JSON-lines file every second. A full buffer
+drops and counts; it never delays the answer. A retried request ID's stored answer is not recorded,
+so the file counts each request once: in a smoke run its `allowed` total equalled Redis `used`
+exactly (5,049), with 1,757 retries in the traffic. `tools/usage_report.py` sums files across
+instances. Billing reads `allowed + overage`; `unverified` admissions are listed but not billed.
 
 ## 6. Lease protocol and accuracy bound (Week 3, measured Week 6)
 
@@ -348,7 +367,7 @@ not.
 | Batcher (`RL_BATCHER`) | off | a profile shows Redis writes per call on the critical path | (measured Week 3: no gain, timer +130 µs p50) |
 | Batcher `max_delay` | 200 µs | batches are small and Redis is busy | p99 is too high |
 | Batcher `max_batch` | 128 | flushes are mostly by size | |
-| Plan cache TTL | 5 s | plan reads show in the profile | upgrades must apply faster without Pub/Sub |
+| Plan cache TTL (`RL_PLAN_TTL_MS`) | 5 s | plan reads show in the profile | a lost `plan-changes` message must not delay a change this long |
 | Instances | | CPU of instances is saturated | |
 | Redis masters | 3 | a master's CPU is saturated | |
 

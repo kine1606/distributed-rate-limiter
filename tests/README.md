@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 123 tests: 78 unit, 33 script (plain Redis on 127.0.0.1:6380), 12 integration (dev cluster on 127.0.0.1:7001); one executable per level
+> Every week · Status: 161 tests: 113 unit, 33 script (plain Redis on 127.0.0.1:6380), 15 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
 
 ## How tests are organised
 
@@ -23,16 +23,20 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | File | Level | Week | Covers |
 | --- | --- | --- | --- |
 | `lua_scripts_test.cc` | script | 1, 4 | done: 33 cases, including overage policies, request ID and `return_lease.lua` |
-| `keys_test.cc` | unit | 2 | done: hash-tag key builders |
+| `keys_test.cc` | unit | 2, 4 | done: hash-tag key builders, request key shares the tag |
 | `plan_test.cc` | unit | 2 | done: plan parsing, Free default, broken hash |
-| `strict_core_test.cc` | unit | 2 | done: `StrictCore` on `FakeBackend`, plan rules |
+| `strict_core_test.cc` | unit | 2, 4 | done: `StrictCore` on `FakeBackend`, plan rules, replayed answers, one plan read with the cache |
+| `service_test.cc` | unit | 4 | done: gRPC service on an in-process channel: validation before the engine, status versus reason, late answers from other threads, batch order and limits |
 | `redis_backend_it.cc` | integration | 2 | done: backend against the cluster, `NOSCRIPT` fallback |
 | `grpc_quota_it.cc` | integration | 2, 4 | done: Week 2 gate (exactly 200), Week 4 gate (request 2,001 on three policies), suspended, retried request counted once |
 | `lease_test.cc` | unit + TSan | 3 | done: `TryTake`, lease table, chunk policy |
-| `batcher_test.cc` | unit + TSan | 3 | done: timer and adaptive batching, every caller its own reply, drain on destruction |
+| `batcher_test.cc` | unit + TSan | 3, 4 | done: timer and adaptive batching, every caller its own reply, drain on destruction, queued calls keep their rule numbers and request ID |
 | `lease_harness_test.cc` | unit | 3 | done: seeded fake Redis and fake clock, bound in every window; `RL_HARNESS_SEEDS`, `RL_HARNESS_SEED` |
-| `composite_core_test.cc` | unit | 4 | done: every branch of the A2 decision tree |
-| `deny_cache_test.cc` | unit | 4 | done: reset time, plan change, clear, sweep |
+| `composite_core_test.cc` | unit | 4 | done: every branch of the A2 decision tree, usage events once per decision, replays neither recorded nor cached |
+| `deny_cache_test.cc` | unit + TSan | 4 | done: reset time, plan change, clear, sweep, replacement, concurrent use |
+| `plan_store_test.cc` | unit | 4 | done: plan cache hits, TTL, single flight, invalidation racing a read, errors not cached, sweep |
+| `usage_log_test.cc` | unit + TSan | 4 | done: sums per customer and outcome, escaping, periodic flush, every event written or counted as dropped |
+| `plan_change_it.cc` | integration | 4 | done: steps B5 and B9 through `rlctl` on two instances within one second; `rlctl` input checks |
 | `overage_test.cc` | script | 4 | built inside `lua_scripts_test.cc` and `grpc_quota_it.cc` instead |
 | `breaker_test.cc` | unit | 5 | Breaker states with a fake clock |
 | `tests/eval/*.sh` | evaluation | 6 | The nine tests in `docs/EVALUATION.md` |

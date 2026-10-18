@@ -130,10 +130,10 @@ argument hold: large plans no longer send every quota check to Redis.
 - [x] **Overage policies and request ID in `quota.lua` (4 h).** `hard`, `grace`, `cap` with an `overage_used` counter; a retried request ID returns the stored result and is never counted twice. Week 1 tests must still pass unchanged.
 - [x] **Deny cache (1.5 h).** After a quota denial, deny locally until the reset time Redis returned; cleared by plan-change messages.
 - [x] **`CompositeCore` (3 h).** Order: suspended, deny cache, burst lease, quota, overage mapping. If the quota denies, give the burst tokens back. One test per branch of the decision tree.
-- [ ] **Plan cache with Pub/Sub invalidation (2 h).** TTL about 5 s as a safety net; measure how long an upgrade takes to reach every instance.
+- [x] **Plan cache with Pub/Sub invalidation (2 h).** TTL about 5 s as a safety net; measure how long an upgrade takes to reach every instance.
 - [ ] **Leased quota for large plans (3 h).** Rule setting `quota_mode: auto`: strict below a daily limit of about 100,000, leased above it with a chunk of at most 0.1% of the daily limit. Same lease machinery as burst, so the cost is a quota-lease variant of the script and a branch in `CompositeCore`.
-- [ ] **Usage events (2 h).** Bounded buffer, aggregated per customer per minute, flushed to a JSON-lines file every second; drops counted in a metric.
-- [ ] **`rlctl` admin tool (1 h).** Create, upgrade, downgrade, suspend, show.
+- [x] **Usage events (2 h).** Bounded buffer, aggregated per customer per minute, flushed to a JSON-lines file every second; drops counted in a metric.
+- [x] **`rlctl` admin tool (1 h).** Create, upgrade, downgrade, suspend, show.
 - [ ] Thesis: quota and overage section of Chapter 3, with the request 2,001 example and the product-decisions table.
 
 Gate: request 2,001 gives three different outcomes on three policies; an enterprise customer on leased quota stays within limit + N x C in one quick run; every customer plan step B1 to B9 has a test or a written "described, not built" note.
