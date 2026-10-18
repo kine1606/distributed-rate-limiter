@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace ratelimiter {
 namespace {
@@ -33,6 +35,31 @@ TEST(DenyCache, ClearOnAPlanChangeMessage) {
   c.Clear("cust:1");
   EXPECT_EQ(c.DeniedFor("cust:1", 7, 0), 0u);
   EXPECT_EQ(c.DeniedFor("cust:2", 7, 0), 60'000u);
+}
+
+TEST(DenyCache, ALaterDenialReplacesTheEarlierOne) {  // e.g. a cap customer's overage ran out later
+  DenyCache c;
+  c.Deny("cust:1", 7, 0, 1'000);
+  c.Deny("cust:1", 8, 0, 60'000);
+  EXPECT_EQ(c.DeniedFor("cust:1", 8, 2'000 * kMs), 58'000u);
+  EXPECT_EQ(c.Size(), 1u);
+}
+
+TEST(DenyCache, ConcurrentDenyCheckAndClearAreSafe) {  // for TSan: shards are shared by threads
+  DenyCache c;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 8; ++t) {
+    threads.emplace_back([&c, t] {
+      for (int i = 0; i < 5'000; ++i) {
+        const std::string customer = "cust:" + std::to_string(i % 64);
+        if ((i + t) % 3 == 0) c.Deny(customer, 1, i, 60'000);
+        if ((i + t) % 3 == 1) c.DeniedFor(customer, 1, i);
+        if ((i + t) % 7 == 0) c.Clear(customer);
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  EXPECT_LE(c.Size(), 64u);
 }
 
 TEST(DenyCache, CustomersWhoNeverComeBackAreSweptAway) {

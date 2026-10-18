@@ -124,5 +124,40 @@ TEST(Batcher, ConcurrentCallersAllGetAnAnswer) {
   EXPECT_EQ(answered.load(), 4000);
 }
 
+// StrictCore passes a temporary rule with the plan's numbers: the batch must hold its own copy, and
+// the request id must survive the queue.
+TEST(Batcher, QueuedCallsKeepTheirRuleNumbersAndRequestId) {
+  struct Recorder final : RedisBackend {
+    using RedisBackend::Eval;
+    void Eval(const Rule& rule, std::string_view key, std::uint32_t, std::string_view id,
+              ScriptCallback done) override {
+      seen.push_back(rule.name + "/" + std::to_string(rule.limit) + "/" + std::string(key) + "/" + std::string(id));
+      done({.allowed = true});
+    }
+    void Return(const Rule& rule, std::string_view, std::uint32_t tokens, ScriptCallback done) override {
+      seen.push_back("return/" + rule.name + "/" + std::to_string(tokens));
+      done({.allowed = true});
+    }
+    void HGetAll(std::string key, HashCallback done) override {
+      seen.push_back("hgetall/" + key);
+      done({});
+    }
+    std::vector<std::string> seen;
+  } inner;
+  {
+    Batcher b(inner, Batcher::Mode::kTimer, std::chrono::microseconds(10'000'000), 128);  // sent at destruction
+    {
+      Rule plan_numbers = kRule;
+      plan_numbers.limit = 77;
+      std::string key = "cust:42";
+      b.Eval(plan_numbers, key, 1, "id-1", [](const ScriptResult&) {});
+    }  // the caller's rule and key are gone before the batch goes out
+    b.Return(kRule, "cust:42", 2, [](const ScriptResult&) {});    // not batched: straight through
+    b.HGetAll("{cust:42}:plan", [](const HashResult&) {});         // neither
+    EXPECT_EQ(inner.seen, (std::vector<std::string>{"return/b/2", "hgetall/{cust:42}:plan"}));
+  }
+  EXPECT_EQ(inner.seen.back(), "b/77/cust:42/id-1");
+}
+
 }  // namespace
 }  // namespace ratelimiter
