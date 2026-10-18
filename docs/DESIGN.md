@@ -130,11 +130,11 @@ the backend sends `EVAL` once, which runs the script and caches it there.
 | Key (example) | Type and fields | Written by | Expires |
 | --- | --- | --- | --- |
 | `{cust:42}:plan` | HASH plan, daily, burst, refill, overage, extra, failure | `tools/seed_plans.sh`, later `rlctl` | never |
-| `{cust:42}:daily_quota:q` | HASH day, used (overage_used from Week 4) | `quota.lua` | end of the UTC day + 1 h |
+| `{cust:42}:daily_quota:q` | HASH day, used, overage_used | `quota.lua` | end of the UTC day + 1 h |
 | `{cust:42}:burst:tb` | HASH tokens (milli-tokens), last_refill_ms | `token_bucket.lua` | when the bucket would be full again, + 1 s |
 | `{user:42}:demo_sliding_window:sw` | HASH current and previous window counts | `sliding_window.lua` | from the window length |
 | `{user:42}:demo_fixed_window:fw` | counter of the current window | `fixed_window.lua` | end of the window |
-| `{cust:42}:req:<id>` | STRING encoded result | `quota.lua` (Week 4) | 5 min |
+| `{cust:42}:daily_quota:req:<id>` | STRING `allowed,used,remaining,overage` | `quota.lua` | 5 min |
 
 Every key is built in `src/redis/keys.h` as `{<entity>}:<rule>:<algorithm>`, except the plan.
 
@@ -165,9 +165,54 @@ the active customers, not every customer ever seen.
 
 ## 5. Quota and overage logic (Week 4)
 
-> HINT: The three policies with one worked example each: request 2,001 for a `hard`, a `grace` and
-> a `cap` customer. Include the decision order from `CompositeCore` (suspended, deny cache, burst,
-> quota) and why burst goes first. Explain request ID deduplication and its limit (quota only).
+**One rule per API call.** A gateway sends `Check{key: "cust:42", rule: "customer"}`. The
+`customer` rule (`config/rules.yaml`) names a token-bucket rule (`burst`) and a quota rule
+(`daily_quota`), and `CompositeCore` (`src/core/composite_core.cc`) reads the plan once and decides
+in this order:
+
+1. **Suspended plan:** `SUSPENDED` (HTTP 403), no script call.
+2. **Deny cache hit:** `QUOTA_EXHAUSTED` with the cached reset, no script call.
+3. **Burst:** a denial answers `RATE_LIMITED` at once and uses no quota.
+4. **Daily quota** under the plan's overage policy. On a denial the burst token goes back
+   (`lua/return_lease.lua`) and the denial is cached.
+
+Burst goes first because a request refused for burst must not consume daily quota, and because it
+becomes a local check once burst is leased per customer (with the plan cache). The give-back matters:
+without it an over-quota customer drains their own burst bucket and later sees `RATE_LIMITED`
+instead of the true reason.
+
+**Request 2,001 on three policies** (a plan of 2,000 a day, 2,000 used):
+
+| Policy | Plan | Request 2,001 | After it |
+| --- | --- | --- | --- |
+| `hard` | free | denied, `QUOTA_EXHAUSTED`, retry at 00:00 UTC | used 2,000 |
+| `grace`, extra 200 | pay | allowed, `OK`, remaining 0 | used 2,001; denied after 2,200 |
+| `cap`, extra 1,000 | pay_cap | allowed, `OVERAGE` | used 2,000, overage_used 1; denied after 1,000 more |
+
+Grace is free, so it answers `OK`; cap is billed, so it answers `OVERAGE` and counts the overage
+apart from the plan, for billing. A cap request that straddles the limit bills only the part beyond
+it. Both counters reset with the UTC day. Tested in `tests/lua_scripts_test.cc` and through gRPC in
+`tests/grpc_quota_it.cc` (the Week 4 gate).
+
+**Deny cache** (`src/lease/deny_cache.h`). After a `QUOTA_EXHAUSTED` answer the instance remembers
+the customer until now + `reset_after_ms`, the reset Redis returned, so the entry ends when the
+Redis counter does. Each entry also keeps a stamp of the plan's quota terms (daily, policy, extra).
+A check under a different plan ignores and drops the entry, so an upgrade lifts the denial on the
+very next request, before plan-change messages exist and without trusting them to arrive. Until the
+plan cache, a denied customer still costs one plan read per request, but no script call.
+
+**Request ID deduplication.** A non-empty `request_id` makes `quota.lua` store its answer under
+`{cust:42}:daily_quota:req:<id>` for 5 minutes, with the same hash tag as the counter, so one atomic
+script reads and writes both. A retry gets the stored answer, denials included, and is not counted
+again. The rule name is part of the key so two quota rules never share an answer. Limits:
+
+- Quota only. Burst is not deduplicated: a retry is still traffic.
+- The deny cache answers before Redis. A retry of a request that was allowed, arriving after the
+  quota ran out on this instance, is denied locally. It is not counted twice, but its answer differs
+  from the original.
+- A retried denial replayed after an upgrade puts the customer back in the deny cache under the new
+  plan until the reset. It needs a lost denial, an upgrade and the retry within the gateway's retry
+  window; marking replayed answers would close it.
 
 ## 6. Lease protocol and accuracy bound (Week 3, measured Week 6)
 

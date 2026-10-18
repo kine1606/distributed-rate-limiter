@@ -142,11 +142,16 @@ separate machines (Week 8 bonus run).
 
 Goal: quota-service behaviour, plus the change that makes the 1M checks/s argument hold. About 16.5 h.
 
-- [ ] Overage policies and request ID in `quota.lua` (4 h); Week 1 tests still pass unchanged.
+- [x] Overage policies and request ID in `quota.lua` (4 h); Week 1 tests still pass unchanged.
       See [lua/README.md](../lua/README.md#week-4-overage-policies).
-- [ ] Local deny cache (1.5 h). See [src/lease/README.md](../src/lease/README.md#deny-cache-week-4).
-- [ ] `CompositeCore` (3 h): suspended, deny cache, burst, quota, overage; give burst back on a quota
+      Done: `hard`, `grace` (free, answers `OK`), `cap` (billed, answers `OVERAGE`); a retried request
+      ID gets the stored answer and is counted once; `return_lease.lua` built early for the burst refund.
+- [x] Local deny cache (1.5 h). See [src/lease/README.md](../src/lease/README.md#deny-cache-week-4).
+      Done (`src/lease/deny_cache.h`): ends at the Redis reset; a changed plan lifts it at once.
+- [x] `CompositeCore` (3 h): suspended, deny cache, burst, quota, overage; give burst back on a quota
       deny. See [src/core/README.md](../src/core/README.md#week-4-compositecore).
+      Done: rule `customer` in `config/rules.yaml`, one plan read per call, a test per branch; request
+      2,001 gives three answers on three policies through gRPC (first part of the gate).
 - [ ] `PlanCache` with Pub/Sub invalidation and a 5 s TTL (2 h). See [src/plan/README.md](../src/plan/README.md).
 - [ ] Leased quota for large plans (3 h, Should): `quota_mode: auto`, strict below a daily limit of
       about 100,000, leased above with chunk <= 0.1% of the daily limit.

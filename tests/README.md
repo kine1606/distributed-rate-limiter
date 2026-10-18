@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 87 tests passing: 55 unit, 24 script (plain Redis on 127.0.0.1:6380), 8 integration (dev cluster on 127.0.0.1:7001); one executable per level
+> Every week · Status: 123 tests: 78 unit, 33 script (plain Redis on 127.0.0.1:6380), 12 integration (dev cluster on 127.0.0.1:7001); one executable per level
 
 ## How tests are organised
 
@@ -22,17 +22,18 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 
 | File | Level | Week | Covers |
 | --- | --- | --- | --- |
-| `lua_scripts_test.cc` | script | 1 | done: 24 cases |
+| `lua_scripts_test.cc` | script | 1, 4 | done: 33 cases, including overage policies, request ID and `return_lease.lua` |
 | `keys_test.cc` | unit | 2 | done: hash-tag key builders |
 | `plan_test.cc` | unit | 2 | done: plan parsing, Free default, broken hash |
 | `strict_core_test.cc` | unit | 2 | done: `StrictCore` on `FakeBackend`, plan rules |
 | `redis_backend_it.cc` | integration | 2 | done: backend against the cluster, `NOSCRIPT` fallback |
-| `grpc_quota_it.cc` | integration | 2 | done: Week 2 gate, exactly 200 through gRPC |
+| `grpc_quota_it.cc` | integration | 2, 4 | done: Week 2 gate (exactly 200), Week 4 gate (request 2,001 on three policies), suspended, retried request counted once |
 | `lease_test.cc` | unit + TSan | 3 | done: `TryTake`, lease table, chunk policy |
 | `batcher_test.cc` | unit + TSan | 3 | done: timer and adaptive batching, every caller its own reply, drain on destruction |
 | `lease_harness_test.cc` | unit | 3 | done: seeded fake Redis and fake clock, bound in every window; `RL_HARNESS_SEEDS`, `RL_HARNESS_SEED` |
-| `composite_core_test.cc` | unit | 4 | Every branch of the A2 decision tree |
-| `overage_test.cc` | script | 4 | Request 2,001 on three policies |
+| `composite_core_test.cc` | unit | 4 | done: every branch of the A2 decision tree |
+| `deny_cache_test.cc` | unit | 4 | done: reset time, plan change, clear, sweep |
+| `overage_test.cc` | script | 4 | built inside `lua_scripts_test.cc` and `grpc_quota_it.cc` instead |
 | `breaker_test.cc` | unit | 5 | Breaker states with a fake clock |
 | `tests/eval/*.sh` | evaluation | 6 | The nine tests in `docs/EVALUATION.md` |
 

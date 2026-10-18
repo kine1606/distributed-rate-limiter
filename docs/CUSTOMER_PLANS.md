@@ -1,6 +1,6 @@
 # Customer plan phase (Part B)
 
-> Built across Weeks 2, 4 and 5 · Flow steps B1 to B9 on the Quota Service Flow page · Status: B1 done (missing plan = Free, seeding); B2 limit and remaining from the plan through gRPC; Lua side of B5 to B7 done
+> Built across Weeks 2, 4 and 5 · Flow steps B1 to B9 on the Quota Service Flow page · Status: B1 done (missing plan = Free, seeding); B2 limit and remaining from the plan through gRPC; B4 done (three policies, deny cache; Week 4 gate test passes through gRPC); B9 limiter side done (`SUSPENDED`), `rlctl suspend` to do; Lua side of B5 to B7 done
 
 ## What this phase is
 
@@ -100,8 +100,10 @@ to a cap and marks each request `OVERAGE`. After a final denial the instance wri
 entry so further requests stop locally.
 
 - **You build:** `quota.lua` v2 (Week 4), `CompositeCore` overage mapping, `DenyCache`.
-- **Test:** `overage_test.cc`: the same request 2,001 on three customers gives deny, allow, allow
-  with overage. This is the Week 4 gate.
+- **Test:** the same request 2,001 on three customers gives deny, allow, allow with overage:
+  `Request2001OnHardGraceAndCapGivesThreeDifferentAnswers` (script) and
+  `Request2001GivesThreeAnswersOnThreePolicies` (through gRPC). This is the Week 4 gate. Grace answers
+  `OK` (free) and cap answers `OVERAGE` (billed).
 
 ### B5. Upgrade mid-day
 

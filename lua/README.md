@@ -1,6 +1,6 @@
 # Lua scripts
 
-> Weeks 1, 4, 5 · Flow steps A10, B5, B6, B7 · Status: `token_bucket.lua`, `fixed_window.lua`, `sliding_window.lua` and `quota.lua` done and tested
+> Weeks 1, 4, 5 · Flow steps A10, B4, B5, B6, B7 · Status: `token_bucket.lua`, `fixed_window.lua`, `sliding_window.lua`, `quota.lua` v2 (overage policies, request ID) and `return_lease.lua` done and tested
 
 ## What this module does
 
@@ -14,9 +14,9 @@ That atomicity is the whole reason for using Lua instead of `GET` then `SET` fro
 | --- | --- | --- | --- |
 | `token_bucket.lua` | Burst limit; also serves lease refills through `requested` | 1 | done |
 | `quota.lua` | Daily quota per UTC day, stores `used` | 1 | done |
-| `quota.lua` (extended) | Overage policies `hard`, `grace`, `overage_cap` | 4 | to do |
-| `dedupe` logic | Request ID: count a retried request once | 4 | to do |
-| `return_lease.lua` | Give unused leased tokens back on shutdown | 5 | to do |
+| `quota.lua` (extended) | Overage policies `hard`, `grace`, `cap` | 4 | done |
+| `dedupe` logic | Request ID: count a retried request once | 4 | done, inside `quota.lua` |
+| `return_lease.lua` | Give tokens back: a burst token after a quota denial (Week 4), unused leases on shutdown (Week 5) | 4 | done; shutdown use in Week 5 |
 | `fixed_window.lua` | Counter per epoch-aligned window; cheapest, up to 2x limit across an edge | 2 | done |
 | `sliding_window.lua` | Sliding window *counter* (current + weighted previous window), O(1) | 2 | done |
 
@@ -50,10 +50,16 @@ fixed_window.lua / sliding_window.lua
   ARGV    = limit, window_ms, requested
   returns   { allowed 0|1, remaining, retry_after_ms }   (TTL computed inside from the window)
 
-quota.lua
+quota.lua (v2, Week 4)
   KEYS[1] = {cust:42}:daily_quota:q
-  ARGV    = daily_limit, cost
-  returns   { allowed 0|1, used, remaining, reset_after_ms }
+  KEYS[2] = {cust:42}:daily_quota:req:<request_id>   (optional)
+  ARGV    = daily_limit, cost, policy ("hard" | "grace" | "cap", default hard), extra (default 0)
+  returns   { allowed 0|1, used, remaining, reset_after_ms, overage 0|1 }
+
+return_lease.lua
+  KEYS[1] = {cust:42}:burst:tb
+  ARGV    = capacity, tokens_to_return
+  returns   { 1, tokens now, 0 }   (a missing bucket is full: nothing is created)
 ```
 
 ## Week 4: overage policies
@@ -77,8 +83,10 @@ Build it in this order:
    `used + cost <= limit + extra`. `cap` allows while `overage_used + cost <= extra` and increments
    `overage_used`, because overage is billed separately from the plan.
 3. Reset `overage_used` together with `used` when the day changes.
-4. Return `overage = 1` for every request admitted beyond the limit, so the usage event and the
-   response can mark it.
+4. Return `overage = 1` for every request admitted as billed overage (`cap`), so the usage event
+   and the response can mark it. Built that way: grace is free, so it answers `overage = 0` and the
+   response says `OK`; that is also what gives request 2,001 three different answers. A `cap`
+   request that straddles the limit bills only the part beyond it.
 5. Add tests: request 2,001 on three customers gives deny, allow, and allow with `overage = 1`;
    the cap is respected exactly; rollover resets both counters.
 
@@ -92,7 +100,8 @@ A gateway that times out and retries must not be charged twice.
 
 ```text
 inside quota.lua (v2), before counting:
-  KEYS[2] = {cust:42}:req:<request_id>      -- same hash tag as KEYS[1]
+  KEYS[2] = {cust:42}:daily_quota:req:<request_id>   -- same hash tag; built: the rule name keeps two
+                                                     -- quota rules from sharing one stored answer
   if request_id given:
       if EXISTS KEYS[2]: return the stored result (do not count again)
       after deciding:   SET KEYS[2] <encoded result> PX 300000
@@ -128,6 +137,7 @@ redis-cli HGETALL '{c1}:quota'
 ## Done when
 
 - [x] Week 1: `tests/lua_scripts_test.cc` passes against real Redis.
-- [ ] Week 4: overage and request ID tests pass; the old tests still pass.
+- [x] Week 4: overage and request ID tests pass; the old tests still pass unchanged
+      (`tests/lua_scripts_test.cc`, 9 new cases, including `return_lease.lua`).
 - [ ] Week 5: `return_lease.lua` tested (tokens never exceed capacity).
 - [ ] Every script has a header comment explaining each step (spec requirement).
