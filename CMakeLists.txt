@@ -95,7 +95,7 @@ add_library(rl_config STATIC src/config/rule_config.cc)
 target_include_directories(rl_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_config PUBLIC rl_api yaml-cpp::yaml-cpp)
 
-add_library(rl_redis STATIC src/redis/redispp_backend.cc)
+add_library(rl_redis STATIC src/redis/redispp_backend.cc src/redis/batcher.cc)
 target_include_directories(rl_redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${REDISPP_INCLUDE_DIR})
 target_link_libraries(rl_redis PUBLIC rl_api ${REDISPP_LIB} ${RL_HIREDIS} ${UV_LIB} OpenSSL::Crypto spdlog::spdlog
                                       Threads::Threads)

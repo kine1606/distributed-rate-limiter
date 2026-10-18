@@ -4,7 +4,8 @@ include(GoogleTest)
 # One executable per level, so `ctest -L unit|redis|integration` runs one level (tests/README.md).
 # Unit: no network.
 add_executable(rl_unit_tests config_test.cc convert_test.cc core_test.cc keys_test.cc plan_test.cc
-                             strict_core_test.cc lease_test.cc leased_core_test.cc lease_harness_test.cc)
+                             strict_core_test.cc lease_test.cc leased_core_test.cc lease_harness_test.cc
+                             batcher_test.cc)
 # Script: Lua scripts against a plain Redis (127.0.0.1:6380, or RL_TEST_REDIS).
 add_executable(rl_redis_tests lua_scripts_test.cc)
 # Integration: backend and gRPC against the dev cluster (127.0.0.1:7001, or RL_TEST_CLUSTER).
