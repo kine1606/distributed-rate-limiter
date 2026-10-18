@@ -80,22 +80,22 @@ next week; never push the Nov 22 freeze. Hours are estimates at about 15 to 17 h
 
 ### Week 1 (Oct 12 to 18): Redis, Lua and the API contract
 
-- [ ] Redis client spike (Day 1 to 2): confirm `redis-plus-plus` async cluster can pipeline `EVALSHA` and pool connections; decide, or fall back to `hiredis`, and write the justification.
-- [ ] Bring up the 3-master cluster and check slot routing with hash-tagged keys.
+- [x] Redis client spike (Day 1 to 2): confirm `redis-plus-plus` async cluster can pipeline `EVALSHA` and pool connections; decide, or fall back to `hiredis`, and write the justification.
+- [x] Bring up the 3-master cluster and check slot routing with hash-tagged keys.
 - [x] Daily quota Lua script: plan and usage under one hash tag, UTC day from Redis `TIME`.
 - [x] Burst token bucket Lua script with a `requested` argument.
 - [x] GoogleTest suite against real Redis: rollover, upgrade mid-day, downgrade, cost greater than limit, expiry.
-- [ ] Proto v1: your redesign, then review (`reason`, `reset_after_ms`, `request_id`).
+- [x] Proto v1: your redesign, then review (`reason`, `reset_after_ms`, `request_id`).
 
 Gate: both scripts pass every edge case; proto v1 agreed.
 
 ### Week 2 (Oct 19 to 25): Strict engine end to end
 
-- [ ] `RedisBackend`: async calls, `SCRIPT LOAD` at startup, `EVALSHA` with `NOSCRIPT` fallback.
-- [ ] Strict engine behind `RateLimiterCore`, wired into the gRPC server in place of the allow-all stub.
-- [ ] Plan seeding script writing `{cust:N}:plan` hashes for free, pay and enterprise customers.
-- [ ] Baseline benchmark with `ghz` on 1 instance; raw output in `results/`.
-- [ ] Thesis: Chapters 1 and 2 drafts.
+- [x] `RedisBackend`: async calls, `SCRIPT LOAD` at startup, `EVALSHA` with `NOSCRIPT` fallback.
+- [x] Strict engine behind `RateLimiterCore`, wired into the gRPC server in place of the allow-all stub.
+- [x] Plan seeding script writing `{cust:N}:plan` hashes for free, pay and enterprise customers.
+- [x] Baseline benchmark with `ghz` on 1 instance; raw output in `results/`.
+- [x] Thesis: Chapters 1 and 2 drafts.
 
 Gate: a free customer is stopped at exactly 200 through gRPC; baseline numbers saved.
 
@@ -109,14 +109,14 @@ Should items below rather than moving the freeze.
 Goal: burst checks served from local memory, Redis seeing only batched refills, and a test harness
 that can prove the lease never breaks its bound.
 
-- [ ] **Lease table (4 h).** Sharded map from interned key id to a 64-byte-aligned lease; `TryTake` is a compare-and-swap loop. Interning turns the key string into a `uint64` once, so a hit allocates nothing and compares integers.
-- [ ] **Single-flight refill with early refill (2 h).** One refill in flight per key; others park. Refill starts when tokens fall below 30% of the last chunk, so most refills land before the lease is empty.
-- [ ] **Adaptive chunk size (2 h).** Double the chunk when the lease empties within one refill round trip, halve it when tokens sit unused, never above the cap (a fraction of capacity). Log every change so the thesis can plot chunk size against demand.
-- [ ] **Adaptive batcher (3 h).** Flush immediately when nothing is in flight and the queue was empty; otherwise collect until the batch is full or the timer fires. Compare against a fixed 200 µs timer: p50 at low load, throughput at high load.
-- [ ] **Deterministic test harness (2 h).** Fake Redis plus fake clock replying in seeded random order. Run thousands of seeds and assert admitted <= limit + N x C every time; a failing seed replays exactly.
-- [ ] **Microbenchmark ablation (2 h).** `TryTake` with and without `alignas(64)`, CAS vs `fetch_sub`, 1 vs 16 vs 64 shards, at 1, 4 and 16 threads, one hot key vs 10,000 keys. The false-sharing result is a figure for Chapter 4.
-- [ ] ThreadSanitizer on every lease test from the first commit.
-- [ ] Thesis (30 min a day): lease protocol notes and the first draft of the accuracy-bound derivation.
+- [x] **Lease table (4 h).** Sharded map from interned key id to a 64-byte-aligned lease; `TryTake` is a compare-and-swap loop. Interning turns the key string into a `uint64` once, so a hit allocates nothing and compares integers.
+- [x] **Single-flight refill with early refill (2 h).** One refill in flight per key; others park. Refill starts when tokens fall below 30% of the last chunk, so most refills land before the lease is empty.
+- [x] **Adaptive chunk size (2 h).** Double the chunk when the lease empties within one refill round trip, halve it when tokens sit unused, never above the cap (a fraction of capacity). Log every change so the thesis can plot chunk size against demand.
+- [x] **Adaptive batcher (3 h).** Flush immediately when nothing is in flight and the queue was empty; otherwise collect until the batch is full or the timer fires. Compare against a fixed 200 µs timer: p50 at low load, throughput at high load.
+- [x] **Deterministic test harness (2 h).** Fake Redis plus fake clock replying in seeded random order. Run thousands of seeds and assert admitted <= limit + N x C every time; a failing seed replays exactly.
+- [x] **Microbenchmark ablation (2 h).** `TryTake` with and without `alignas(64)`, CAS vs `fetch_sub`, 1 vs 16 vs 64 shards, at 1, 4 and 16 threads, one hot key vs 10,000 keys. The false-sharing result is a figure for Chapter 4.
+- [x] ThreadSanitizer on every lease test from the first commit.
+- [x] Thesis (30 min a day): lease protocol notes and the first draft of the accuracy-bound derivation.
 
 Gate: lease hit ratio at least 95% under the Week 2 load; 500 concurrent misses on one key cause exactly one refill; lease mode at least 4x the strict baseline of 25,301 checks/s on the same `ghz` command, with p99 under 2 ms at 10,000 checks/s offered.
 

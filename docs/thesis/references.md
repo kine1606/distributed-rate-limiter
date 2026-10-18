@@ -36,9 +36,14 @@ check the bibliographic details against the original before submission. Web page
    Europe, USENIX. https://usenix.org/conference/srecon16europe/program/presentation/visser ;
    code https://github.com/youtube/doorman (archived 2024). Capacity granted as time-limited
    leases with periodic refresh; clients cooperate.
-10. **L** C. G. Gray, D. R. Cheriton. "Leases: An Efficient Fault-Tolerant Mechanism for
+10. **V** C. G. Gray, D. R. Cheriton. "Leases: An Efficient Fault-Tolerant Mechanism for
     Distributed File Cache Consistency." *Proc. 12th ACM Symposium on Operating Systems
-    Principles (SOSP)*, 1989.
+    Principles (SOSP '89)*, Litchfield Park, AZ, December 1989, pp. 202-210. ACM, ISBN 0-89791-338-3.
+    Checked 2026-10-18 on a scan of the paper (title page numbered 202, "© 1989 ACM
+    089791-338-3/89/0012/0202"); pages from dblp. Quoted: "A *lease* is a contract that gives its
+    holder specified rights over property for a limited period of time." The abstract: leases are
+    "a time-based mechanism"; "Non-Byzantine failures affect performance, not correctness, with
+    their effect minimized by short leases."
 11. **V** Redis. "Scripting with Lua." https://redis.io/docs/latest/develop/programmability/eval-intro/
     Quoted: "Redis guarantees the script's atomic execution. While executing the script, all server
     activities are blocked during its entire runtime." The script cache "is always volatile";
@@ -50,14 +55,27 @@ check the bibliographic details against the original before submission. Web page
     replication ("small windows where acknowledged writes can be lost").
 13. **V** gRPC Authors. "Retry." https://grpc.io/docs/guides/retry/
     Retries only for status codes in the policy's retryable list, with exponential backoff.
-14. **L** gRPC Authors. "Deadlines." https://grpc.io/docs/guides/deadlines/ and "Status codes."
-    https://grpc.io/docs/guides/status-codes/
-15. **L** Google. "Language Guide (proto 3)." *Protocol Buffers Documentation.*
-    https://protobuf.dev/programming-guides/proto3/
-16. **L** M. Thomson, C. Benfield (eds.). "HTTP/2." RFC 9113, IETF, 2022.
-17. **L** R. Fielding, M. Nottingham, J. Reschke (eds.). "HTTP Semantics." RFC 9110, IETF, 2022
-    (`Retry-After`).
-18. **L** M. Nottingham, R. Fielding. "Additional HTTP Status Codes." RFC 6585, IETF, 2012
-    (429 Too Many Requests).
-19. **L** J. Heinanen, R. Guerin. "A Single Rate Three Color Marker." RFC 2697, IETF, 1999
-    (token buckets with committed and excess burst sizes).
+14. **V** gRPC Authors. "Deadlines." https://grpc.io/docs/guides/deadlines/ and "Status Codes."
+    https://grpc.io/docs/guides/status-codes/ (accessed 2026-10-18). "By default, gRPC does not set
+    a deadline"; past the deadline the call fails with `DEADLINE_EXCEEDED` (4). Codes `OK` (0),
+    `INVALID_ARGUMENT` (3), `RESOURCE_EXHAUSTED` (8): "Some resource has been exhausted, perhaps a
+    per-user quota, or perhaps the entire file system is out of space", `UNAVAILABLE` (14).
+15. **V** Google. "Language Guide (proto 3)." *Protocol Buffers Documentation.*
+    https://protobuf.dev/programming-guides/proto3/ (accessed 2026-10-18). A field number "cannot
+    be changed once your message type is in use" and "should never be reused"; deleted field numbers
+    must be reserved; an unset numeric field reads as zero; the first enum value "must" be zero and
+    is best named `..._UNSPECIFIED`.
+16. **V** M. Thomson, C. Benfield (eds.). "HTTP/2." RFC 9113, IETF, June 2022 (obsoletes RFC 7540).
+    Abstract: "allowing multiple concurrent exchanges on the same connection"; Section 1: "TCP
+    head-of-line blocking is not addressed by this protocol."
+17. **V** R. Fielding, M. Nottingham, J. Reschke (eds.). "HTTP Semantics." RFC 9110 (STD 97),
+    IETF, June 2022. Section 10.2.3: servers send `Retry-After` "to indicate how long the user agent
+    ought to wait before making a follow-up request"; the value is an HTTP-date or a number of
+    seconds.
+18. **V** M. Nottingham, R. Fielding. "Additional HTTP Status Codes." RFC 6585, IETF, April 2012.
+    Section 4: "The 429 status code indicates that the user has sent too many requests in a given
+    amount of time ("rate limiting")"; the response MAY include `Retry-After`.
+19. **V** J. Heinanen, R. Guerin. "A Single Rate Three Color Marker." RFC 2697 (Informational),
+    IETF, September 1999. Three parameters, "Committed Information Rate (CIR), Committed Burst Size
+    (CBS), and Excess Burst Size (EBS)"; the meter uses "two token buckets, C and E, which both share
+    the common rate CIR"

@@ -169,7 +169,9 @@ Protocol Buffers messages over HTTP/2.
 
 **HTTP/2** multiplexes many concurrent requests as independent streams over one TCP connection
 [16], so a gateway can keep thousands of checks in flight to a limiter instance without opening
-thousands of connections, and a slow check does not block the ones behind it.
+thousands of connections, and a slow check does not block the ones behind it. A lost TCP packet
+still delays every stream on the connection, because HTTP/2 does not address head-of-line blocking
+in TCP itself [16].
 
 **Protocol Buffers** define the request and response messages in a schema compiled into C++ and
 into any client language [15]. Two properties of the format shape the API in Chapter 3. Each field
@@ -252,8 +254,10 @@ periodically, and limit themselves locally within it; servers divide capacity ac
 The approach removes the shared store from the hot path, but it relies on clients to respect their
 leases. This thesis applies the same idea inside a trusted server-side limiter: the instances that
 hold leases are the limiter itself, so the leased tokens are enforced, and the over-admission they
-allow is bounded and measured rather than assumed. The term and the idea of a lease as a time-bounded
-grant that keeps working when the grantor is unreachable go back to Gray and Cheriton [10].
+allow is bounded and measured rather than assumed. The term goes back to Gray and Cheriton, who
+define a lease as "a contract that gives its holder specified rights over property for a limited
+period of time" and use the time limit so that host and communication failures cost performance
+rather than correctness [10].
 
 ## 2.5 Summary
 

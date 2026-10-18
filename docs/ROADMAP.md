@@ -76,7 +76,8 @@ baseline that every later optimisation is compared against, and it proves the qu
       Strict quota: 25,301 checks/s median of 5 at c=1,024 (p99 85 ms); 10,024 at p99 10 ms (c=64).
       See [bench/README.md](../bench/README.md#week-2-baseline).
 - [x] Thesis: Chapter 1 and Chapter 2 drafts (`docs/thesis/ch1_introduction.md`,
-      `ch2_background.md`, sources in `references.md`; entries marked L still need their details checked).
+      `ch2_background.md`, sources in `references.md`; every entry checked against its original
+      on 2026-10-18).
 
 Gate: a free customer is stopped at exactly 200 through gRPC; baseline numbers saved.
 Gate status: met.
@@ -131,7 +132,11 @@ Gate result (2026-10-18, `bench/week3_gate.sh`, `results/2026-10-18_week3_gate/N
 generator and 99% of gRPC alone, but 1.44x on the ghz command, which is client-bound, and 2.8x the
 25,301 baseline in absolute terms, which is above what gRPC alone reaches on this laptop (71,364/s);
 p99 at 10,000/s is 2.20 ms against 1.89 ms for gRPC alone (not met by 0.2 ms; the laptop floor is the
-limit). The absolute 4x and the 2 ms p99 need separate machines (Week 8 bonus run).
+limit). In the measured 30 s of those p99 runs at most 14 of 300,000 checks waited for Redis (the
+server counts 10,005 to 10,014 waits and one refill per key per run, 10,000 of the waits being the
+first touch of each key during the warm-up), so the 0.3 ms gap is the server's CPU path and run-to-run noise (leased 1.81 to 4.12 ms,
+gRPC alone 1.78 to 2.06 ms over five runs), not Redis. The absolute 4x and the 2 ms p99 need
+separate machines (Week 8 bonus run).
 
 ## Week 4 (Nov 2 to 8): Business rules and leased quota for large plans
 
