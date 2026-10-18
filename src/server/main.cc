@@ -14,6 +14,8 @@
 #include <thread>
 #include <utility>
 
+#include <unistd.h>
+
 #include <spdlog/spdlog.h>
 
 #include "config/rule_config.h"
@@ -25,8 +27,10 @@
 #include "plan/plan_store.h"
 #include "ratelimiter/core.h"
 #include "redis/batcher.h"
+#include "redis/plan_listener.h"
 #include "redis/redispp_backend.h"
 #include "server/service.h"
+#include "usage/usage_log.h"
 
 namespace {
 
@@ -48,6 +52,8 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
 //   Redis; measures pure gRPC overhead). With leased and strict, customer rules (burst then quota,
 //   config/rules.yaml) go through CompositeCore.
+//   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
+//        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
@@ -112,9 +118,40 @@ int main(int argc, char** argv) {
     spdlog::info("logging lease chunk changes to {}", path);
   }
 
+  // RL_USAGE_FILE=<file>: usage events, one JSON line per customer, minute and flush
+  // (src/usage/README.md). Declared before the core, so it outlives every decision it records.
+  std::unique_ptr<UsageLog> usage;
+  UsageObserver on_decision;
+  if (const char* path = std::getenv("RL_USAGE_FILE")) {
+    char host[256]{};
+    gethostname(host, sizeof host - 1);
+    try {
+      usage = std::make_unique<UsageLog>(path, host);
+    } catch (const std::exception& e) {
+      spdlog::critical("{}", e.what());
+      return 1;
+    }
+    on_decision = [u = usage.get()](std::string_view c, Reason r, std::uint32_t cost) { u->Record(c, r, cost); };
+    spdlog::info("writing usage events to {} as instance {}", path, host);
+  }
+
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
-  PlanStore plans(*backend);
+  const char* ttl = std::getenv("RL_PLAN_TTL_MS");
+  PlanStore plans(*backend, std::chrono::milliseconds(ttl ? std::stoi(ttl) : 5000));
   DenyCache deny;
+  // An announced plan change drops the cached plan and the local denial at once (step B5); the TTL
+  // covers a message missed while the subscription was down.
+  std::unique_ptr<PlanListener> listener;
+  if (engine != "allow_all") {
+    const auto [host, port] = ParseHostPort(redis_addr);
+    listener = std::make_unique<PlanListener>(
+        host, port,
+        [&plans, &deny](std::string_view customer) {
+          plans.Invalidate(customer);
+          deny.Clear(customer);
+        },
+        [&plans] { plans.InvalidateAll(); });
+  }
   StrictCore customer_strict(*backend, plans, rules);  // CompositeCore's burst and quota checks
   std::shared_ptr<RateLimiterCore> core;
   LeasedCore* leased = nullptr;  // for the shutdown statistics
@@ -122,17 +159,18 @@ int main(int argc, char** argv) {
     auto inner = std::make_shared<LeasedCore>(*backend, plans, rules, std::size_t{1} << 20, &SteadyNowNs,
                                               std::move(chunk_log));
     leased = inner.get();
-    core = std::make_shared<CompositeCore>(std::move(inner), customer_strict, plans, deny, std::move(rules));
+    core = std::make_shared<CompositeCore>(std::move(inner), customer_strict, plans, deny, std::move(rules),
+                                           &SteadyNowNs, std::move(on_decision));
   } else if (engine == "strict") {
     core = std::make_shared<CompositeCore>(std::make_shared<StrictCore>(*backend, plans, rules), customer_strict, plans,
-                                           deny, std::move(rules));
+                                           deny, std::move(rules), &SteadyNowNs, std::move(on_decision));
   } else if (engine == "allow_all") {
     core = std::make_shared<AllowAllCore>();
   } else {
     spdlog::critical("unknown engine '{}' (leased | strict | allow_all)", engine);
     return 1;
   }
-  spdlog::info("engine: {}", engine);
+  spdlog::info("engine: {}, plan cache {} ms", engine, ttl ? ttl : "5000");
   RateLimiterService service(core);
 
   grpc::EnableDefaultHealthCheckService(true);
@@ -161,6 +199,7 @@ int main(int argc, char** argv) {
     const auto s = leased->GetStats();
     spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
   }
+  if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
   batcher.reset();  // sends what it holds and waits for the replies, while Redis is still there
   redis.reset();    // stop Redis I/O while the core lives: an early refill may still be in flight
   return 0;

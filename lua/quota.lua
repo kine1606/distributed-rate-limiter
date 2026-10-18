@@ -8,7 +8,8 @@
 -- ARGV[2]  cost of this request
 -- ARGV[3]  overage policy at the limit: "hard" (default) | "grace" | "cap"
 -- ARGV[4]  grace amount (grace) or overage cap (cap); default 0
--- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1) }
+-- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1), replayed (0|1) }
+--          replayed = 1: the stored answer of a retried request ID, not counted again
 --
 -- State stores `used` (not remaining) so a plan change never rewrites history.
 -- The day number comes from Redis TIME, so all instances agree on rollover.
@@ -32,7 +33,7 @@ if KEYS[2] then
   local stored = redis.call('GET', KEYS[2])
   if stored then
     local a, u, r, o = string.match(stored, '^(%d+),(%d+),(%d+),(%d+)$')
-    return { tonumber(a), tonumber(u), tonumber(r), reset_after, tonumber(o) }
+    return { tonumber(a), tonumber(u), tonumber(r), reset_after, tonumber(o), 1 }
   end
 end
 
@@ -76,4 +77,4 @@ if remaining < 0 then remaining = 0 end   -- after a downgrade, or in grace, use
 if KEYS[2] then
   redis.call('SET', KEYS[2], allowed .. ',' .. used .. ',' .. remaining .. ',' .. overage, 'PX', 300000)
 end
-return { allowed, used, remaining, reset_after, overage }
+return { allowed, used, remaining, reset_after, overage, 0 }

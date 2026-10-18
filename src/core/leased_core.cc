@@ -1,7 +1,6 @@
 #include "core/leased_core.h"
 
 #include <algorithm>
-#include <chrono>
 #include <utility>
 #include <vector>
 
@@ -25,12 +24,6 @@ CheckResult Denied(const Rule& rule, std::int64_t wait_ns) {
 }
 
 }  // namespace
-
-std::int64_t SteadyNowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
 
 LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity,
                        Clock clock, ChunkObserver on_chunk_change)

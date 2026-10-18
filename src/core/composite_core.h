@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <string_view>
 
 #include "core/leased_core.h"
 #include "core/strict_core.h"
@@ -10,6 +13,10 @@
 #include "ratelimiter/rule.h"
 
 namespace ratelimiter {
+
+// Called once per customer decision (usage events, src/usage/README.md); not for the stored answer
+// of a retried request ID, which was recorded the first time. Runs on the thread that answers.
+using UsageObserver = std::function<void(std::string_view customer, Reason reason, std::uint32_t cost)>;
 
 // One API call of a customer (src/core/README.md, Week 4). A customer rule (burst_rule and
 // quota_rule set) is decided in this order, one plan read for all of it:
@@ -27,7 +34,7 @@ class CompositeCore final : public RateLimiterCore {
   // `strict`, `plans` and `deny` must outlive this core. `rules` is the whole table: a customer
   // rule's burst and quota rules are looked up in it (LoadRules checked that they exist).
   CompositeCore(std::shared_ptr<RateLimiterCore> inner, StrictCore& strict, PlanStore& plans, DenyCache& deny,
-                RuleTable rules, Clock clock = &SteadyNowNs);
+                RuleTable rules, Clock clock = &SteadyNowNs, UsageObserver on_decision = {});
 
   void Check(const CheckRequest& request, CheckCallback done) override;
 
@@ -38,6 +45,7 @@ class CompositeCore final : public RateLimiterCore {
   DenyCache& deny_;
   const RuleTable rules_;
   const Clock now_;
+  const UsageObserver on_decision_;
 };
 
 }  // namespace ratelimiter

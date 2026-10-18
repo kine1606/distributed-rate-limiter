@@ -7,16 +7,12 @@
 
 #include "core/strict_core.h"
 #include "lease/lease_table.h"
+#include "ratelimiter/clock.h"
 #include "ratelimiter/core.h"
 #include "ratelimiter/rule.h"
 #include "redis/redis_backend.h"
 
 namespace ratelimiter {
-
-// Nanoseconds of a monotonic clock. A function pointer, so tests can pass a fake clock at no cost
-// to the hit path.
-using Clock = std::int64_t (*)();
-std::int64_t SteadyNowNs();
 
 // Called after a lease's chunk size changed, from the refill path (never on a hit).
 using ChunkObserver = std::function<void(const Lease& lease, std::uint32_t from, std::uint32_t to)>;

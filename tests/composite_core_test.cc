@@ -219,5 +219,62 @@ TEST_F(CompositeCoreTest, UncountedBurstIsNotGivenBack) {
   EXPECT_TRUE(redis.returns.empty());
 }
 
+// The original was denied under the old plan; its replay after an upgrade must not deny the
+// customer locally under the new one.
+TEST_F(CompositeCoreTest, AReplayedDenialIsNotCached) {
+  redis.replies["daily_quota"] = {.allowed = false, .retry_after_ms = 60'000, .reset_after_ms = 60'000,
+                                  .replayed = true};
+  EXPECT_EQ(Run("customer", 1, "retry-1").reason, Reason::kQuotaExhausted);
+  EXPECT_EQ(deny.Size(), 0u);
+  EXPECT_EQ(redis.returns.size(), 1u);  // the retry's own burst token still goes back
+}
+
+struct Decision {
+  std::string customer;
+  Reason reason;
+  std::uint32_t cost;
+  bool operator==(const Decision&) const = default;
+};
+
+// Usage events (Week 4): every customer decision is recorded once, with its reason and cost.
+TEST_F(CompositeCoreTest, EveryCustomerDecisionIsRecordedOnce) {
+  std::vector<Decision> seen;
+  CompositeCore recorded{inner, strict, plans, deny, Rules(), &FakeNow,
+                         [&](std::string_view c, Reason r, std::uint32_t cost) {
+                           seen.push_back({std::string(c), r, cost});
+                         }};
+  const auto run = [&](std::uint32_t cost) {
+    recorded.Check({"cust:42", "customer", cost}, [](const CheckResult&) {});
+  };
+  run(3);                                                       // allowed
+  redis.replies["burst"] = {.allowed = false, .retry_after_ms = 500};
+  run(1);                                                       // burst denial
+  redis.replies["burst"] = {.allowed = true};
+  redis.replies["daily_quota"] = {.allowed = false, .retry_after_ms = 60'000, .reset_after_ms = 60'000};
+  run(1);                                                       // quota denial
+  run(1);                                                       // deny cache
+  redis.plan.fields["plan"] = "suspended";
+  run(2);                                                       // suspended
+  recorded.Check({"cust:42", "api_default", 1}, [](const CheckResult&) {});  // not a customer rule
+  EXPECT_EQ(seen, (std::vector<Decision>{{"cust:42", Reason::kAllowed, 3},
+                                         {"cust:42", Reason::kRateLimited, 1},
+                                         {"cust:42", Reason::kQuotaExhausted, 1},
+                                         {"cust:42", Reason::kQuotaExhausted, 1},
+                                         {"cust:42", Reason::kSuspended, 2}}));
+}
+
+// A retry's stored answer was recorded with the original request, so billing counts it once.
+TEST_F(CompositeCoreTest, ARetriedRequestIdIsNotRecordedAgain) {
+  int events = 0;
+  CompositeCore recorded{inner, strict, plans, deny, Rules(), &FakeNow,
+                         [&](std::string_view, Reason, std::uint32_t) { ++events; }};
+  redis.replies["daily_quota"] = {.allowed = true, .remaining = 1999, .replayed = true};
+  CheckResult r;
+  recorded.Check({"cust:42", "customer", 1, "retry-1"}, [&](const CheckResult& x) { r = x; });
+  EXPECT_TRUE(r.allowed);
+  EXPECT_TRUE(r.replayed);
+  EXPECT_EQ(events, 0);
+}
+
 }  // namespace
 }  // namespace ratelimiter

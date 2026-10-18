@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -163,6 +164,25 @@ TEST_F(StrictCoreTest, BilledOverageIsAllowedWithReasonOverage) {
   EXPECT_TRUE(r.allowed);
   EXPECT_EQ(r.reason, Reason::kOverage);
   EXPECT_EQ(r.remaining, 0u);
+}
+
+TEST_F(StrictCoreTest, RetriedRequestIdIsMarkedReplayed) {
+  redis.reply = {.allowed = true, .remaining = 5, .replayed = true};
+  EXPECT_TRUE(Run("cust:42", "quota", 1, "retry-7").replayed);
+  redis.reply = {.allowed = true, .remaining = 5};
+  EXPECT_FALSE(Run("cust:42", "quota", 1, "retry-8").replayed);
+}
+
+// The Week 4 plan cache under the strict engine: one plan read serves every check within the TTL.
+TEST_F(StrictCoreTest, WithAPlanCacheOnlyTheFirstCheckReadsThePlan) {
+  PlanStore cached{redis, std::chrono::seconds(5)};
+  StrictCore with_cache{redis, cached, Rules()};
+  redis.plan.fields = {{"daily", "2000"}};
+  redis.reply = {.allowed = true};
+  for (int i = 0; i < 3; ++i) with_cache.Check({"cust:42", "quota", 1}, [](const CheckResult&) {});
+  EXPECT_EQ(redis.hash_keys.size(), 1u);
+  ASSERT_EQ(redis.calls.size(), 3u);
+  EXPECT_EQ(redis.calls[2].limit, 2000u);
 }
 
 TEST_F(StrictCoreTest, PlanReadFailureAppliesTheFailurePolicyWithoutAScriptCall) {

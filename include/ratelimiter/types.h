@@ -35,6 +35,7 @@ struct CheckResult {
   std::uint32_t retry_after_ms{0};
   std::uint32_t limit{0};
   std::uint32_t reset_after_ms{0};  // daily quota rules only: until 00:00 UTC
+  bool replayed{false};  // quota rules: the stored answer of a retried request_id, counted the first time only
 };
 
 // Completion callback. The fast path invokes it inline; the slow path (lease refill,

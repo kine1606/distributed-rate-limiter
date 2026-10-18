@@ -20,9 +20,8 @@ namespace ratelimiter {
 // the plan it was made under: a check under a changed plan (an upgrade, step B5) ignores the entry,
 // so a denial never outlives the plan that caused it, with or without a plan-change message.
 //
-// shortcut: one mutex per shard; a hot over-quota customer contends on one shard. Fine while the
-// customer path reads the plan from Redis on every check; measure in the flood test (Week 6) before
-// changing it.
+// shortcut: one mutex per shard; a hot over-quota customer contends on one shard (as on the plan
+// cache's). Measure in the flood test (Week 6) before changing it.
 class DenyCache {
  public:
   // Records that `customer` is out of quota for `reset_after_ms` after `now_ns` (any monotonic

@@ -336,7 +336,7 @@ TEST_F(LuaTest, Request2001OnHardGraceAndCapGivesThreeDifferentAnswers) {
   const auto h = QuotaV2(hard, 2000, 1, "hard", 0);
   const auto g = QuotaV2(grace, 2000, 1, "grace", 200);
   const auto c = QuotaV2(cap, 2000, 1, "cap", 1000);
-  ASSERT_EQ(h.ints.size(), 5u);
+  ASSERT_EQ(h.ints.size(), 6u);
   EXPECT_EQ(h.ints[0], 0);  // hard: denied
   EXPECT_EQ(h.ints[4], 0);
   EXPECT_EQ(g.ints[0], 1);  // grace: allowed, free
@@ -402,6 +402,8 @@ TEST_F(LuaTest, RetryWithTheSameRequestIdIsCountedOnce) {
   const auto retry = QuotaV2(k, 10, 1, "hard", 0, req);
   EXPECT_EQ(first.ints[0], 1);
   EXPECT_EQ(retry.ints[0], 1);
+  EXPECT_EQ(first.ints[5], 0);  // replayed: usage events skip the retry
+  EXPECT_EQ(retry.ints[5], 1);
   EXPECT_EQ(retry.ints[1], first.ints[1]);
   EXPECT_EQ(retry.ints[2], first.ints[2]);
   EXPECT_EQ(HGet(k, "used"), "1");

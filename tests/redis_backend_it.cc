@@ -157,6 +157,8 @@ TEST_F(RedisBackendIT, RequestIdCountsARetryOnceOnEveryMaster) {
     ASSERT_FALSE(retry.redis_error);
     EXPECT_TRUE(retry.allowed);
     EXPECT_EQ(retry.remaining, first.remaining);
+    EXPECT_FALSE(first.replayed);
+    EXPECT_TRUE(retry.replayed);  // so usage events skip it
     EXPECT_EQ(admin_->hget(RedisKey(quota, customer), "used").value_or(""), "1");
     EXPECT_EQ(eval("def").remaining, 8u);  // another id is another request
   }

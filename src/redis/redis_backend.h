@@ -20,6 +20,7 @@ struct ScriptResult {
   bool redis_error{false};  // transport/timeout error, not a "denied" decision
   std::uint32_t reset_after_ms{0};  // quota only: until 00:00 UTC
   bool overage{false};              // quota only: admitted as billed overage (cap policy)
+  bool replayed{false};             // quota only: a retried request ID's stored answer, not counted again
 };
 
 using ScriptCallback = std::function<void(const ScriptResult&)>;

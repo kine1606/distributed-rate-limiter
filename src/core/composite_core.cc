@@ -6,8 +6,14 @@
 namespace ratelimiter {
 
 CompositeCore::CompositeCore(std::shared_ptr<RateLimiterCore> inner, StrictCore& strict, PlanStore& plans,
-                             DenyCache& deny, RuleTable rules, Clock clock)
-    : inner_(std::move(inner)), strict_(strict), plans_(plans), deny_(deny), rules_(std::move(rules)), now_(clock) {}
+                             DenyCache& deny, RuleTable rules, Clock clock, UsageObserver on_decision)
+    : inner_(std::move(inner)),
+      strict_(strict),
+      plans_(plans),
+      deny_(deny),
+      rules_(std::move(rules)),
+      now_(clock),
+      on_decision_(std::move(on_decision)) {}
 
 void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
   const auto it = rules_.find(request.rule);
@@ -18,6 +24,12 @@ void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
   // rules_ is immutable, so these references stay valid for every callback below.
   const Rule& burst = rules_.find(it->second.burst_rule)->second;
   const Rule& quota = rules_.find(it->second.quota_rule)->second;
+  if (on_decision_) {  // every answer below goes through `done`
+    done = [this, key = std::string(request.key), cost = request.cost, done = std::move(done)](const CheckResult& r) {
+      if (!r.replayed) on_decision_(key, r.reason, cost);
+      done(r);
+    };
+  }
 
   // The request's views die when Check returns, so the callbacks keep copies.
   plans_.Get(request.key, [this, &burst, &quota, key = std::string(request.key), cost = request.cost,
@@ -52,7 +64,10 @@ void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
       strict_.Check(quota, plan, key, cost, id,
                     [this, &burst, plan, key, cost, burst_counted, done = std::move(done)](const CheckResult& q) {
         if (!q.allowed && burst_counted) strict_.GiveBack(burst, plan, key, cost);
-        if (q.reason == Reason::kQuotaExhausted) deny_.Deny(key, QuotaStamp(plan), now_(), q.reset_after_ms);
+        // A replayed denial was decided under the plan of its first attempt, maybe not this one.
+        if (q.reason == Reason::kQuotaExhausted && !q.replayed) {
+          deny_.Deny(key, QuotaStamp(plan), now_(), q.reset_after_ms);
+        }
         done(q);
       });
     });

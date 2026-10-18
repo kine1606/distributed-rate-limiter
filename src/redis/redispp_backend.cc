@@ -57,8 +57,8 @@ std::vector<std::string> Args(const Rule& rule, std::uint32_t requested) {
 
 ScriptResult Parse(Algorithm algorithm, const Reply& v) {
   ScriptResult r;
-  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms, overage}
-    if (v.size() != 5) {
+  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms, overage, replayed}
+    if (v.size() != 6) {
       r.redis_error = true;
       return r;
     }
@@ -67,6 +67,7 @@ ScriptResult Parse(Algorithm algorithm, const Reply& v) {
     r.reset_after_ms = static_cast<std::uint32_t>(v[3]);
     r.retry_after_ms = r.allowed ? 0 : r.reset_after_ms;
     r.overage = v[4] == 1;
+    r.replayed = v[5] == 1;
     return r;
   }
   if (v.size() != 3) {  // {allowed, remaining, retry_after_ms}

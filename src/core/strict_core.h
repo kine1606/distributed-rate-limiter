@@ -21,7 +21,7 @@ inline CheckResult RedisDownResult(const Rule& rule) {
 
 // One Redis script call per check: exact, and the baseline the lease engine is measured against.
 // The backend picks the script from the rule's algorithm. A rule with limit_from takes its numbers
-// from the customer's plan, read first (one more round trip until the Week 4 plan cache).
+// from the customer's plan, read first (from the plan cache, or one more round trip without it).
 class StrictCore final : public RateLimiterCore {
  public:
   // `redis` and `plans` must outlive this core.
@@ -99,6 +99,7 @@ class StrictCore final : public RateLimiterCore {
       r.remaining = s.remaining;
       r.retry_after_ms = s.retry_after_ms;
       r.reset_after_ms = s.reset_after_ms;
+      r.replayed = s.replayed;
       done(r);
     });
   }
