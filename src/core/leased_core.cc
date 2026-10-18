@@ -93,6 +93,7 @@ void LeasedCore::Park(Lease& l, std::uint32_t cost, CheckCallback done) {
     left = TryTake(l, cost);  // a refill may have landed since the fast path looked
     if (left < 0) l.waiters.push_back({cost, std::move(done)});
   }
+  if (left < 0) parked_.fetch_add(1, std::memory_order_relaxed);
   if (left >= 0) {
     done(Allowed(l.rule, left));
     return;
@@ -112,6 +113,7 @@ void LeasedCore::StartRefill(Lease& l, std::uint32_t target) {
 }
 
 void LeasedCore::Refill(Lease& l, std::uint32_t amount, std::uint32_t partial_retry_ms) {
+  refills_.fetch_add(1, std::memory_order_relaxed);
   redis_.Eval(l.rule, l.key, amount, [this, &l, amount, partial_retry_ms](const ScriptResult& s) {
     OnRefill(l, amount, partial_retry_ms, s);
   });

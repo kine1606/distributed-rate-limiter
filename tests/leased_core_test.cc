@@ -116,6 +116,8 @@ TEST(LeasedCore, FirstCheckWaitsForOneRefillThenHitsStayLocal) {
   EXPECT_TRUE(CheckNow(core, "u1", "burst").allowed);  // 2 left: below 30% of the chunk
   EXPECT_EQ(redis.Total(), 2);                         // so a refill started early, nobody waits
   EXPECT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(core.GetStats().parked, 1u);   // only the very first check waited
+  EXPECT_EQ(core.GetStats().refills, 2u);
 }
 
 TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {

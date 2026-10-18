@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -37,6 +38,15 @@ class LeasedCore final : public RateLimiterCore {
 
   void Check(const CheckRequest& request, CheckCallback done) override;
 
+  // Slow-path counters; a hit touches neither. Lease hit ratio = 1 - parked / checks served.
+  struct Stats {
+    std::uint64_t parked;   // checks that waited for a refill
+    std::uint64_t refills;  // refill calls sent to Redis
+  };
+  Stats GetStats() const {
+    return {parked_.load(std::memory_order_relaxed), refills_.load(std::memory_order_relaxed)};
+  }
+
  private:
   void Park(Lease& l, std::uint32_t cost, CheckCallback done);
   void StartRefill(Lease& l, std::uint32_t target);  // tops the lease up to `target` tokens
@@ -44,6 +54,7 @@ class LeasedCore final : public RateLimiterCore {
   void OnRefill(Lease& l, std::uint32_t requested, std::uint32_t partial_retry_ms, const ScriptResult& s);
 
   RedisBackend& redis_;
+  std::atomic<std::uint64_t> parked_{0}, refills_{0};
   const Clock now_;
   const ChunkObserver on_chunk_change_;
   const RuleTable rules_;

@@ -22,6 +22,7 @@
 #include "core/strict_core.h"
 #include "plan/plan_store.h"
 #include "ratelimiter/core.h"
+#include "redis/batcher.h"
 #include "redis/redispp_backend.h"
 #include "server/service.h"
 
@@ -73,6 +74,23 @@ int main(int argc, char** argv) {
   }
   spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
 
+  // RL_BATCHER=timer|adaptive puts a Batcher in front of Redis (off by default: measured in
+  // results/<date>_batcher/); RL_BATCHER_DELAY_US sets its timer (default 200).
+  std::unique_ptr<Batcher> batcher;
+  RedisBackend* backend = redis.get();
+  if (const char* mode = std::getenv("RL_BATCHER")) {
+    const std::string m = mode;
+    if (m != "timer" && m != "adaptive") {
+      spdlog::critical("RL_BATCHER must be timer or adaptive, not '{}'", m);
+      return 1;
+    }
+    const char* delay = std::getenv("RL_BATCHER_DELAY_US");
+    batcher = std::make_unique<Batcher>(*redis, m == "timer" ? Batcher::Mode::kTimer : Batcher::Mode::kAdaptive,
+                                        std::chrono::microseconds(delay ? std::stoi(delay) : 200));
+    backend = batcher.get();
+    spdlog::info("batcher: {}, {} us", m, delay ? delay : "200");
+  }
+
   // RL_CHUNK_LOG=<file>: one CSV line per lease chunk change (ns,rule,key,from,to) for the
   // chunk-versus-demand plot. Changes happen at most once per refill, never on a hit.
   ChunkObserver chunk_log;
@@ -92,13 +110,15 @@ int main(int argc, char** argv) {
   }
 
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
-  PlanStore plans(*redis);
+  PlanStore plans(*backend);
   std::shared_ptr<RateLimiterCore> core;
+  LeasedCore* leased = nullptr;  // for the shutdown statistics
   if (engine == "leased") {
-    core = std::make_shared<LeasedCore>(*redis, plans, std::move(rules), std::size_t{1} << 20, &SteadyNowNs,
+    core = std::make_shared<LeasedCore>(*backend, plans, std::move(rules), std::size_t{1} << 20, &SteadyNowNs,
                                         std::move(chunk_log));
+    leased = static_cast<LeasedCore*>(core.get());
   } else if (engine == "strict") {
-    core = std::make_shared<StrictCore>(*redis, plans, std::move(rules));
+    core = std::make_shared<StrictCore>(*backend, plans, std::move(rules));
   } else if (engine == "allow_all") {
     core = std::make_shared<AllowAllCore>();
   } else {
@@ -130,6 +150,11 @@ int main(int argc, char** argv) {
   server->GetHealthCheckService()->SetServingStatus(false);
   server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
   server->Wait();
-  redis.reset();  // stop Redis I/O while the core lives: an early refill may still be in flight
+  if (leased != nullptr) {
+    const auto s = leased->GetStats();
+    spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
+  }
+  batcher.reset();  // sends what it holds and waits for the replies, while Redis is still there
+  redis.reset();    // stop Redis I/O while the core lives: an early refill may still be in flight
   return 0;
 }
