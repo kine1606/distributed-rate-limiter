@@ -56,6 +56,7 @@ these two, so they get tested hardest.
       Done as the Chapter 2 draft (`docs/thesis/ch2_background.md`).
 
 Gate: both scripts pass every edge case on your machine; proto v1 agreed.
+Gate status: met.
 
 ## Week 2 (Oct 19 to 25): Strict engine end to end
 
@@ -78,6 +79,7 @@ baseline that every later optimisation is compared against, and it proves the qu
       `ch2_background.md`, sources in `references.md`; entries marked L still need their details checked).
 
 Gate: a free customer is stopped at exactly 200 through gRPC; baseline numbers saved.
+Gate status: met.
 
 Status on Oct 17: Weeks 1 and 2 are done about a week early (proto v1 review and the Chapter 1
 and 2 drafts still open). Strict baseline: 25,301 checks/s median at c=1,024 (p99 85 ms); 10,024
@@ -123,6 +125,7 @@ Gate: lease hit ratio >= 95% under the Week 2 load; 500 concurrent misses cause 
 mode >= 4× the 25,301 checks/s strict baseline on the same ghz command, p99 < 2 ms at 10,000/s offered.
 Cut first: adaptive batcher.
 
+Gate status: partly met.
 Gate result (2026-10-18, `bench/week3_gate.sh`, `results/2026-10-18_week3_gate/NOTES.md`): hit ratio
 99.06% (met); 500 misses cause one refill (met); lease 6.3x strict at equal load on the C++ load
 generator and 99% of gRPC alone, but 1.44x on the ghz command, which is client-bound, and 2.8x the
