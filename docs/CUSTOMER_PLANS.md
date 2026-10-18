@@ -22,7 +22,7 @@ sell them.
 | `free` | 200 | 2, 2 | `hard`: deny until 00:00 UTC | fail closed | trial users; cheapest to refuse |
 | `pay` | 2,000 | 20, 20 | `grace`: +10% free, then deny | fail open | small paying customer |
 | `pay_cap` | 2,000 | 20, 20 | `cap`: billed overage up to 1,000 | fail open | customer who prefers paying to being blocked |
-| `enterprise` | 1,000,000 | 2,000, 2,000 | `cap` up to 100,000 | fail open | hot key for the accuracy-bound test |
+| `enterprise` | 1,000,000 | 2,000, 2,000 | `cap` up to 100,000 | fail open | hot key for the accuracy-bound test; quota leased (chunks of 1,000) |
 | `suspended` | 0 | 0 | always deny, `SUSPENDED` | deny | unpaid account |
 
 Hint: these numbers are product choices, not technical ones. They live in one place,
@@ -145,7 +145,9 @@ job is that every billable request appears exactly once, which is why `request_i
   `tools/usage_report.py` (done).
 - **Test:** unit tests for the log and for one event per decision; a retried request ID is not
   recorded again. A smoke run matched Redis `used` exactly (5,049 and 5,049). The quota accuracy
-  test (Week 6) repeats that comparison on 4 instances.
+  test (Week 6) repeats that comparison on 4 instances. For a leased plan, Redis `used` also counts
+  units leased but not yet used, so it exceeds the usage total by at most N × C (a smoke run on one
+  instance: 7,309 used, 6,446 admitted, C = 1,000); billing reads the usage events.
 
 ### B9. Suspension and restore
 

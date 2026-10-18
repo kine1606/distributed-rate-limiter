@@ -102,6 +102,11 @@ class PlanCache {
   64 shards, each a mutex and a map. A hit copies the plan and answers inline. A miss parks the
   check on the entry and sends one `HGETALL` for every waiter. An error answers every waiter with
   "Redis down" and is not cached.
+- Lock-free hits (Week 4): each thread keeps 256 recent plans, valid while the store's generation
+  counter is unchanged and the TTL lasts; `Invalidate` and `InvalidateAll` bump the counter. The
+  generation is read before the shard, so a change after that read always kills the copy. One hot
+  customer on 16 threads: 4.1 to 263.8 M hits/s; spread customers 35.2 to 46.9
+  (`results/2026-10-18_customer_microbench/NOTES.md`).
 - `Invalidate` during a read marks the read stale: its answer is thrown away and the hash is read
   again for every waiter, since the read may have seen the hash before `rlctl` rewrote it.
 - `PlanListener` subscribes, waits for the confirmation, then calls `InvalidateAll`: messages sent

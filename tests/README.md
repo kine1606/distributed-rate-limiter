@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 161 tests: 113 unit, 33 script (plain Redis on 127.0.0.1:6380), 15 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
+> Every week · Status: 172 tests: 123 unit, 33 script (plain Redis on 127.0.0.1:6380), 16 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
 
 ## How tests are organised
 
@@ -32,11 +32,12 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | `lease_test.cc` | unit + TSan | 3 | done: `TryTake`, lease table, chunk policy |
 | `batcher_test.cc` | unit + TSan | 3, 4 | done: timer and adaptive batching, every caller its own reply, drain on destruction, queued calls keep their rule numbers and request ID |
 | `lease_harness_test.cc` | unit | 3 | done: seeded fake Redis and fake clock, bound in every window; `RL_HARNESS_SEEDS`, `RL_HARNESS_SEED` |
-| `composite_core_test.cc` | unit | 4 | done: every branch of the A2 decision tree, usage events once per decision, replays neither recorded nor cached |
+| `composite_core_test.cc` | unit | 4 | done: every branch of the A2 decision tree, usage events once per decision, replays neither recorded nor cached, leased quota (lease hit, threshold, exact path when out, overage, upgrade) |
 | `deny_cache_test.cc` | unit + TSan | 4 | done: reset time, plan change, clear, sweep, replacement, concurrent use |
-| `plan_store_test.cc` | unit | 4 | done: plan cache hits, TTL, single flight, invalidation racing a read, errors not cached, sweep |
+| `plan_store_test.cc` | unit + TSan | 4 | done: plan cache hits, TTL, single flight, invalidation racing a read, errors not cached, sweep, per-thread copies invalidated, concurrent use |
 | `usage_log_test.cc` | unit + TSan | 4 | done: sums per customer and outcome, escaping, periodic flush, every event written or counted as dropped |
 | `plan_change_it.cc` | integration | 4 | done: steps B5 and B9 through `rlctl` on two instances within one second; `rlctl` input checks |
+| `leased_quota_it.cc` | integration | 4 | done: Week 4 gate, four instances on one leased customer stay within limit + N × C |
 | `overage_test.cc` | script | 4 | built inside `lua_scripts_test.cc` and `grpc_quota_it.cc` instead |
 | `breaker_test.cc` | unit | 5 | Breaker states with a fake clock |
 | `tests/eval/*.sh` | evaluation | 6 | The nine tests in `docs/EVALUATION.md` |

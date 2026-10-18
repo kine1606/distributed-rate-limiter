@@ -1,7 +1,7 @@
 # Chapter 3. Design
 
 > Started Week 2 (2026-10-18) with the product decisions (3.1.3); the lease protocol and its bound
-> (3.5) added in Week 3. The rest of the chapter (3.1 to 3.8 in `OUTLINE.md`) is written in Week 5
+> (3.5) added in Week 3; quota and overage logic (3.4) in Week 4. The rest of the chapter (3.1 to 3.8 in `OUTLINE.md`) is written in Week 5
 > from `docs/DESIGN.md`. Section numbers may shift then. Results still to come are marked
 > **[Pending: Week N]**.
 
@@ -63,6 +63,123 @@ customer with 2,000 calls per day may make 2,200 before being denied (the grace 
 Week 4). The amount is stored per plan
 in the `extra` field of the plan hash, written by the seed tool and the admin tool, so a plan can
 carry a different allowance without a code change; 10% is the value of the shipped presets.
+
+## 3.4 Quota and overage logic
+
+### 3.4.1 One rule per API call
+
+A gateway asks one question per API call: `Check{key: "cust:42", rule: "customer"}`. The `customer`
+rule names two others, a token bucket for the burst limit and a quota for the daily limit, and the
+engine reads the customer's plan once and decides in a fixed order:
+
+1. **Suspended plan:** deny with `SUSPENDED`. No script runs, and waiting does not help.
+2. **Local denial:** if this instance recently learned that the customer is out of quota, deny with
+   `QUOTA_EXHAUSTED` and the reset time it learned. No script runs (3.4.4).
+3. **Burst:** take a token from the burst bucket. A denial answers `RATE_LIMITED` at once.
+4. **Daily quota:** count the call against the day under the plan's overage policy (3.4.2). If the
+   quota denies, the burst token taken in step 3 is given back.
+
+The order follows from what each answer costs and means. A suspended account and a known denial cost
+no Redis call, so they come first. Burst comes before the quota because a call refused for burst must
+not consume daily quota: the customer did not get the service. The give-back in step 4 is the
+mirror case. Without it, a customer over quota would drain their own burst bucket with denied calls
+and later be told `RATE_LIMITED` instead of the true reason, `QUOTA_EXHAUSTED`, which tells the
+client to wait for the reset rather than retry in a second.
+
+The quota script stores what was used, not what remains, and receives the limit from the current plan
+on every call (3.3). A plan change therefore rewrites no counter: an upgrade from 200 to 2,000 a day
+turns 200 used into 1,800 remaining on the next call, and a downgrade below today's usage denies with
+`remaining = 0`, never a negative number.
+
+### 3.4.2 Overage policies
+
+What happens at the limit is a product choice, so the plan carries it as a policy and an amount
+(`overage` and `extra` in the plan hash):
+
+- **hard** denies at the limit until 00:00 UTC.
+- **grace** allows `extra` more units free of charge, then denies. The shipped Pay plan has a grace of
+  10% (3.1.3).
+- **cap** allows up to `extra` units of billed overage and marks each such call `OVERAGE`. The script
+  counts overage in a second field, `overage_used`, so the plan's own counter never passes the limit
+  and billing reads the overage directly. A call that straddles the limit (cost 2 with one unit
+  left) bills only the part beyond it.
+
+Request 2,001 of a plan of 2,000 a day shows the difference. Table 3.y gives the answer of the same
+call on three customers whose plans differ only in the policy.
+
+*Table 3.y: Request 2,001 on three overage policies (2,000 used, plan of 2,000 a day).*
+
+| Policy | Shipped plan | Answer to request 2,001 | State after it |
+| --- | --- | --- | --- |
+| hard | Free | denied, `QUOTA_EXHAUSTED`, retry at 00:00 UTC | used 2,000 |
+| grace, extra 200 | Pay | allowed, `OK`, remaining 0 | used 2,001; denied after 2,200 |
+| cap, extra 1,000 | Pay with cap | allowed, `OVERAGE` | used 2,000, overage_used 1; denied after 1,000 more |
+
+Grace answers `OK`, not `OVERAGE`, because the extra units are free: the reason field tells the
+gateway what to bill, and only cap overage is billed. That choice is also what gives request 2,001
+three different answers, which is the Week 4 gate. It is tested on the script alone and end to end
+through gRPC (`Request2001GivesThreeAnswersOnThreePolicies`). Both counters reset with the UTC day,
+derived from the Redis clock so every instance agrees on the reset instant.
+
+### 3.4.3 Retries counted once
+
+A gateway that times out and retries must not charge the customer twice, and must give the client
+the same answer as the first attempt. A call may carry a `request_id`. The quota script then stores
+its answer under a key with the customer's hash tag, `{cust:42}:daily_quota:req:<id>`, for five
+minutes, in the same atomic script call that counts the usage. A retry with the same id gets the
+stored answer, denials included, and is not counted again. The answer is marked `replayed`, so the
+retry produces no second usage event and a replayed denial, decided under the plan of the first
+attempt, is not cached locally under a plan that may have changed since. Storing the answer rather
+than a "seen" flag matters: a retry of a denied call must be denied too, even if the customer was
+upgraded in between.
+
+Two limits remain. Burst is not deduplicated: a retry is still traffic, and it takes a burst token.
+And the local denial of 3.4.4 answers before Redis, so a retry of a call that was allowed, arriving
+after the quota ran out on that instance, is denied. It is not counted twice, but its answer differs
+from the original.
+
+### 3.4.4 Local denials and plan changes
+
+After a `QUOTA_EXHAUSTED` answer the instance remembers the customer until the reset time Redis
+returned, so further calls are denied without a Redis call and the local entry ends exactly when the
+Redis counter does. Each entry keeps a stamp of the plan's quota terms (daily limit, policy, extra).
+A call under a different plan ignores and drops the entry, so an upgrade lifts the denial on the next
+call even if no plan-change message arrives.
+
+Plans themselves are cached on each instance for five seconds, which removed the plan read from
+every call: on the Week 2 strict benchmark the cache alone raised throughput from 16,738 to 19,480
+checks per second (median of five runs each, same session). The admin tool writes a plan, then
+publishes the customer id on a Pub/Sub channel, and every instance drops its cached plan and its local
+denial. A read in flight when the message arrives is discarded and sent again, because it may have
+read the old plan. An instance that loses its subscription drops every cached plan when it
+reconnects, because Pub/Sub keeps no messages for an absent subscriber. A plan change therefore
+applies within the delay of the message, measured at 22 ms from starting the admin tool until two
+instances held the new plan, and within the five-second TTL if a message is lost while the
+connection looks healthy.
+
+### 3.4.5 Leased quota for large plans
+
+An exact quota costs one Redis call per check, which is the right price for small plans: one chunk
+of a 200-a-day quota would be a visible share of the day. For a large plan it is not. A plan of
+100,000 calls a day or more therefore takes its daily quota from a lease, with the protocol of 3.5
+and a smaller chunk: at most 0.1% of the daily limit, so C = 1,000 for the enterprise plan of
+1,000,000. The lease is refilled by the quota script itself, with the chunk as the cost and the hard
+policy, so a lease only ever takes units inside the plan. When the day's counter has less than a
+chunk left, the lease takes what is left and then denies locally until the reset; a call it denies
+goes to the exact path, which applies the plan's overage policy and request id. Overage, which is
+billed, is therefore always counted exactly.
+
+The bound of 3.5.3 applies with no refill during the day. Redis grants at most `limit` units in a day.
+Units leased before midnight and used after it were counted for the old day, so N instances admit at
+most limit + N × C in one day: 0.4% of the day for four instances. Units leased and not used before
+the reset are an under-admission of at most N × C. In the gate test four instances shared one
+customer of 100,000 a day (C = 100) with 20% more demand than the bound allows. They admitted exactly
+100,000 units, with 1,253 quota calls for 12,048 checks instead of one per check. A leased call does
+not deduplicate request ids: a retry inside the plan counts again and uses up one more unit of the
+plan, though the retry itself is never billed as overage.
+
+The accuracy of leased quota under faults and over a day boundary is evaluation test 4
+**[Pending: Week 6]**.
 
 ## 3.5 Lease protocol and the accuracy bound
 

@@ -76,10 +76,14 @@ Output line example:
 - One field per `Reason` (`allowed`, `rate_limited`, `quota_exhausted`, `unavailable`,
   `unverified`, `overage`, `suspended`), in cost units. `minute` is the wall-clock UTC minute of the
   instance, not Redis `TIME`: it only groups lines for reports.
-- A mutex-protected buffer of 65,536 events, swapped with a spare at every flush, so `Record` never
-  allocates for keys of up to 15 bytes (the string's small-buffer size) and never waits for disk. The
-  flush thread wakes every second, or early at half full; beyond full, events are dropped and
-  counted (`Dropped()`, logged at shutdown; a metric in Week 5). A failed write counts as dropped.
+- Lock-free (Week 4, after the mutex version was measured): 16 bounded rings of about 65,536
+  events in all, each thread writing to one (Vyukov's queue: one CAS to claim a cell, a release
+  store to publish it; the flush thread is the only reader). `Record` never allocates for keys of up
+  to 15 bytes (the string's small-buffer size) and never waits for disk. The flush thread wakes
+  every second, or early when a ring is half full; a full ring drops and counts (`Dropped()`, logged
+  at shutdown; a metric in Week 5). A failed write counts as dropped. One customer on 16 threads:
+  5.3 to 55.4 M kept events/s; the single flush thread is now the ceiling
+  (`results/2026-10-18_customer_microbench/NOTES.md`).
 - Aggregated at flush time, so a busy customer gets one line per minute per flush (up to 60 a
   minute); `tools/usage_report.py` sums them across files.
 - Deduplication: `quota.lua` now returns a sixth value, `replayed`, and `CompositeCore` skips the

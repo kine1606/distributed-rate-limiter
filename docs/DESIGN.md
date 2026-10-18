@@ -233,6 +233,38 @@ so the file counts each request once: in a smoke run its `allowed` total equalle
 exactly (5,049), with 1,757 retries in the traffic. `tools/usage_report.py` sums files across
 instances. Billing reads `allowed + overage`; `unverified` admissions are listed but not billed.
 
+**Leased quota for large plans** (`quota_mode: auto`, `src/core/composite_core.cc`). A plan of
+100,000 a day or more (`kLeasedQuotaFrom`) takes step 4 from a lease of its daily counter, through
+the lease engine of section 6: chunks of at most 0.1% of the limit (C = 1,000 for the enterprise
+plan of 1,000,000), refilled by `quota.lua` itself with the chunk as the cost and the hard policy.
+A lease therefore takes only units inside the plan. When the counter has less than a chunk left, the
+lease takes what is left, then denies locally until the reset, and a check it denies goes the exact
+path, which applies the plan's overage policy and request ID. Overage, which is billed, is always
+counted exactly. The lease refills with a rule that holds the plan's limit; there is one such rule
+per distinct daily limit, made on first use in a lock-free table, so an upgrade gets a new lease
+under the new limit at once.
+
+- **Bound.** Redis grants at most `limit` units a day. Units leased before 00:00 UTC and used after
+  it were counted for the old day, so in one day N instances admit at most limit + N × C: 0.4% of
+  the day for four instances. Units leased and not used are at most N × C under-admission.
+- **Measured** (`tests/leased_quota_it.cc`, the Week 4 gate): four instances, a plan of 100,000 a
+  day (C = 100), checks of cost 10, 20% more demand than the bound: exactly 100,000 units admitted,
+  with 1,253 quota calls for 12,048 checks (the exact path makes one per check).
+- **Limits.** A leased check does not deduplicate request IDs: a retry inside the plan counts
+  again, while a retry of an overage request does not, because overage takes the exact path. A
+  leased answer's `remaining` is this instance's lease (a lower bound of the customer's remaining),
+  and its reset time comes from the instance's UTC clock, not Redis `TIME`. Burst is still one Redis
+  call per check (the `CompositeCore` shortcut), so a leased check costs one Redis call, not two.
+
+**What a customer check shares with other threads.** With the quota leased, a hot customer's checks
+meet on the shared structures, so those are lock-free on the common path: lease hits (one CAS, since
+Week 3), plan cache hits (a per-thread copy checked against the store's generation counter), deny
+lookups in a shard with no denial (one atomic load), usage events (16 lock-free rings) and the
+leased-quota rules (an insert-only table). Locks remain on slow paths only: a plan miss or a thread's
+first read of a plan, a deny shard that holds a denial, a lease refill, the optional batcher. One
+customer on 16 threads, before and after: plan hits 4.1 to 263.8 M/s, deny lookups 12.2 to 2,090 M/s,
+usage events 5.3 to 55.4 M/s (`results/2026-10-18_customer_microbench/NOTES.md`).
+
 ## 6. Lease protocol and accuracy bound (Week 3, measured Week 6)
 
 **The protocol as built** (`src/core/leased_core.cc`, `src/lease/`). A lease holds tokens that one
@@ -268,7 +300,8 @@ Hence
     admitted(a, b) ≤ limit + r·(b − a) + N·C
 
 An exact bucket admits at most limit + r·(b − a) in the same interval, so the over-admission in any
-window is at most **N × C**. It is temporal: tokens taken from Redis earlier are spent later. Leases
+window is at most **N × C**. A leased daily quota (section 5) is the same protocol with r = 0 within
+a day and C = max(1, ⌊limit / 1000⌋). It is temporal: tokens taken from Redis earlier are spent later. Leases
 never create tokens, so over a whole day they admit no more than Redis granted.
 
 **Evidence so far (Week 3).** `tests/lease_harness_test.cc` runs N = 1 to 4 `LeasedCore` instances
@@ -368,6 +401,7 @@ not.
 | Batcher `max_delay` | 200 µs | batches are small and Redis is busy | p99 is too high |
 | Batcher `max_batch` | 128 | flushes are mostly by size | |
 | Plan cache TTL (`RL_PLAN_TTL_MS`) | 5 s | plan reads show in the profile | a lost `plan-changes` message must not delay a change this long |
+| Leased quota from (`kLeasedQuotaFrom`) | 100,000 a day | quota calls of mid-size plans show in the profile | N × 0.1% of a smaller plan is too much to give away |
 | Instances | | CPU of instances is saturated | |
 | Redis masters | 3 | a master's CPU is saturated | |
 

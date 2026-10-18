@@ -1,6 +1,6 @@
 # Rule config and hot reload
 
-> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: Week 2 schema done: `algorithm: quota` and `limit_from: plan.daily | plan.burst`, validated with clear errors
+> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: Week 2 schema done: `algorithm: quota` and `limit_from: plan.daily | plan.burst`, validated with clear errors. Week 4: `quota_mode: strict | auto` on quota rules (auto: plans of 100,000 a day or more are leased by `CompositeCore`)
 
 ## What this module does
 

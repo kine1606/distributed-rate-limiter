@@ -131,10 +131,10 @@ argument hold: large plans no longer send every quota check to Redis.
 - [x] **Deny cache (1.5 h).** After a quota denial, deny locally until the reset time Redis returned; cleared by plan-change messages.
 - [x] **`CompositeCore` (3 h).** Order: suspended, deny cache, burst lease, quota, overage mapping. If the quota denies, give the burst tokens back. One test per branch of the decision tree.
 - [x] **Plan cache with Pub/Sub invalidation (2 h).** TTL about 5 s as a safety net; measure how long an upgrade takes to reach every instance.
-- [ ] **Leased quota for large plans (3 h).** Rule setting `quota_mode: auto`: strict below a daily limit of about 100,000, leased above it with a chunk of at most 0.1% of the daily limit. Same lease machinery as burst, so the cost is a quota-lease variant of the script and a branch in `CompositeCore`.
+- [x] **Leased quota for large plans (3 h).** Rule setting `quota_mode: auto`: strict below a daily limit of about 100,000, leased above it with a chunk of at most 0.1% of the daily limit. Same lease machinery as burst, so the cost is a quota-lease variant of the script and a branch in `CompositeCore`.
 - [x] **Usage events (2 h).** Bounded buffer, aggregated per customer per minute, flushed to a JSON-lines file every second; drops counted in a metric.
 - [x] **`rlctl` admin tool (1 h).** Create, upgrade, downgrade, suspend, show.
-- [ ] Thesis: quota and overage section of Chapter 3, with the request 2,001 example and the product-decisions table.
+- [x] Thesis: quota and overage section of Chapter 3, with the request 2,001 example and the product-decisions table.
 
 Gate: request 2,001 gives three different outcomes on three policies; an enterprise customer on leased quota stays within limit + N x C in one quick run; every customer plan step B1 to B9 has a test or a written "described, not built" note.
 
@@ -302,7 +302,7 @@ a week, because Weeks 4 to 7 are the heaviest.
 - [ ] Oct 18: quota and token bucket Lua scripts pass all edge cases; proto v1 agreed
 - [ ] Oct 25: strict engine end to end; free customer stopped at exactly 200; baseline measured; Chapters 1 and 2 drafted
 - [ ] Nov 1: lease fast path with single-flight, adaptive chunks and adaptive batcher; seeded test harness passing
-- [ ] Nov 8: overage policies, request ID, deny cache, usage events and leased quota working
+- [x] Nov 8: overage policies, request ID, deny cache, usage events and leased quota working (done Oct 19)
 - [ ] Nov 15: reliability features, metrics and the open-loop load generator; Chapter 3 drafted
 - [ ] Nov 22: feature freeze; TSan and ASan clean; property-based, accuracy and fault tests pass; bound model agrees with measurement
 - [ ] Nov 29: benchmark matrix, ablation study and profile done; Chapter 4 drafted
