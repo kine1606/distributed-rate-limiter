@@ -30,7 +30,13 @@ class Batcher final : public RedisBackend {
   Batcher(const Batcher&) = delete;
   Batcher& operator=(const Batcher&) = delete;
 
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override;
+  using RedisBackend::Eval;
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
+            ScriptCallback done) override;
+  // Rare (a quota denial after a burst token was taken), so not batched.
+  void Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) override {
+    inner_.Return(rule, key, tokens, std::move(done));
+  }
   void HGetAll(std::string key, HashCallback done) override { inner_.HGetAll(std::move(key), std::move(done)); }
 
  private:
@@ -38,6 +44,7 @@ class Batcher final : public RedisBackend {
     Rule rule;  // copied: callers may pass a temporary (StrictCore's plan-filled rule)
     std::string key;
     std::uint32_t requested;
+    std::string request_id;
     ScriptCallback done;
   };
 

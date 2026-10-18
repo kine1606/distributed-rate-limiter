@@ -23,7 +23,7 @@ inline const char* Invalid(const v1::CheckRequest& r) {
 
 // The views point into `in`, which gRPC keeps alive until the call finishes.
 inline CheckRequest ToDomain(const v1::CheckRequest& in) {
-  return CheckRequest{in.key(), in.rule(), in.cost() == 0 ? 1u : in.cost()};
+  return CheckRequest{in.key(), in.rule(), in.cost() == 0 ? 1u : in.cost(), in.request_id()};
 }
 
 inline v1::Reason ToProto(Reason r) {
@@ -33,6 +33,8 @@ inline v1::Reason ToProto(Reason r) {
     case Reason::kQuotaExhausted: return v1::REASON_QUOTA_EXHAUSTED;
     case Reason::kUnavailable: return v1::REASON_UNAVAILABLE;
     case Reason::kUnverified: return v1::REASON_UNVERIFIED;
+    case Reason::kOverage: return v1::REASON_OVERAGE;
+    case Reason::kSuspended: return v1::REASON_SUSPENDED;
     case Reason::kUnknownRule: break;  // answered with INVALID_ARGUMENT, never filled
   }
   return v1::REASON_UNSPECIFIED;

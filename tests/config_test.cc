@@ -61,6 +61,29 @@ TEST(RuleConfig, LoadsPlanRules) {
   EXPECT_EQ(rules["burst"].limit_from, ratelimiter::PlanLimit::kBurst);
 }
 
+TEST(RuleConfig, LoadsTheCustomerRule) {
+  auto rules = ratelimiter::LoadRules(std::string(RL_SOURCE_DIR) + "/config/rules.yaml");
+  ASSERT_EQ(rules.count("customer"), 1u);
+  EXPECT_EQ(rules["customer"].burst_rule, "burst");
+  EXPECT_EQ(rules["customer"].quota_rule, "daily_quota");
+}
+
+TEST(RuleConfig, RejectsBrokenCustomerRules) {
+  const std::string parts =
+      "  tb:\n    limit: 5\n    refill_per_sec: 1\n  q:\n    algorithm: quota\n    limit: 9\n    strict: true\n";
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_c_half.yaml", "rules:\n" + parts + "  c:\n    burst: tb\n")),
+               std::runtime_error);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_c_missing.yaml",
+                                                "rules:\n" + parts + "  c:\n    burst: tb\n    quota: nope\n")),
+               std::runtime_error);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_c_swapped.yaml",
+                                                "rules:\n" + parts + "  c:\n    burst: q\n    quota: tb\n")),
+               std::runtime_error);
+  EXPECT_EQ(ratelimiter::LoadRules(WriteTemp("rl_c_ok.yaml", "rules:\n" + parts + "  c:\n    burst: tb\n    quota: q\n"))
+                .at("c").quota_rule,
+            "q");
+}
+
 TEST(RuleConfig, QuotaWithFixedLimitIsAllowed) {
   auto p = WriteTemp("rl_fixed_quota.yaml", "rules:\n  q:\n    algorithm: quota\n    limit: 50\n    strict: true\n");
   EXPECT_EQ(ratelimiter::LoadRules(p)["q"].limit, 50u);

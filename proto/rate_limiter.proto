@@ -52,9 +52,9 @@ message CheckRequest {
 
   // (5) Was this a retry: an id the gateway generates once per logical API call (a UUID, or the
   // client's Idempotency-Key header) and resends unchanged with every retry of that call. The
-  // limiter counts the daily quota once per id for 5 minutes ({cust:42}:req:<id>). Burst is not
-  // deduplicated: a retry still arrives as traffic. Empty = no deduplication. At most 128 bytes.
-  // Accepted and ignored until deduplication is built (Week 4).
+  // limiter counts the daily quota once per id for 5 minutes ({cust:42}:daily_quota:req:<id>), and
+  // a retry gets the original answer. Burst is not deduplicated: a retry still arrives as traffic.
+  // Empty = no deduplication. At most 128 bytes.
   string request_id = 4;
 }
 
@@ -67,8 +67,8 @@ enum Reason {
   REASON_RATE_LIMITED = 2;     // denied by a short-term limit (token bucket, fixed or sliding window);
                                // retry after retry_after_ms. HTTP 429.
   REASON_QUOTA_EXHAUSTED = 3;  // denied: daily quota used up until reset_after_ms. HTTP 429.
-  REASON_OVERAGE = 4;          // allowed beyond the daily quota under the plan's grace or cap policy;
-                               // billed as overage. Week 4.
+  REASON_OVERAGE = 4;          // allowed beyond the daily quota under the plan's cap policy; billed as
+                               // overage. Grace beyond the quota is free and answers REASON_OK.
   REASON_SUSPENDED = 5;        // denied: account suspended; waiting does not help. HTTP 403. Week 4.
   REASON_UNAVAILABLE = 6;      // denied: Redis unreachable and the rule fails closed. Not the
                                // caller's fault. HTTP 503.

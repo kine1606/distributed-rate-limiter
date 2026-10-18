@@ -41,6 +41,11 @@ TEST(Convert, ZeroCostMeansOne) {
   EXPECT_EQ(ToDomain(r).cost, 7u);
 }
 
+TEST(Convert, RequestIdReachesTheEngine) {
+  EXPECT_EQ(ToDomain(Req("k", "r", "retry-1")).request_id, "retry-1");
+  EXPECT_TRUE(ToDomain(Req("k", "r")).request_id.empty());
+}
+
 TEST(Convert, FillCopiesEveryField) {
   const auto out = FillFrom({.allowed = true, .reason = Reason::kAllowed, .remaining = 3,
                              .retry_after_ms = 4, .limit = 5, .reset_after_ms = 6});
@@ -58,6 +63,8 @@ TEST(Convert, ReasonMapping) {
   EXPECT_EQ(FillFrom({.reason = Reason::kQuotaExhausted}).reason(), v1::REASON_QUOTA_EXHAUSTED);
   EXPECT_EQ(FillFrom({.reason = Reason::kUnavailable}).reason(), v1::REASON_UNAVAILABLE);
   EXPECT_EQ(FillFrom({.allowed = true, .reason = Reason::kUnverified}).reason(), v1::REASON_UNVERIFIED);
+  EXPECT_EQ(FillFrom({.allowed = true, .reason = Reason::kOverage}).reason(), v1::REASON_OVERAGE);
+  EXPECT_EQ(FillFrom({.reason = Reason::kSuspended}).reason(), v1::REASON_SUSPENDED);
   EXPECT_EQ(ToProto(Reason::kUnknownRule), v1::REASON_UNSPECIFIED);  // sent as INVALID_ARGUMENT
 }
 

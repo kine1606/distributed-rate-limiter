@@ -135,6 +135,46 @@ TEST_F(RedisBackendIT, QuotaCountsExactlyAcrossTheClusterWhileScriptsAreFlushed)
   }
 }
 
+// The quota key and the request key share the customer's hash tag, so one script on one master
+// reads and writes both. A retry with the same id is answered from the stored result. Customers on
+// several masters, with the script cache flushed so the first call of each goes through EVAL.
+TEST_F(RedisBackendIT, RequestIdCountsARetryOnceOnEveryMaster) {
+  FlushScriptsOnEveryMaster();
+  const Rule quota{.name = "it_req", .algorithm = Algorithm::kQuota, .limit = 10};
+  for (int c = 0; c < 6; ++c) {
+    const std::string customer = "it:req" + std::to_string(c);
+    SCOPED_TRACE(customer);
+    admin_->del(RedisKey(quota, customer));
+    for (const char* id : {"abc", "def"}) admin_->del(RequestKey(quota, customer, id));  // answers live 5 min
+    const auto eval = [&](std::string_view id) {
+      std::promise<ScriptResult> p;
+      backend_->Eval(quota, customer, 1, id, [&p](const ScriptResult& r) { p.set_value(r); });
+      return p.get_future().get();
+    };
+    const auto first = eval("abc");
+    const auto retry = eval("abc");
+    ASSERT_FALSE(first.redis_error);
+    ASSERT_FALSE(retry.redis_error);
+    EXPECT_TRUE(retry.allowed);
+    EXPECT_EQ(retry.remaining, first.remaining);
+    EXPECT_EQ(admin_->hget(RedisKey(quota, customer), "used").value_or(""), "1");
+    EXPECT_EQ(eval("def").remaining, 8u);  // another id is another request
+  }
+}
+
+TEST_F(RedisBackendIT, ReturnGivesTokensBackUpToTheCapacity) {
+  const Rule rule{.name = "it_ret", .limit = 5, .refill_per_sec = 0.001};
+  admin_->del(RedisKey(rule, "it:ret"));
+  for (int i = 0; i < 5; ++i) EvalSync(*backend_, rule, "it:ret");
+  EXPECT_FALSE(EvalSync(*backend_, rule, "it:ret").allowed);
+  std::promise<ScriptResult> p;
+  backend_->Return(rule, "it:ret", 1, [&p](const ScriptResult& r) { p.set_value(r); });
+  const auto r = p.get_future().get();
+  ASSERT_FALSE(r.redis_error);
+  EXPECT_EQ(r.remaining, 1u);
+  EXPECT_TRUE(EvalSync(*backend_, rule, "it:ret").allowed);
+}
+
 TEST_F(RedisBackendIT, HGetAllReadsTheHashAndAMissingKeyIsEmpty) {
   admin_->del("{it:h}:plan");
   admin_->hset("{it:h}:plan", "daily", "2000");

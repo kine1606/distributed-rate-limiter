@@ -24,7 +24,7 @@ class ManualBackend final : public RedisBackend {
     ScriptCallback done;
   };
 
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override {
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view, ScriptCallback done) override {
     std::lock_guard lock(mu_);
     pending_.push_back({rule.name, std::string(key), requested, std::move(done)});
     ++total_;

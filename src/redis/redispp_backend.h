@@ -25,7 +25,10 @@ class RedisPPBackend final : public RedisBackend {
   RedisPPBackend(const RedisPPBackend&) = delete;
   RedisPPBackend& operator=(const RedisPPBackend&) = delete;
 
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override;
+  using RedisBackend::Eval;
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
+            ScriptCallback done) override;
+  void Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) override;
   void HGetAll(std::string key, HashCallback done) override;
 
  private:
@@ -35,12 +38,14 @@ class RedisPPBackend final : public RedisBackend {
   };
   struct Call;
 
-  static std::array<Script, 4> LoadScripts(const std::string& lua_dir);
+  static constexpr std::size_t kReturnScript = 4;  // after the four indexed by Algorithm
+
+  static std::array<Script, 5> LoadScripts(const std::string& lua_dir);
   void Send(const std::shared_ptr<Call>& call, bool with_source);
   void Fail(Call& call, std::string_view why);
   void Health(bool ok, std::string_view why);
 
-  std::array<Script, 4> scripts_;  // indexed by Algorithm
+  std::array<Script, 5> scripts_;  // indexed by Algorithm, then return_lease.lua
   std::atomic<bool> down_{false};
   sw::redis::AsyncRedisCluster cluster_;  // last: destroyed first, so no callback outlives the rest
 };

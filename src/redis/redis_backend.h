@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 #include "ratelimiter/rule.h"
 
@@ -18,6 +19,7 @@ struct ScriptResult {
   std::uint32_t retry_after_ms{0};
   bool redis_error{false};  // transport/timeout error, not a "denied" decision
   std::uint32_t reset_after_ms{0};  // quota only: until 00:00 UTC
+  bool overage{false};              // quota only: admitted as billed overage (cap policy)
 };
 
 using ScriptCallback = std::function<void(const ScriptResult&)>;
@@ -42,8 +44,22 @@ class RedisBackend {
   // Runs the rule's Lua script atomically. `requested` is 1 for a direct strict check
   // and the chunk size for a lease refill (same script serves both).
   // `rule` and `key` are copied before Eval returns, so both may die right after.
-  virtual void Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) {
+    Eval(rule, key, requested, {}, std::move(done));
+  }
+
+  // As above; for a quota rule a non-empty `request_id` (copied too) makes a retry with the same id
+  // get the stored answer instead of being counted again. Other algorithms ignore it.
+  virtual void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
                     ScriptCallback done) = 0;
+
+  // Gives `tokens` back to the token bucket of `rule` and `key`, never above its capacity
+  // (lua/return_lease.lua). Best effort; a backend that cannot do it answers redis_error.
+  virtual void Return(const Rule&, std::string_view, std::uint32_t, ScriptCallback done) {
+    ScriptResult r;
+    r.redis_error = true;
+    done(r);
+  }
 
   virtual void HGetAll(std::string key, HashCallback done) = 0;
 };

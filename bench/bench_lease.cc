@@ -135,7 +135,7 @@ void BM_FindAndTake(benchmark::State& s) {
 
 class GrantAll final : public RedisBackend {  // Redis that grants every refill at once
  public:
-  void Eval(const Rule&, std::string_view, std::uint32_t, ScriptCallback done) override {
+  void Eval(const Rule&, std::string_view, std::uint32_t, std::string_view, ScriptCallback done) override {
     ScriptResult r;
     r.allowed = true;
     done(r);

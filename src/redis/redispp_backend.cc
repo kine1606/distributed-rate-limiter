@@ -46,16 +46,19 @@ std::vector<std::string> Args(const Rule& rule, std::uint32_t requested) {
     case Algorithm::kSlidingWindow:
     case Algorithm::kFixedWindow:  // both scripts compute their own TTL from the window
       return {std::to_string(rule.limit), std::to_string(rule.window_ms), std::to_string(requested)};
-    case Algorithm::kQuota:
-      return {std::to_string(rule.limit), std::to_string(requested)};
+    case Algorithm::kQuota: {
+      static constexpr std::array<const char*, 3> kPolicy{"hard", "grace", "cap"};  // indexed by Overage
+      return {std::to_string(rule.limit), std::to_string(requested), kPolicy[static_cast<std::size_t>(rule.overage)],
+              std::to_string(rule.overage_extra)};
+    }
   }
   return {};
 }
 
 ScriptResult Parse(Algorithm algorithm, const Reply& v) {
   ScriptResult r;
-  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms}
-    if (v.size() != 4) {
+  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms, overage}
+    if (v.size() != 5) {
       r.redis_error = true;
       return r;
     }
@@ -63,6 +66,7 @@ ScriptResult Parse(Algorithm algorithm, const Reply& v) {
     r.remaining = static_cast<std::uint32_t>(v[2]);
     r.reset_after_ms = static_cast<std::uint32_t>(v[3]);
     r.retry_after_ms = r.allowed ? 0 : r.reset_after_ms;
+    r.overage = v[4] == 1;
     return r;
   }
   if (v.size() != 3) {  // {allowed, remaining, retry_after_ms}
@@ -92,10 +96,10 @@ sw::redis::ConnectionPoolOptions PoolOptions() {
 
 }  // namespace
 
-std::array<RedisPPBackend::Script, 4> RedisPPBackend::LoadScripts(const std::string& lua_dir) {
-  static constexpr std::array<const char*, 4> kFiles{"token_bucket.lua", "sliding_window.lua", "fixed_window.lua",
-                                                     "quota.lua"};  // indexed by Algorithm
-  std::array<RedisPPBackend::Script, 4> out;
+std::array<RedisPPBackend::Script, 5> RedisPPBackend::LoadScripts(const std::string& lua_dir) {
+  static constexpr std::array<const char*, 5> kFiles{"token_bucket.lua", "sliding_window.lua", "fixed_window.lua",
+                                                     "quota.lua", "return_lease.lua"};  // indexed as scripts_
+  std::array<RedisPPBackend::Script, 5> out;
   for (std::size_t i = 0; i < kFiles.size(); ++i) {
     const std::string path = lua_dir + "/" + kFiles[i];
     std::ifstream f(path);
@@ -108,9 +112,10 @@ std::array<RedisPPBackend::Script, 4> RedisPPBackend::LoadScripts(const std::str
 }
 
 struct RedisPPBackend::Call {
-  std::string key;
+  std::vector<std::string> keys;  // the first routes the call; all share its hash tag
   std::vector<std::string> args;
-  Algorithm algorithm;
+  Algorithm algorithm;  // shapes the reply
+  std::size_t script;   // index into scripts_
   ScriptCallback done;
 };
 
@@ -129,13 +134,23 @@ RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::str
   }
 }
 
-void RedisPPBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) {
-  Send(std::make_shared<Call>(Call{RedisKey(rule, key), Args(rule, requested), rule.algorithm, std::move(done)}),
+void RedisPPBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
+                          std::string_view request_id, ScriptCallback done) {
+  std::vector<std::string> keys{RedisKey(rule, key)};
+  if (rule.algorithm == Algorithm::kQuota && !request_id.empty()) keys.push_back(RequestKey(rule, key, request_id));
+  Send(std::make_shared<Call>(Call{std::move(keys), Args(rule, requested), rule.algorithm,
+                                   static_cast<std::size_t>(rule.algorithm), std::move(done)}),
+       false);
+}
+
+void RedisPPBackend::Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) {
+  Send(std::make_shared<Call>(Call{{RedisKey(rule, key)}, {std::to_string(rule.limit), std::to_string(tokens)},
+                                   Algorithm::kTokenBucket, kReturnScript, std::move(done)}),
        false);
 }
 
 void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
-  const Script& script = scripts_[static_cast<std::size_t>(c->algorithm)];
+  const Script& script = scripts_[c->script];
   auto on_reply = [this, c, with_source](sw::redis::Future<Reply>&& f) {
     ScriptResult r;
     try {
@@ -163,12 +178,13 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
     // shortcut: AsyncRedisCluster has no callback EVALSHA, so scripts go straight to the node that
     // owns the key's slot and do not follow MOVED: after a failover they fail until the slot map
     // refreshes (every 10 s). Retry through a routed command when the failover tests need it (Week 5).
-    auto node = cluster_.redis(c->key, false);
-    const std::string* keys = &c->key;
+    auto node = cluster_.redis(c->keys.front(), false);
     if (with_source) {
-      node.eval<Reply>(script.source, keys, keys + 1, c->args.begin(), c->args.end(), std::move(on_reply));
+      node.eval<Reply>(script.source, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
+                       std::move(on_reply));
     } else {
-      node.evalsha<Reply>(script.sha, keys, keys + 1, c->args.begin(), c->args.end(), std::move(on_reply));
+      node.evalsha<Reply>(script.sha, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
+                          std::move(on_reply));
     }
   } catch (const std::exception& e) {  // no usable connection to that node: answer now
     Fail(*c, e.what());

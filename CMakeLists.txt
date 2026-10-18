@@ -100,7 +100,7 @@ target_include_directories(rl_redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${RED
 target_link_libraries(rl_redis PUBLIC rl_api ${REDISPP_LIB} ${RL_HIREDIS} ${UV_LIB} OpenSSL::Crypto spdlog::spdlog
                                       Threads::Threads)
 
-add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc)
+add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc src/core/composite_core.cc)
 target_include_directories(rl_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_engine PUBLIC rl_api Threads::Threads)
 

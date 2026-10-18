@@ -11,6 +11,26 @@ TEST(Plan, ParsesTheSeededHash) {
   EXPECT_EQ(p.daily, 2000u);
   EXPECT_EQ(p.burst, 20u);
   EXPECT_EQ(p.refill, 20u);
+  EXPECT_EQ(p.overage, Overage::kGrace);
+  EXPECT_EQ(p.extra, 200u);
+  EXPECT_FALSE(p.suspended);
+}
+
+TEST(Plan, OveragePolicyAndSuspension) {
+  EXPECT_EQ(ParsePlan({}).overage, Overage::kHard);  // Free
+  EXPECT_EQ(ParsePlan({{"overage", "cap"}}).overage, Overage::kCap);
+  EXPECT_EQ(ParsePlan({{"overage", "unlimited"}}).overage, Overage::kHard);  // unknown: the strictest
+  EXPECT_TRUE(ParsePlan({{"plan", "suspended"}}).suspended);
+  EXPECT_FALSE(ParsePlan({{"plan", "free"}}).suspended);
+}
+
+TEST(Plan, QuotaStampChangesWithTheQuotaTerms) {
+  const Plan free = ParsePlan({});
+  EXPECT_EQ(QuotaStamp(free), QuotaStamp(ParsePlan({{"burst", "20"}})));  // burst is not a quota term
+  EXPECT_NE(QuotaStamp(free), QuotaStamp(ParsePlan({{"daily", "2000"}})));
+  EXPECT_NE(QuotaStamp(free), QuotaStamp(ParsePlan({{"extra", "1"}})));
+  EXPECT_NE(QuotaStamp(ParsePlan({{"overage", "grace"}, {"extra", "5"}})),
+            QuotaStamp(ParsePlan({{"overage", "cap"}, {"extra", "5"}})));
 }
 
 TEST(Plan, MissingHashIsFree) {

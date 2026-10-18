@@ -12,6 +12,7 @@ struct CheckRequest {
   std::string_view key;   // views are valid only for the duration of the Check() call
   std::string_view rule;
   std::uint32_t cost{1};
+  std::string_view request_id{};  // quota rules count one id once (5 min); empty = no deduplication
 };
 
 // Why a check ended the way it did. The gRPC layer maps kUnknownRule to INVALID_ARGUMENT; the
@@ -23,6 +24,8 @@ enum class Reason : std::uint8_t {
   kUnknownRule,   // rule name not in the config
   kUnavailable,   // Redis unreachable and the rule is fail_closed: denied
   kUnverified,    // Redis unreachable and the rule is fail_open: allowed without counting
+  kOverage,       // allowed beyond the daily quota under a cap policy: billed as overage
+  kSuspended,     // account suspended: denied, waiting does not help
 };
 
 struct CheckResult {

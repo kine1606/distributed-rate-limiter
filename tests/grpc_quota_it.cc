@@ -1,4 +1,5 @@
-// Week 2 gate: a Free customer is stopped at exactly 200 through gRPC. The real service, StrictCore,
+// Week 2 gate: a Free customer is stopped at exactly 200 through gRPC. Week 4 gate: request 2,001
+// gives three answers on three overage policies. The real service, CompositeCore over StrictCore,
 // PlanStore and cluster backend run in-process against the dev cluster, with config/rules.yaml.
 // Skipped, not failed, when the cluster is unreachable (seed: RL_TEST_CLUSTER, see it_cluster.h).
 #include <grpcpp/grpcpp.h>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "config/rule_config.h"
+#include "core/composite_core.h"
 #include "core/strict_core.h"
 #include "it_cluster.h"
 #include "plan/plan_store.h"
@@ -35,9 +37,12 @@ class GrpcQuotaIT : public ::testing::Test {
     const std::string src = RL_SOURCE_DIR;
     RuleTable rules = LoadRules(src + "/config/rules.yaml");
     quota_rule_ = rules.at("daily_quota");
+    burst_rule_ = rules.at("burst");
     backend_ = std::make_unique<RedisPPBackend>(ClusterSeed().first, ClusterSeed().second, src + "/lua");
     plans_ = std::make_unique<PlanStore>(*backend_);
-    service_ = std::make_unique<RateLimiterService>(std::make_shared<StrictCore>(*backend_, *plans_, std::move(rules)));
+    strict_ = std::make_unique<StrictCore>(*backend_, *plans_, rules);
+    service_ = std::make_unique<RateLimiterService>(std::make_shared<CompositeCore>(
+        std::make_shared<StrictCore>(*backend_, *plans_, rules), *strict_, *plans_, deny_, std::move(rules)));
 
     grpc::ServerBuilder builder;
     int port = 0;
@@ -53,28 +58,44 @@ class GrpcQuotaIT : public ::testing::Test {
     if (server_) server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
   }
 
-  // Fresh customer on the given plan: plan hash written, today's usage gone.
-  void Seed(const std::string& customer, const std::string& daily) {
+  // Fresh customer on the given plan: plan hash written, today's usage and burst bucket gone.
+  void Seed(const std::string& customer, const std::string& daily, const std::string& plan_name = "free",
+            const std::string& overage = "hard", const std::string& extra = "0") {
     admin_->del(RedisKey(quota_rule_, customer));
+    admin_->del(RedisKey(burst_rule_, customer));
     admin_->del(PlanKey(customer));
     const std::vector<std::pair<std::string, std::string>> plan{
-        {"plan", "free"}, {"daily", daily}, {"burst", "2"}, {"refill", "2"}};
+        {"plan", plan_name}, {"daily", daily}, {"burst", "2"},       {"refill", "2"},
+        {"overage", overage}, {"extra", extra}};
     admin_->hset(PlanKey(customer), plan.begin(), plan.end());
   }
 
-  grpc::Status Check(const std::string& customer, v1::CheckResponse* resp) {
+  // As if `used` units were consumed today (the day number the script derives from Redis TIME).
+  void SetUsedToday(const std::string& customer, int used) {
+    const std::string key = RedisKey(quota_rule_, customer);
+    const auto t = admin_->redis(key, false).command<std::vector<std::string>>("TIME");  // the script's clock
+    const std::string day = std::to_string(std::stoll(t.at(0)) / 86400);
+    const std::vector<std::pair<std::string, std::string>> state{{"day", day}, {"used", std::to_string(used)}};
+    admin_->hset(key, state.begin(), state.end());
+  }
+
+  grpc::Status Check(const std::string& customer, v1::CheckResponse* resp, const std::string& rule = "daily_quota",
+                     const std::string& request_id = "") {
     v1::CheckRequest req;
     req.set_key(customer);
-    req.set_rule("daily_quota");
+    req.set_rule(rule);
+    req.set_request_id(request_id);
     grpc::ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
     return stub_->Check(&ctx, req, resp);
   }
 
   std::unique_ptr<sw::redis::RedisCluster> admin_;
-  Rule quota_rule_;
+  Rule quota_rule_, burst_rule_;
   std::unique_ptr<RedisPPBackend> backend_;
   std::unique_ptr<PlanStore> plans_;
+  DenyCache deny_;
+  std::unique_ptr<StrictCore> strict_;
   std::unique_ptr<RateLimiterService> service_;
   std::unique_ptr<grpc::Server> server_;  // after the service: shut down and destroyed first
   std::unique_ptr<v1::RateLimiter::Stub> stub_;
@@ -124,6 +145,48 @@ TEST_F(GrpcQuotaIT, RemainingAndLimitFollowTheCustomersPlan) {
   EXPECT_EQ(resp.limit(), 2000u);
   EXPECT_EQ(resp.remaining(), 1999u);
   EXPECT_GT(resp.reset_after_ms(), 0u);
+}
+
+// Week 4 gate (step B4): the same request 2,001 through the customer rule on a hard, a grace and a
+// cap plan of 2,000 a day: denied, allowed free, allowed as billed overage.
+TEST_F(GrpcQuotaIT, Request2001GivesThreeAnswersOnThreePolicies) {
+  Seed("cust:it-hard", "2000", "free", "hard", "0");
+  Seed("cust:it-grace", "2000", "pay", "grace", "200");
+  Seed("cust:it-cap", "2000", "pay_cap", "cap", "1000");
+  for (const char* c : {"cust:it-hard", "cust:it-grace", "cust:it-cap"}) SetUsedToday(c, 2000);
+
+  v1::CheckResponse hard, grace, cap;
+  ASSERT_TRUE(Check("cust:it-hard", &hard, "customer").ok());
+  ASSERT_TRUE(Check("cust:it-grace", &grace, "customer").ok());
+  ASSERT_TRUE(Check("cust:it-cap", &cap, "customer").ok());
+  EXPECT_FALSE(hard.allowed());
+  EXPECT_EQ(hard.reason(), v1::REASON_QUOTA_EXHAUSTED);
+  EXPECT_EQ(hard.retry_after_ms(), hard.reset_after_ms());
+  EXPECT_TRUE(grace.allowed());
+  EXPECT_EQ(grace.reason(), v1::REASON_OK);
+  EXPECT_EQ(grace.remaining(), 0u);
+  EXPECT_TRUE(cap.allowed());
+  EXPECT_EQ(cap.reason(), v1::REASON_OVERAGE);
+  EXPECT_EQ(admin_->hget(RedisKey(quota_rule_, "cust:it-cap"), "overage_used").value_or(""), "1");
+  // The hard customer's burst token went back: the bucket (capacity 2) is full again.
+  EXPECT_EQ(admin_->hget(RedisKey(burst_rule_, "cust:it-hard"), "tokens").value_or(""), "2000");
+}
+
+TEST_F(GrpcQuotaIT, SuspendedCustomerIsDeniedAndRetriedRequestsCountOnce) {
+  Seed("cust:it-susp", "0", "suspended");
+  v1::CheckResponse s;
+  ASSERT_TRUE(Check("cust:it-susp", &s, "customer").ok());
+  EXPECT_FALSE(s.allowed());
+  EXPECT_EQ(s.reason(), v1::REASON_SUSPENDED);
+
+  Seed("cust:it-retry", "200");
+  admin_->del(RequestKey(quota_rule_, "cust:it-retry", "req-1"));  // an earlier run's answer lives 5 min
+  v1::CheckResponse first, retry;
+  ASSERT_TRUE(Check("cust:it-retry", &first, "customer", "req-1").ok());
+  ASSERT_TRUE(Check("cust:it-retry", &retry, "customer", "req-1").ok());
+  EXPECT_TRUE(retry.allowed());
+  EXPECT_EQ(retry.remaining(), first.remaining());
+  EXPECT_EQ(admin_->hget(RedisKey(quota_rule_, "cust:it-retry"), "used").value_or(""), "1");
 }
 
 }  // namespace

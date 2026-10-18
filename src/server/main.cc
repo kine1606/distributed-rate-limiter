@@ -18,8 +18,10 @@
 
 #include "config/rule_config.h"
 #include "core/allow_all_core.h"
+#include "core/composite_core.h"
 #include "core/leased_core.h"
 #include "core/strict_core.h"
+#include "lease/deny_cache.h"
 #include "plan/plan_store.h"
 #include "ratelimiter/core.h"
 #include "redis/batcher.h"
@@ -44,7 +46,8 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 
 // Usage: rate_limiter_server [listen] [rules.yaml] [redis cluster node host:port] [lua dir] [engine]
 //   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
-//   Redis; measures pure gRPC overhead)
+//   Redis; measures pure gRPC overhead). With leased and strict, customer rules (burst then quota,
+//   config/rules.yaml) go through CompositeCore.
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
@@ -111,14 +114,18 @@ int main(int argc, char** argv) {
 
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
   PlanStore plans(*backend);
+  DenyCache deny;
+  StrictCore customer_strict(*backend, plans, rules);  // CompositeCore's burst and quota checks
   std::shared_ptr<RateLimiterCore> core;
   LeasedCore* leased = nullptr;  // for the shutdown statistics
   if (engine == "leased") {
-    core = std::make_shared<LeasedCore>(*backend, plans, std::move(rules), std::size_t{1} << 20, &SteadyNowNs,
-                                        std::move(chunk_log));
-    leased = static_cast<LeasedCore*>(core.get());
+    auto inner = std::make_shared<LeasedCore>(*backend, plans, rules, std::size_t{1} << 20, &SteadyNowNs,
+                                              std::move(chunk_log));
+    leased = inner.get();
+    core = std::make_shared<CompositeCore>(std::move(inner), customer_strict, plans, deny, std::move(rules));
   } else if (engine == "strict") {
-    core = std::make_shared<StrictCore>(*backend, plans, std::move(rules));
+    core = std::make_shared<CompositeCore>(std::make_shared<StrictCore>(*backend, plans, rules), customer_strict, plans,
+                                           deny, std::move(rules));
   } else if (engine == "allow_all") {
     core = std::make_shared<AllowAllCore>();
   } else {

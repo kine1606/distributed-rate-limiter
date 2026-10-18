@@ -36,7 +36,7 @@ class FakeRedis final : public RedisBackend {
     ScriptCallback done;
   };
 
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override {
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view, ScriptCallback done) override {
     pending.push_back({std::string(key), rule.limit, rule.refill_per_sec, requested, std::move(done)});
   }
   void HGetAll(std::string, HashCallback done) override { done({}); }

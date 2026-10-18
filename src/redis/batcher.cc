@@ -30,11 +30,12 @@ std::vector<Batcher::Call> Batcher::TakeQueueLocked() {
   return batch;
 }
 
-void Batcher::Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) {
+void Batcher::Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
+                   ScriptCallback done) {
   std::vector<Call> batch;
   {
     std::lock_guard lock(mu_);
-    queue_.push_back({rule, std::string(key), requested, std::move(done)});
+    queue_.push_back({rule, std::string(key), requested, std::string(request_id), std::move(done)});
     const bool idle = mode_ == Mode::kAdaptive && in_flight_ == 0;
     if (idle || queue_.size() >= max_batch_ || stop_) batch = TakeQueueLocked();
   }
@@ -44,7 +45,7 @@ void Batcher::Eval(const Rule& rule, std::string_view key, std::uint32_t request
 void Batcher::Send(std::vector<Call>& batch) {
   // Issued back to back, so the inner client writes them in one go: the batch is one round trip.
   for (Call& c : batch) {
-    inner_.Eval(c.rule, c.key, c.requested,
+    inner_.Eval(c.rule, c.key, c.requested, c.request_id,
                 [this, done = std::move(c.done)](const ScriptResult& r) mutable { OnReply(done, r); });
   }
 }

@@ -16,7 +16,7 @@ using std::chrono::milliseconds;
 // Holds every call until the test answers it, or answers at once when `inline_replies` is set.
 class FakeInner final : public RedisBackend {
  public:
-  void Eval(const Rule&, std::string_view, std::uint32_t requested, ScriptCallback done) override {
+  void Eval(const Rule&, std::string_view, std::uint32_t requested, std::string_view, ScriptCallback done) override {
     if (inline_replies) {
       Answer(requested, done);
       return;

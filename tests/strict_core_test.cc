@@ -11,8 +11,10 @@ namespace {
 // Answers every call with canned results and records what it was asked.
 class FakeBackend final : public RedisBackend {
  public:
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override {
-    calls.push_back({rule.name, std::string(key), requested, rule.limit, rule.refill_per_sec});
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
+            ScriptCallback done) override {
+    calls.push_back({rule.name, std::string(key), requested, rule.limit, rule.refill_per_sec, std::string(request_id),
+                     rule.overage, rule.overage_extra});
     done(reply);
   }
   void HGetAll(std::string key, HashCallback done) override {
@@ -26,6 +28,9 @@ class FakeBackend final : public RedisBackend {
     std::uint32_t requested;
     std::uint32_t limit;
     double refill;
+    std::string request_id;
+    Overage overage;
+    std::uint32_t extra;
   };
   std::vector<Call> calls;
   ScriptResult reply;
@@ -43,10 +48,10 @@ RuleTable Rules() {
 
 class StrictCoreTest : public ::testing::Test {
  protected:
-  CheckResult Run(std::string_view key, std::string_view rule, std::uint32_t cost = 1) {
+  CheckResult Run(std::string_view key, std::string_view rule, std::uint32_t cost = 1, std::string_view id = {}) {
     CheckResult out;
     bool called = false;
-    core.Check({key, rule, cost}, [&](const CheckResult& r) {
+    core.Check({key, rule, cost, id}, [&](const CheckResult& r) {
       out = r;
       called = true;
     });
@@ -140,6 +145,24 @@ TEST_F(StrictCoreTest, BurstRuleTakesCapacityAndRefillFromThePlan) {
   ASSERT_EQ(redis.calls.size(), 1u);
   EXPECT_EQ(redis.calls[0].limit, 20u);
   EXPECT_EQ(redis.calls[0].refill, 5.0);
+}
+
+TEST_F(StrictCoreTest, QuotaRuleCarriesThePlansOveragePolicyAndTheRequestId) {
+  redis.plan.fields = {{"plan", "pay_cap"}, {"daily", "2000"}, {"overage", "cap"}, {"extra", "1000"}};
+  redis.reply = {.allowed = true};
+  Run("cust:42", "quota", 1, "retry-7");
+  ASSERT_EQ(redis.calls.size(), 1u);
+  EXPECT_EQ(redis.calls[0].overage, Overage::kCap);
+  EXPECT_EQ(redis.calls[0].extra, 1000u);
+  EXPECT_EQ(redis.calls[0].request_id, "retry-7");
+}
+
+TEST_F(StrictCoreTest, BilledOverageIsAllowedWithReasonOverage) {
+  redis.reply = {.allowed = true, .remaining = 0, .reset_after_ms = 900, .overage = true};
+  const auto r = Run("cust:42", "quota");
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kOverage);
+  EXPECT_EQ(r.remaining, 0u);
 }
 
 TEST_F(StrictCoreTest, PlanReadFailureAppliesTheFailurePolicyWithoutAScriptCall) {

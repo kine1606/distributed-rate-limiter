@@ -14,6 +14,10 @@ rules:
     strict: true          # per-customer leases arrive with the plan cache (Week 4)
     failure_policy: fail_closed
 
+  customer:               # one API call of a customer (Week 4): suspended? deny cache? burst, then the
+    burst: burst          # daily quota under the plan's overage policy (hard, grace or cap); the burst
+    quota: daily_quota    # token goes back when the quota denies. Gateways send this one rule.
+
   api_default:
     algorithm: token_bucket
     limit: 1000           # burst capacity (tokens)
