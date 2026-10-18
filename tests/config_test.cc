@@ -27,6 +27,19 @@ TEST(RuleConfig, LoadsShippedExample) {
   ASSERT_EQ(rules.count("demo_fixed_window"), 1u);
   EXPECT_EQ(rules["demo_fixed_window"].algorithm, ratelimiter::Algorithm::kFixedWindow);
   EXPECT_EQ(rules["demo_fixed_window"].window_ms, 5000u);
+  EXPECT_TRUE(rules["daily_quota"].quota_auto);  // large plans leased (Week 4)
+  EXPECT_FALSE(rules["burst"].quota_auto);
+}
+
+TEST(RuleConfig, QuotaModeIsStrictOrAutoAndOnlyOnQuotaRules) {
+  const std::string quota = "rules:\n  q:\n    algorithm: quota\n    limit_from: plan.daily\n    strict: true\n";
+  EXPECT_FALSE(ratelimiter::LoadRules(WriteTemp("rl_qm_default.yaml", quota))["q"].quota_auto);
+  EXPECT_TRUE(ratelimiter::LoadRules(WriteTemp("rl_qm_auto.yaml", quota + "    quota_mode: auto\n"))["q"].quota_auto);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_qm_bad.yaml", quota + "    quota_mode: lease\n")),
+               std::runtime_error);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_qm_tb.yaml", "rules:\n  b:\n    limit: 5\n    refill_per_sec: 1\n"
+                                                                 "    quota_mode: auto\n")),
+               std::runtime_error);
 }
 
 TEST(RuleConfig, RejectsZeroWindow) {

@@ -34,6 +34,12 @@ class LeasedCore final : public RateLimiterCore {
 
   void Check(const CheckRequest& request, CheckCallback done) override;
 
+  // Serves `request` from a lease of `rule`, whatever request.rule names: CompositeCore's leased
+  // quota passes a quota rule holding one plan's limit. `rule` must outlive this core. What the
+  // lease cannot serve (a check bigger than a chunk, a full lease table) goes to the exact path
+  // under request.rule; a denial from the lease itself answers kRateLimited.
+  void CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done);
+
   // Slow-path counters; a hit touches neither. Lease hit ratio = 1 - parked / checks served.
   struct Stats {
     std::uint64_t parked;   // checks that waited for a refill

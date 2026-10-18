@@ -42,7 +42,10 @@ void LeasedCore::Check(const CheckRequest& request, CheckCallback done) {
     strict_.Check(request, std::move(done));
     return;
   }
-  const Rule& rule = it->second;
+  CheckLease(it->second, request, std::move(done));
+}
+
+void LeasedCore::CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done) {
   if (request.cost > rule.limit) {  // can never pass; parking it would only spin refills
     done(Denied(rule, 0));
     return;

@@ -52,6 +52,8 @@ RuleTable LoadRules(const std::string& path) {
     rule.failure_policy = ParsePolicy(rule.name, n["failure_policy"].as<std::string>("fail_closed"));
     rule.burst_rule = n["burst"].as<std::string>("");
     rule.quota_rule = n["quota"].as<std::string>("");
+    const std::string quota_mode = n["quota_mode"].as<std::string>("strict");
+    rule.quota_auto = quota_mode == "auto";
 
     const auto fail = [&rule](const std::string& why) { throw std::runtime_error("rule '" + rule.name + "': " + why); };
     // A customer rule only names its two parts; they are checked once every rule is loaded.
@@ -75,8 +77,10 @@ RuleTable LoadRules(const std::string& path) {
         rule.window_ms == 0) {
       fail("'window_ms' must be > 0");
     }
-    // A daily quota is exact by definition: leasing it would hide up to a chunk per instance.
+    // A daily quota is exact by default; quota_mode: auto leases only large plans (CompositeCore).
     if (rule.algorithm == Algorithm::kQuota && !rule.strict) fail("quota rules need strict: true");
+    if (quota_mode != "strict" && quota_mode != "auto") fail("quota_mode must be strict or auto");
+    if (rule.quota_auto && rule.algorithm != Algorithm::kQuota) fail("quota_mode needs algorithm: quota");
     table.emplace(rule.name, std::move(rule));
   }
 

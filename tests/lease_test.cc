@@ -86,6 +86,14 @@ TEST(ChunkPolicy, StaysBetweenTheMinimumAndTenPercentOfTheLimit) {
   EXPECT_EQ(ChunkMin(tiny), 1u);
 }
 
+// Leased quota (Week 4): 0.1% of the daily limit, so 4 instances stay within 0.4% of a day.
+TEST(ChunkPolicy, ALeasedDailyQuotaTakesChunksOfOneTenthOfAPercent) {
+  const Rule enterprise{.name = "q", .algorithm = Algorithm::kQuota, .limit = 1'000'000};
+  EXPECT_EQ(ChunkCap(enterprise), 1000u);
+  EXPECT_EQ(ChunkMin(enterprise), 8u);
+  EXPECT_EQ(ChunkCap(Rule{.name = "q", .algorithm = Algorithm::kQuota, .limit = kLeasedQuotaFrom}), 100u);
+}
+
 TEST(ChunkPolicy, DoublesWhenTheLeaseRanDryHalvesWhenTokensSatUnused) {
   const Rule r{.name = "r", .limit = 1000, .refill_per_sec = 1};
   EXPECT_EQ(NextChunk(25, true, false, r), 50u);

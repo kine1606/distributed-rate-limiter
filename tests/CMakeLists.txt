@@ -10,7 +10,7 @@ add_executable(rl_unit_tests config_test.cc convert_test.cc core_test.cc keys_te
 # Script: Lua scripts against a plain Redis (127.0.0.1:6380, or RL_TEST_REDIS).
 add_executable(rl_redis_tests lua_scripts_test.cc)
 # Integration: backend and gRPC against the dev cluster (127.0.0.1:7001, or RL_TEST_CLUSTER).
-add_executable(rl_integration_tests redis_backend_it.cc grpc_quota_it.cc plan_change_it.cc)
+add_executable(rl_integration_tests redis_backend_it.cc grpc_quota_it.cc plan_change_it.cc leased_quota_it.cc)
 
 foreach(t rl_unit_tests rl_redis_tests rl_integration_tests)
   target_include_directories(${t} PRIVATE ${PROJECT_SOURCE_DIR}/src)

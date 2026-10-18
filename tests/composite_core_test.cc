@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -20,11 +21,18 @@ class FakeBackend final : public RedisBackend {
  public:
   void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
             ScriptCallback done) override {
-    calls.push_back({rule.name, std::string(key), requested, std::string(request_id), rule.limit});
+    calls.push_back({rule.name, std::string(key), requested, std::string(request_id), rule.limit, rule.overage});
+    auto& queued = next[rule.name];
+    if (!queued.empty()) {
+      const ScriptResult r = queued.front();
+      queued.pop_front();
+      done(r);
+      return;
+    }
     done(replies[rule.name]);
   }
   void Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) override {
-    returns.push_back({rule.name, std::string(key), tokens, {}, rule.limit});
+    returns.push_back({rule.name, std::string(key), tokens, {}, rule.limit, rule.overage});
     done({.allowed = true});
   }
   void HGetAll(std::string, HashCallback done) override {
@@ -38,9 +46,11 @@ class FakeBackend final : public RedisBackend {
     std::uint32_t amount;
     std::string request_id;
     std::uint32_t limit;
+    Overage overage;
   };
   std::vector<Call> calls, returns;
-  std::unordered_map<std::string, ScriptResult> replies;  // by rule name; default: denied
+  std::unordered_map<std::string, std::deque<ScriptResult>> next;  // by rule name, one per call, first
+  std::unordered_map<std::string, ScriptResult> replies;            // by rule name; default: denied
   HashResult plan;
   int plan_reads = 0;
 };
@@ -274,6 +284,106 @@ TEST_F(CompositeCoreTest, ARetriedRequestIdIsNotRecordedAgain) {
   EXPECT_TRUE(r.allowed);
   EXPECT_TRUE(r.replayed);
   EXPECT_EQ(events, 0);
+}
+
+// ---- leased quota (Week 4): quota_mode: auto, plans of kLeasedQuotaFrom a day or more ----
+
+RuleTable AutoRules() {
+  RuleTable r = Rules();
+  r.at("daily_quota").quota_auto = true;
+  return r;
+}
+
+class LeasedQuotaTest : public CompositeCoreTest {
+ protected:
+  void SetUp() override {
+    CompositeCoreTest::SetUp();
+    redis.plan.fields = {{"plan", "enterprise"}, {"daily", "1000000"}, {"burst", "2000"}, {"refill", "2000"},
+                         {"overage", "cap"},     {"extra", "100000"}};
+    redis.replies["daily_quota"] = {.allowed = true, .remaining = 999'000, .reset_after_ms = 60'000};
+  }
+  CheckResult RunOn(RateLimiterCore& c, std::string_view id = {}) {
+    CheckResult out;
+    c.Check({"cust:ent", "customer", 1, id}, [&](const CheckResult& r) { out = r; });
+    return out;
+  }
+  std::vector<FakeBackend::Call> QuotaCalls() const {
+    std::vector<FakeBackend::Call> out;
+    for (const auto& c : redis.calls) {
+      if (c.rule == "daily_quota") out.push_back(c);
+    }
+    return out;
+  }
+  LeasedCore leased{redis, plans, AutoRules(), 1024, &FakeNow};
+  CompositeCore auto_core{inner, strict, plans, deny, AutoRules(), &FakeNow, {}, &leased};
+};
+
+TEST_F(LeasedQuotaTest, ALargePlanTakesItsQuotaFromALease) {
+  for (int i = 0; i < 5; ++i) {
+    const auto r = RunOn(auto_core);
+    EXPECT_TRUE(r.allowed);
+    EXPECT_EQ(r.reason, Reason::kAllowed);
+    EXPECT_EQ(r.limit, 1'000'000u);
+    EXPECT_GT(r.reset_after_ms, 0u);  // next 00:00 UTC, computed locally on a hit
+    EXPECT_LE(r.reset_after_ms, 86'400'000u);
+  }
+  const auto q = QuotaCalls();
+  ASSERT_EQ(q.size(), 1u);  // one refill for five checks
+  EXPECT_EQ(q[0].amount, 1000u);  // 0.1% of the daily limit
+  EXPECT_EQ(q[0].limit, 1'000'000u);
+  EXPECT_EQ(q[0].overage, Overage::kHard);  // a lease never takes overage
+  EXPECT_EQ(redis.calls.size(), 6u);        // burst is still checked per call
+}
+
+TEST_F(LeasedQuotaTest, PlansBelowTheThresholdAndTheStrictEngineStayExact) {
+  redis.plan.fields["daily"] = std::to_string(kLeasedQuotaFrom - 1);
+  for (int i = 0; i < 3; ++i) RunOn(auto_core);
+  EXPECT_EQ(QuotaCalls().size(), 3u);
+  redis.calls.clear();
+  redis.plan.fields["daily"] = "1000000";
+  CompositeCore no_leases{inner, strict, plans, deny, AutoRules(), &FakeNow};  // the strict engine
+  for (int i = 0; i < 3; ++i) RunOn(no_leases);
+  EXPECT_EQ(QuotaCalls().size(), 3u);
+}
+
+// The plan is used up as far as leases go: the exact path decides, with the plan's policy and the
+// request id, and a denial is cached as on the strict path.
+TEST_F(LeasedQuotaTest, WhenTheLeaseIsOutTheExactPathDecides) {
+  redis.replies["daily_quota"] = {.allowed = false, .retry_after_ms = 60'000, .reset_after_ms = 60'000};
+  const auto r = RunOn(auto_core, "r-1");
+  EXPECT_FALSE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kQuotaExhausted);
+  const auto q = QuotaCalls();
+  ASSERT_EQ(q.size(), 2u);
+  EXPECT_EQ(q[0].overage, Overage::kHard);  // the refill
+  EXPECT_EQ(q[0].request_id, "");
+  EXPECT_EQ(q[1].overage, Overage::kCap);  // the exact check
+  EXPECT_EQ(q[1].amount, 1u);
+  EXPECT_EQ(q[1].request_id, "r-1");
+  EXPECT_EQ(deny.Size(), 1u);
+  EXPECT_EQ(redis.returns.size(), 1u);  // the burst token went back
+}
+
+TEST_F(LeasedQuotaTest, OverageBeyondTheLeaseIsBilledOnTheExactPath) {
+  redis.next["daily_quota"] = {{.allowed = false, .retry_after_ms = 60'000, .reset_after_ms = 60'000},  // lease
+                               {.allowed = true, .reset_after_ms = 60'000, .overage = true}};         // exact
+  const auto r = RunOn(auto_core);
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kOverage);
+  redis.next["daily_quota"] = {{.allowed = true, .reset_after_ms = 60'000, .overage = true}};
+  EXPECT_EQ(RunOn(auto_core).reason, Reason::kOverage);  // the lease denies locally until the reset
+  EXPECT_EQ(QuotaCalls().size(), 3u);                     // one refill, then an exact check each
+}
+
+TEST_F(LeasedQuotaTest, AnUpgradeLeasesUnderTheNewLimit) {
+  RunOn(auto_core);
+  redis.plan.fields["daily"] = "2000000";
+  const auto r = RunOn(auto_core);
+  EXPECT_EQ(r.limit, 2'000'000u);
+  const auto q = QuotaCalls();
+  ASSERT_EQ(q.size(), 2u);
+  EXPECT_EQ(q[1].limit, 2'000'000u);
+  EXPECT_EQ(q[1].amount, 2000u);
 }
 
 }  // namespace

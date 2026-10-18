@@ -6,6 +6,8 @@ rules:
     algorithm: quota
     limit_from: plan.daily
     strict: true          # exact: one Redis call per check (quota rules must be strict)
+    quota_mode: auto      # with the leased engine, plans of 100,000+ a day lease 0.1% chunks through
+                          # the customer rule (up to N x 0.1% over a day); strict | auto
     failure_policy: fail_closed
 
   burst:                  # a customer's burst limit: plan.burst tokens, refilled plan.refill per second

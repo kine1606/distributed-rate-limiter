@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
                                               std::move(chunk_log));
     leased = inner.get();
     core = std::make_shared<CompositeCore>(std::move(inner), customer_strict, plans, deny, std::move(rules),
-                                           &SteadyNowNs, std::move(on_decision));
+                                           &SteadyNowNs, std::move(on_decision), leased);  // leased quota too
   } else if (engine == "strict") {
     core = std::make_shared<CompositeCore>(std::make_shared<StrictCore>(*backend, plans, rules), customer_strict, plans,
                                            deny, std::move(rules), &SteadyNowNs, std::move(on_decision));
