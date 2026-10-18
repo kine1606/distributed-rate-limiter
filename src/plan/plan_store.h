@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -22,15 +23,17 @@ namespace ratelimiter {
 // checks wait for it (single flight). Invalidate, called on a plan-change message, drops a plan
 // sooner; the TTL bounds how stale a plan can be when a message was missed.
 //
-// shortcut: one mutex per shard, held for a lookup and a Plan copy; plans change rarely. Measure in
-// the flood test (Week 6) before making it lock-free.
+// A hit is lock-free: each thread keeps a small copy of the plans it read recently, valid while
+// this store's generation is unchanged (Invalidate bumps it) and the TTL lasts. Only a thread's
+// first read of a plan, or the first after a change, takes the shard mutex. Measured: one hot
+// customer on 16 threads, results/2026-10-18_customer_microbench.
 class PlanStore {
  public:
   using Callback = std::function<void(const Plan*)>;
 
   // `redis` must outlive this store. A zero `ttl` reads Redis on every call (the Week 2 baseline).
   explicit PlanStore(RedisBackend& redis, std::chrono::milliseconds ttl = {}, Clock clock = &SteadyNowNs)
-      : redis_(redis), ttl_ns_(std::chrono::nanoseconds(ttl).count()), now_(clock) {}
+      : redis_(redis), ttl_ns_(std::chrono::nanoseconds(ttl).count()), now_(clock), id_(NextId()) {}
 
   // `done` gets the plan (Free if the customer has none), or nullptr if Redis could not be asked.
   // It runs inline on a cache hit, else on a Redis I/O thread.
@@ -67,6 +70,10 @@ class PlanStore {
   static constexpr std::size_t kMinSweep = 1024;
 
   Shard& ShardOf(std::string_view customer) { return shards_[StringHash{}(customer) % kShards]; }
+  static std::uint64_t NextId() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+  }
   void Read(std::string_view customer, Callback done);  // no cache
   void Load(const std::string& customer);
   void OnLoad(const std::string& customer, const HashResult& h);
@@ -74,6 +81,8 @@ class PlanStore {
   RedisBackend& redis_;
   const std::int64_t ttl_ns_;
   const Clock now_;
+  const std::uint64_t id_;  // tells this store's plans apart in the per-thread copies
+  std::atomic<std::uint64_t> generation_{0};  // bumped after every invalidation
   std::array<Shard, kShards> shards_;
 };
 

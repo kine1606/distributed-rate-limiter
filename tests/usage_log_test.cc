@@ -100,7 +100,7 @@ TEST(UsageLog, FlushesEverySecondNotOnlyAtShutdown) {
 // file or in Dropped(), never lost silently or written twice.
 TEST(UsageLog, EveryEventIsWrittenOrCountedAsDropped) {
   const std::string path = TempPath("drops");
-  constexpr int kThreads = 4, kEach = 20'000;
+  constexpr int kThreads = 32, kEach = 5'000;  // more threads than rings: producers share rings
   std::uint64_t dropped = 0;
   {
     UsageLog log(path, "i", 64);

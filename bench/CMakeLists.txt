@@ -9,3 +9,6 @@ target_link_libraries(bench_lease PRIVATE rl_engine rl_api benchmark::benchmark 
 
 add_executable(loadgen loadgen/loadgen.cc)
 target_link_libraries(loadgen PRIVATE rl_proto Threads::Threads)
+
+add_executable(bench_customer bench_customer.cc)
+target_link_libraries(bench_customer PRIVATE rl_engine rl_api benchmark::benchmark benchmark::benchmark_main Threads::Threads)

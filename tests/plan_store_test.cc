@@ -4,8 +4,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <deque>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,16 @@ class FakeRedis final : public RedisBackend {
   std::vector<HashCallback> pending;
 };
 
+// Answers every read at once, from any thread.
+class InlineRedis final : public RedisBackend {
+ public:
+  using RedisBackend::Eval;
+  void Eval(const Rule&, std::string_view, std::uint32_t, std::string_view, ScriptCallback done) override {
+    done({.redis_error = true});
+  }
+  void HGetAll(std::string, HashCallback done) override { done({.fields = {{"daily", "2000"}}}); }
+};
+
 class PlanStoreTest : public ::testing::Test {
  protected:
   void SetUp() override { g_now = 0; }
@@ -51,6 +63,7 @@ class PlanStoreTest : public ::testing::Test {
   }
 
   FakeRedis redis;
+  InlineRedis inline_redis;
   PlanStore store{redis, std::chrono::seconds(5), &FakeNow};
   std::deque<std::vector<std::uint32_t>> answers;  // a deque: Get hands out references into it
 };
@@ -145,6 +158,51 @@ TEST_F(PlanStoreTest, ErrorsReachEveryWaiterAndAreNotCached) {
   EXPECT_EQ(b, std::vector<std::uint32_t>{0});
   Get();
   EXPECT_EQ(redis.keys.size(), 2u);  // the next check asks Redis again
+}
+
+// The second Get is served from this thread's own copy, with no lock; an invalidation must still
+// reach it, and another store must never see it.
+TEST_F(PlanStoreTest, InvalidationReachesAThreadsOwnCopy) {
+  Get();
+  redis.Answer("200");
+  EXPECT_EQ(Get(), std::vector<std::uint32_t>{200});  // copied to this thread
+  store.Invalidate("cust:1");
+  auto& after = Get();
+  ASSERT_EQ(redis.keys.size(), 2u);
+  redis.Answer("2000");
+  EXPECT_EQ(after, std::vector<std::uint32_t>{2000});
+  EXPECT_EQ(Get(), std::vector<std::uint32_t>{2000});
+  store.InvalidateAll();
+  Get();
+  EXPECT_EQ(redis.keys.size(), 3u);
+}
+
+TEST_F(PlanStoreTest, TwoStoresNeverShareAThreadsCopy) {
+  Get();
+  redis.Answer("200");
+  Get();  // this thread now holds store's plan for cust:1
+  PlanStore other{redis, std::chrono::seconds(5), &FakeNow};
+  std::uint32_t daily = 0;
+  other.Get("cust:1", [&](const Plan* p) { daily = p->daily; });
+  ASSERT_EQ(redis.pending.size(), 1u);  // read from Redis, not from the other store's copy
+  redis.Answer("777");
+  EXPECT_EQ(daily, 777u);
+}
+
+TEST_F(PlanStoreTest, ConcurrentHitsAndInvalidationsAreSafe) {  // for TSan: copies, shards, generation
+  PlanStore inline_store{inline_redis, std::chrono::seconds(5), &FakeNow};
+  std::vector<std::thread> threads;
+  std::atomic<int> answered{0};
+  for (int t = 0; t < 8; ++t) {
+    threads.emplace_back([&, t] {
+      for (int i = 0; i < 20'000; ++i) {
+        inline_store.Get("cust:" + std::to_string(i % 16), [&](const Plan* p) { answered += p != nullptr; });
+        if (t == 0 && i % 1000 == 0) inline_store.Invalidate("cust:3");
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  EXPECT_EQ(answered.load(), 8 * 20'000);
 }
 
 TEST_F(PlanStoreTest, ACallbackMayCallGetAgain) {  // no lock is held while answering

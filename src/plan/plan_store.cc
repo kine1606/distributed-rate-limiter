@@ -7,6 +7,20 @@
 #include "redis/keys.h"
 
 namespace ratelimiter {
+namespace {
+
+// A thread's recent plan reads, direct-mapped by customer hash. Valid only for the store and the
+// generation it was copied under, and until the cached plan's own expiry.
+struct LocalPlan {
+  std::uint64_t store = 0;
+  std::uint64_t generation = 0;
+  std::int64_t expires_ns = 0;
+  std::string customer;
+  Plan plan;
+};
+thread_local std::array<LocalPlan, 256> t_plans;
+
+}  // namespace
 
 void PlanStore::Read(std::string_view customer, Callback done) {
   redis_.HGetAll(PlanKey(customer), [done = std::move(done)](const HashResult& h) {
@@ -24,9 +38,18 @@ void PlanStore::Get(std::string_view customer, Callback done) {
     Read(customer, std::move(done));
     return;
   }
-  Shard& s = ShardOf(customer);
-  std::unique_lock lock(s.mu);
+  const std::size_t h = StringHash{}(customer);
+  LocalPlan& local = t_plans[(h >> 8) % t_plans.size()];  // other bits than the shard index
+  // Read before the shard: an invalidation after this load bumps it, so the copy made below dies.
+  const std::uint64_t generation = generation_.load(std::memory_order_acquire);
   const std::int64_t now = now_();
+  if (local.store == id_ && local.generation == generation && local.expires_ns > now && local.customer == customer) {
+    const Plan plan = local.plan;  // `done` may call Get again and overwrite `local`
+    done(&plan);
+    return;
+  }
+  Shard& s = shards_[h % kShards];
+  std::unique_lock lock(s.mu);
   auto it = s.map.find(customer);
   if (it == s.map.end()) {
     if (s.map.size() >= s.sweep_at) {  // drop the plans of customers who stopped calling
@@ -39,7 +62,13 @@ void PlanStore::Get(std::string_view customer, Callback done) {
     return;
   } else if (it->second.expires_ns > now) {
     const Plan plan = it->second.plan;
+    const std::int64_t expires = it->second.expires_ns;
     lock.unlock();
+    local.store = id_;
+    local.generation = generation;
+    local.expires_ns = expires;
+    local.customer.assign(customer);
+    local.plan = plan;
     done(&plan);
     return;
   }
@@ -88,12 +117,14 @@ void PlanStore::Invalidate(std::string_view customer) {
   Shard& s = ShardOf(customer);
   std::lock_guard lock(s.mu);
   const auto it = s.map.find(customer);
-  if (it == s.map.end()) return;
-  if (it->second.loading) {
-    it->second.stale = true;
-  } else {
-    s.map.erase(it);
+  if (it != s.map.end()) {
+    if (it->second.loading) {
+      it->second.stale = true;
+    } else {
+      s.map.erase(it);
+    }
   }
+  generation_.fetch_add(1, std::memory_order_release);  // every thread's copies are stale now
 }
 
 void PlanStore::InvalidateAll() {
@@ -108,6 +139,7 @@ void PlanStore::InvalidateAll() {
       }
     }
   }
+  generation_.fetch_add(1, std::memory_order_release);
 }
 
 }  // namespace ratelimiter
