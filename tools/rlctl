@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Plays the account service for one customer (docs/CUSTOMER_PLANS.md, steps B1, B5, B6, B9): writes
+# the plan hash, then publishes the customer ID on plan-changes, so every limiter drops its cached
+# plan and local denial at once. In that order: published first, an instance could re-read the old plan.
+#   tools/rlctl create    <customer> [--plan free]   fails if the customer has a plan
+#   tools/rlctl upgrade   <customer> --plan <name>   also restores a suspended customer
+#   tools/rlctl downgrade <customer> --plan <name>   "end of cycle" is when you run it
+#   tools/rlctl suspend   <customer>
+#   tools/rlctl show      <customer>                 plan hash and today's quota hash
+# Plans: tools/plans.sh. env: REDIS_HOST=127.0.0.1 REDIS_PORT=7001 (any cluster node).
+set -euo pipefail
+source "$(dirname "$0")/plans.sh"
+host=${REDIS_HOST:-127.0.0.1} port=${REDIS_PORT:-7001}
+usage() { sed -n '5,10s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+
+[ $# -ge 2 ] || usage
+cmd=$1 customer=$2
+shift 2
+plan=""
+case $cmd in create) plan=free ;; suspend) plan=suspended ;; esac
+while [ $# -gt 0 ]; do
+  case $1 in
+    --plan) [ $# -ge 2 ] || usage; plan=$2; shift 2 ;;
+    *) usage ;;
+  esac
+done
+# The limiter accepts keys of 1 to 128 bytes (src/server/convert.h); the hash tag is built the same way.
+[ "${#customer}" -ge 1 ] && [ "${#customer}" -le 128 ] || { echo "customer must be 1 to 128 bytes" >&2; exit 2; }
+key="{$customer}:plan"
+cli() { redis-cli -c -h "$host" -p "$port" "$@"; }
+show_hash() {  # one field per line, or (none)
+  local out
+  out=$(cli hgetall "$1")
+  if [ -n "$out" ]; then paste - - <<<"$out" | sed 's/^/  /'; else echo "  (none)"; fi
+}
+
+case $cmd in
+  create | upgrade | downgrade | suspend)
+    [ -n "$plan" ] && [ -n "${PLAN[$plan]+x}" ] || { echo "unknown plan '$plan' (${!PLAN[*]})" >&2; exit 2; }
+    [ "$cmd" = suspend ] && [ "$plan" != suspended ] && usage
+    if [ "$cmd" = create ] && [ "$(cli exists "$key")" != 0 ]; then
+      echo "$customer already has a plan; use upgrade or downgrade" >&2
+      exit 1
+    fi
+    # shellcheck disable=SC2086  # the preset is field-value pairs
+    [ "$(cli hset "$key" plan "$plan" ${PLAN[$plan]})" -ge 0 ] 2>/dev/null || { echo "writing $key failed" >&2; exit 1; }
+    cli publish plan-changes "$customer" >/dev/null
+    echo "$customer: $plan"
+    ;;
+  show)
+    echo "plan ($key):"
+    show_hash "$key"
+    echo "today ({$customer}:daily_quota:q):"  # the quota rule's key (config/rules.yaml, src/redis/keys.h)
+    show_hash "{$customer}:daily_quota:q"
+    ;;
+  *) usage ;;
+esac

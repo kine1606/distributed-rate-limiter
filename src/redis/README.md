@@ -1,6 +1,6 @@
 # Redis client, backend and batcher
 
-> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: `hiredis_backend.{h,cc}`: one connection, one worker thread, queued calls pipelined in batches of up to 1,024; no cluster support
+> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Week 3: `batcher.{h,cc}` (timer and adaptive modes, off by default after measurement). Week 4: `plan_listener.{h,cc}` (sync redis++ `Subscriber` on its own thread, `plan-changes`, reconnects and resyncs the plan cache); `quota.lua` replies carry `replayed`
 
 ## What this module does
 
@@ -14,10 +14,10 @@ client library without touching the engines.
 | File | Contains | Week |
 | --- | --- | --- |
 | `spike/spike_cluster_pipeline.cc` | Throwaway program that proves the client works | 1 |
-| `redis_backend.h` | Interface (exists; generalise it as below) | 2 |
-| `script_registry.{h,cc}` | Loads Lua files, keeps SHAs, reloads on `NOSCRIPT` | 2 |
-| `redispp_backend.{h,cc}` | `RedisBackend` on redis-plus-plus `AsyncRedisCluster` | 2 |
-| `fake_backend.h` | In-memory fake for engine unit tests | 2 |
+| `redis_backend.h` | Interface: `Eval(rule, key, requested)` and `HGetAll(key)` | done |
+| `keys.h` | Every Redis key (`RedisKey`, `PlanKey`) | done |
+| `redispp_backend.{h,cc}` | `RedisBackend` on redis-plus-plus `AsyncRedisCluster`; loads the scripts and their SHA1 (no separate registry was needed) | done |
+| fakes | `FakeBackend` / `ManualBackend` live in the engine tests that use them | done |
 | `batcher.{h,cc}` | Per-node queues, flush by size or time | 3 |
 
 ## Week 1: the client spike
@@ -30,8 +30,8 @@ Build it in this order:
 
 0. Make the cluster reachable from WSL first (development profile on ports 7001 to 7003, see
    [docker/README.md](../../docker/README.md#week-1-task-reach-the-cluster-from-wsl-outside-docker)).
-1. Install: `sudo apt install libhiredis-dev libuv1-dev`, then build redis-plus-plus with
-   `-DREDIS_PLUS_PLUS_BUILD_ASYNC=libuv -DREDIS_PLUS_PLUS_CXX_STANDARD=20`.
+1. Install: `scripts/setup.sh` installs `libhiredis-dev libuv1-dev` and builds redis-plus-plus with
+   `-DREDIS_PLUS_PLUS_BUILD_ASYNC=libuv -DREDIS_PLUS_PLUS_CXX_STANDARD=20` into `/usr/local`.
 2. Write a 100-line program that connects with `sw::redis::AsyncRedisCluster`, loads
    `token_bucket.lua`, then fires 10,000 `EVALSHA` calls with futures or callbacks and waits for
    all of them at the end.
@@ -167,7 +167,7 @@ layer that only adds bounding and metrics, which is a perfectly good result to r
 
 ## Done when
 
-- [ ] Week 1: spike numbers written into `docs/DESIGN.md`; client chosen.
-- [ ] Week 2: backend passes the integration test; `NOSCRIPT` fallback tested by running
-      `SCRIPT FLUSH` mid-test.
-- [ ] Week 3: batcher benchmark table saved in `results/`; TSan clean.
+- [x] Week 1: spike numbers written into `docs/DESIGN.md`; client chosen.
+- [x] Week 2: backend passes the integration test; `NOSCRIPT` fallback tested by running
+      `SCRIPT FLUSH` mid-test (`QuotaCountsExactlyAcrossTheClusterWhileScriptsAreFlushed`).
+- [x] Week 3: batcher benchmark table saved in `results/` (`2026-10-18_batcher/NOTES.md`); TSan clean.

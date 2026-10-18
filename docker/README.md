@@ -1,6 +1,6 @@
 # Docker environment
 
-> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: compose file with 3 masters and 3 limiters
+> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: Week 1 done: base cluster verified (`cluster_state:ok`, hash-tagged keys in one slot); development profile `docker-compose.dev.yml` reachable from WSL. Week 2: the 3 limiters run on the cluster (image builds redis-plus-plus), and share one daily quota across instances
 
 ## What this module does
 
@@ -29,34 +29,36 @@ ready. Run it again (`docker compose ... up redis-cluster-init`) and read its lo
 
 ## Week 1 task: reach the cluster from WSL (outside Docker)
 
-While developing, you will run `rate_limiter_server`, the spike and the tests directly in WSL, not
-in a container. That needs two changes, because a cluster node tells clients the address of the
-node that owns a slot (`MOVED 1234 172.18.0.3:6379`), and the container address may not be
-reachable from WSL.
+While developing, you run `rate_limiter_server`, the spike and the tests directly in WSL, not in a
+container. A cluster node tells clients the address of the node that owns a slot
+(`MOVED 1234 172.18.0.3:6379`), and a container address is not reachable from WSL, so the nodes
+must announce an address WSL can use.
 
-Add a development profile with published ports and announced addresses, one per node:
+`docker-compose.dev.yml` is a standalone file (its own project, `ratelimiter-dev`), not an override:
 
-```yaml
-# docker-compose.dev.yml (HINT: use as an override file:
-#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d)
-services:
-  redis-1:
-    ports: ["7001:7001", "17001:17001"]
-    command: >
-      redis-server --port 7001 --cluster-enabled yes --cluster-config-file nodes.conf
-      --cluster-node-timeout 5000 --appendonly no --save ""
-      --cluster-announce-ip 127.0.0.1 --cluster-announce-port 7001 --cluster-announce-bus-port 17001
-  # HINT: redis-2 on 7002/17002 and redis-3 on 7003/17003 the same way
-  # HINT: the init command must then use the new ports: redis-1:7001 redis-2:7002 redis-3:7003
+```bash
+docker compose -f docker/docker-compose.dev.yml up -d
+redis-cli -c -p 7001 cluster info          # cluster_state:ok, from WSL
+redis-cli -p 7001 cluster nodes            # 127.0.0.1:7001-7003, three masters
+redis-cli -p 6380 ping                     # plain throwaway Redis for the Lua script tests
 ```
 
-Then from WSL `redis-cli -c -p 7001 cluster info` works, and so does the C++ client with
-`127.0.0.1:7001` as its seed. The Lua tests do not need the cluster; they use one plain Redis:
-`docker run -d --name redis-test -p 6379:6379 redis:7`.
+How it works: redis-2, redis-3 and the init container join redis-1's network namespace
+(`network_mode: service:redis-1`), and redis-1 publishes 7001 to 7003. All three nodes then share
+one loopback, so the `127.0.0.1` they announce is right both for each other (cluster bus) and for
+clients in WSL. Announcing `127.0.0.1` from separate containers breaks the bus, because each
+container's loopback is its own; that is also why this cannot be an override of the base file
+(`network_mode` and `networks` cannot be combined). Consequence for fault tests in this profile:
+stop redis-2 or redis-3; stopping redis-1 takes the shared network down with it. The base file has
+separate containers, so any node can be killed there.
 
-Hint: if announcing `127.0.0.1` breaks traffic between the nodes themselves, use your WSL IP
-(`hostname -I`) instead, or run the development server inside the compose network. Whichever works,
-write it down in this file, because the evaluation scripts will depend on it.
+The init containers (both files) create the cluster only if `cluster_state` is not already `ok`, so
+`up` can be run again without failing on "node is not empty", and exit only once the cluster has
+converged, so the limiters never start against a cluster that still answers `CLUSTERDOWN`.
+
+The dev cluster and the plain Redis on 6380 replace port 6379 for everything that writes or flushes
+test data (`bench/ghz_run.sh` flushes the cluster), so a
+system Redis on 6379 is never touched.
 
 ## Changes to make over the weeks
 
@@ -88,6 +90,7 @@ hides network latency.
 
 ## Done when
 
-- [ ] Week 1: `cluster_state:ok` and hash-tagged keys land in one slot.
-- [ ] Week 1: `redis-cli -c -p 7001 cluster info` works from WSL (development profile).
+- [x] Week 1: `cluster_state:ok` and hash-tagged keys land in one slot (`{cust:42}:quota` and
+      `{cust:42}:tb` both in slot 3057).
+- [x] Week 1: `redis-cli -c -p 7001 cluster info` works from WSL (development profile).
 - [ ] Week 5: kill and latency tests scripted in `tests/eval/`.

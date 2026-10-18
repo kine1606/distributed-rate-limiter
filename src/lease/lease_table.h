@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "lease/chunk_policy.h"
 #include "ratelimiter/rule.h"
 #include "ratelimiter/types.h"
 
@@ -23,12 +24,19 @@ struct Waiter {
 // One (rule, key)'s local tokens: units this instance already took from Redis and may hand out
 // without asking again. alignas(64): hot leases used from different cores never share a cache line.
 struct alignas(64) Lease {
-  Lease(const Rule& r, std::string_view k) : rule(r), key(k) {}
+  Lease(const Rule& r, std::string_view k, std::uint64_t key_id = 0) : chunk(ChunkCap(r)), id(key_id), rule(r), key(k) {}
 
   // Touched by every check of this key: atomics only.
   std::atomic<std::int64_t> tokens{0};
-  std::atomic<std::int64_t> deny_until_ns{0};  // steady_clock; Redis said no until then
+  std::atomic<std::int64_t> deny_until_ns{0};  // engine clock; Redis said no until then
   std::atomic<bool> refill_in_flight{false};   // single flight: one refill per lease at a time
+  // Tokens per refill. Starts at the cap: starting low would keep a moderately busy key near the
+  // minimum chunk, because only a dry lease doubles it. Written only by the refill owner.
+  std::atomic<std::uint32_t> chunk;
+
+  // The interned key: a 64-bit hash of (rule, key) computed once, when the lease is created. A
+  // lookup compares it as an integer and reads the key string only when it matches.
+  const std::uint64_t id;
 
   const Rule& rule;  // lives in the engine's immutable RuleTable
   const std::string key;
@@ -36,6 +44,7 @@ struct alignas(64) Lease {
   // Slow path only: checks that found the lease empty, and the refill callback.
   std::mutex mu;
   std::vector<Waiter> waiters;
+  std::int64_t last_refill_ns{0};  // when the last full refill landed (0: never); under mu
 };
 
 // Takes `cost` tokens if the lease has them; returns the tokens left, or -1 (nothing taken).

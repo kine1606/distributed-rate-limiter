@@ -1,0 +1,60 @@
+#include "plan/plan.h"
+
+#include <gtest/gtest.h>
+
+namespace ratelimiter {
+namespace {
+
+TEST(Plan, ParsesTheSeededHash) {
+  const Plan p = ParsePlan({{"plan", "pay"}, {"daily", "2000"}, {"burst", "20"}, {"refill", "20"},
+                            {"overage", "grace"}, {"extra", "200"}, {"failure", "open"}});
+  EXPECT_EQ(p.daily, 2000u);
+  EXPECT_EQ(p.burst, 20u);
+  EXPECT_EQ(p.refill, 20u);
+  EXPECT_EQ(p.overage, Overage::kGrace);
+  EXPECT_EQ(p.extra, 200u);
+  EXPECT_FALSE(p.suspended);
+}
+
+TEST(Plan, OveragePolicyAndSuspension) {
+  EXPECT_EQ(ParsePlan({}).overage, Overage::kHard);  // Free
+  EXPECT_EQ(ParsePlan({{"overage", "cap"}}).overage, Overage::kCap);
+  EXPECT_EQ(ParsePlan({{"overage", "unlimited"}}).overage, Overage::kHard);  // unknown: the strictest
+  EXPECT_TRUE(ParsePlan({{"plan", "suspended"}}).suspended);
+  EXPECT_FALSE(ParsePlan({{"plan", "free"}}).suspended);
+}
+
+TEST(Plan, QuotaStampChangesWithTheQuotaTerms) {
+  const Plan free = ParsePlan({});
+  EXPECT_EQ(QuotaStamp(free), QuotaStamp(ParsePlan({{"burst", "20"}})));  // burst is not a quota term
+  EXPECT_NE(QuotaStamp(free), QuotaStamp(ParsePlan({{"daily", "2000"}})));
+  EXPECT_NE(QuotaStamp(free), QuotaStamp(ParsePlan({{"extra", "1"}})));
+  EXPECT_NE(QuotaStamp(ParsePlan({{"overage", "grace"}, {"extra", "5"}})),
+            QuotaStamp(ParsePlan({{"overage", "cap"}, {"extra", "5"}})));
+}
+
+TEST(Plan, MissingHashIsFree) {
+  const Plan p = ParsePlan({});
+  EXPECT_EQ(p.daily, 200u);
+  EXPECT_EQ(p.burst, 2u);
+  EXPECT_EQ(p.refill, 2u);
+}
+
+TEST(Plan, MalformedFieldsKeepTheFreeDefault) {
+  const Plan p = ParsePlan({{"daily", "abc"}, {"burst", "-5"}, {"refill", "10x"}});
+  EXPECT_EQ(p.daily, 200u);
+  EXPECT_EQ(p.burst, 2u);
+  EXPECT_EQ(p.refill, 2u);
+  EXPECT_EQ(ParsePlan({{"daily", ""}}).daily, 200u);
+  EXPECT_EQ(ParsePlan({{"daily", "99999999999"}}).daily, 200u);  // overflows uint32
+}
+
+TEST(Plan, ZeroIsAValidLimit) {  // the suspended preset
+  const Plan p = ParsePlan({{"daily", "0"}, {"burst", "0"}, {"refill", "0"}});
+  EXPECT_EQ(p.daily, 0u);
+  EXPECT_EQ(p.burst, 0u);
+  EXPECT_EQ(p.refill, 0u);
+}
+
+}  // namespace
+}  // namespace ratelimiter

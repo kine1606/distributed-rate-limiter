@@ -2,32 +2,109 @@ syntax = "proto3";
 
 package ratelimiter.v1;
 
-// Distributed rate limiter. See docs/DESIGN.md for the lease-based architecture.
+// Contract between an API gateway (gRPC client) and the rate limiter (gRPC server), v1.
+// Field numbers are permanent: add fields with new numbers, and `reserved` any number you remove.
+// Comments marked (1) to (6) answer the design questions in proto/README.md.
+//
+// (6) What an error means. Every decision, allow or deny, is status OK: read `allowed` and
+// `reason`. A non-OK status means the limiter could not decide this request at all:
+//   INVALID_ARGUMENT    malformed request: empty or oversized key or request_id, empty or unknown
+//                       rule, more than 1,000 batch entries. A gateway bug; retrying won't help.
+//   RESOURCE_EXHAUSTED  this limiter instance is overloaded (Week 5 admission control). Back off.
+//                       Says nothing about the caller's own limits.
+//   UNAVAILABLE, DEADLINE_EXCEEDED, CANCELLED
+//                       set by gRPC, never by the handler: instance down or shutting down, or the
+//                       gateway's deadline passed. The gateway applies its own fallback.
+// A Redis outage is not a status. It travels in an OK response as REASON_UNAVAILABLE (rule fails
+// closed) or REASON_UNVERIFIED (rule fails open), because CheckBatch must report it per entry (one
+// dead Redis master affects only its own slots), because UNAVAILABLE is the status that gRPC
+// client retry policies are usually set to retry, which would multiply load on a struggling Redis,
+// and because it keeps "limiter down" and "Redis down" apart in gateway metrics.
 service RateLimiter {
-  // Single check. Served from the local token lease when possible (no Redis round trip).
+  // One API call of one caller: one decision.
   rpc Check(CheckRequest) returns (CheckResponse);
 
-  // Batched check; reduces per-RPC overhead for high-volume callers.
+  // Up to 1,000 independent checks in one RPC, answered in request order. No atomicity across
+  // entries: each is decided as if sent alone, so an allowed entry consumes its tokens even when
+  // another entry is denied.
   rpc CheckBatch(CheckBatchRequest) returns (CheckBatchResponse);
 }
 
 message CheckRequest {
-  string key = 1;   // Entity being limited, e.g. "user:123" or an API key.
-  string rule = 2;  // Rule name from the config file, e.g. "api_default".
-  uint32 cost = 3;  // Tokens to consume. 0 is treated as 1.
+  // (1) Who is limited: the caller's entity id, e.g. "cust:42", "user:42", "ip:203.0.113.7".
+  // It is not a Redis key. The limiter builds every Redis key from it ("{cust:42}:api_default:tb"),
+  // so the hash tag that keeps one entity's keys in one Redis Cluster slot is written in one place,
+  // never by a gateway. Required, at most 128 bytes.
+  string key = 1;
+
+  // Rule name from config/rules.yaml, e.g. "api_default". Required; an unknown name is
+  // INVALID_ARGUMENT.
+  // (2) One Check per API call, not a quota entry plus a burst entry in a CheckBatch. From Week 4 a
+  // plan rule names the customer's quota and burst together: the limiter checks burst first, then
+  // quota, and gives the burst token back when quota denies. Server side, that order and that refund
+  // live in one place; the gateway needs no plan knowledge (plans change mid-day, step B5); and it
+  // costs one RPC with one entry instead of two.
+  string rule = 2;
+
+  // Units to consume. 0 means 1, since proto3 cannot tell 0 from unset and callers may omit it.
+  // A cost above the rule's limit can never pass: it is denied, not rejected.
+  uint32 cost = 3;
+
+  // (5) Was this a retry: an id the gateway generates once per logical API call (a UUID, or the
+  // client's Idempotency-Key header) and resends unchanged with every retry of that call. The
+  // limiter counts the daily quota once per id for 5 minutes ({cust:42}:daily_quota:req:<id>), and
+  // a retry gets the original answer. Burst is not deduplicated: a retry still arrives as traffic.
+  // Empty = no deduplication. At most 128 bytes.
+  string request_id = 4;
 }
 
+// (3) Why a check ended the way it did, so the gateway can tell "slow down for a second" from "come
+// back tomorrow" and "your account is suspended". 0 means unset, so a server bug that forgets to set
+// the reason can never read as success.
+enum Reason {
+  REASON_UNSPECIFIED = 0;
+  REASON_OK = 1;               // allowed within every limit
+  REASON_RATE_LIMITED = 2;     // denied by a short-term limit (token bucket, fixed or sliding window);
+                               // retry after retry_after_ms. HTTP 429.
+  REASON_QUOTA_EXHAUSTED = 3;  // denied: daily quota used up until reset_after_ms. HTTP 429.
+  REASON_OVERAGE = 4;          // allowed beyond the daily quota under the plan's cap policy; billed as
+                               // overage. Grace beyond the quota is free and answers REASON_OK.
+  REASON_SUSPENDED = 5;        // denied: account suspended; waiting does not help. HTTP 403. Week 4.
+  REASON_UNAVAILABLE = 6;      // denied: Redis unreachable and the rule fails closed. Not the
+                               // caller's fault. HTTP 503.
+  REASON_UNVERIFIED = 7;       // allowed: Redis unreachable and the rule fails open. Not counted,
+                               // so not billed.
+}
+
+// Small on purpose (encoded once per check): no strings, only fixed-meaning numbers.
 message CheckResponse {
-  bool allowed = 1;
-  uint32 remaining = 2;       // Tokens left (best effort when served from a local lease).
-  uint32 retry_after_ms = 3;  // 0 when allowed.
-  uint32 limit = 4;           // Configured burst/limit of the rule.
+  bool allowed = 1;  // the decision; every other field explains it
+
+  // Units left under the rule that decided, after this check. Best effort from a local lease: it
+  // counts this instance's leased tokens, not the global bucket, so it can be lower than the true
+  // remainder. For quota decisions: daily quota left (0 while in overage).
+  uint32 remaining = 2;
+
+  // (4) Only on a denial: ms until a retry of the same request can pass (rate limited: until enough
+  // tokens are back; quota exhausted: equal to reset_after_ms). 0 when allowed, or when waiting
+  // does not help (suspended) or the wait is unknown (unavailable). Gateway: Retry-After.
+  uint32 retry_after_ms = 3;
+
+  // The limit of the rule that decided: burst capacity, window limit, or daily quota.
+  uint32 limit = 4;
+
+  Reason reason = 5;
+
+  // (4) ms until the daily quota resets at 00:00 UTC, on every response of a quota rule (at most
+  // 86,400,000); 0 for rules without a daily quota. Gateway: X-RateLimit-Reset. It differs from
+  // retry_after_ms: a burst-limited call may retry in 1 s while the quota resets in 9 h.
+  uint32 reset_after_ms = 6;
 }
 
 message CheckBatchRequest {
-  repeated CheckRequest requests = 1;
+  repeated CheckRequest requests = 1;  // at most 1,000 entries
 }
 
 message CheckBatchResponse {
-  repeated CheckResponse responses = 1;  // Same order as the request.
+  repeated CheckResponse responses = 1;  // responses[i] answers requests[i]
 }

@@ -4,8 +4,8 @@
     client --HTTP--> gateway --gRPC Check--> rate_limiter_server --EVALSHA--> Redis (token_bucket.lua)
 
 Allowed -> 200 from a stub upstream, with X-RateLimit-* headers.
-Denied  -> 429 with Retry-After.
-Limiter unreachable or Redis down on a fail_closed rule -> 503.
+Denied  -> 429 with Retry-After (rate limited, quota exhausted) or 403 (account suspended).
+Limiter unreachable, or Redis down on a fail_closed rule (REASON_UNAVAILABLE) -> 503.
 
 Usage: gateway.py [--listen 0.0.0.0:8080] [--limiter 127.0.0.1:50051]
 Needs only python3-grpcio and grpcio-tools (stubs are generated from proto/ at startup).
@@ -68,9 +68,17 @@ class Gateway(BaseHTTPRequestHandler):
             return self.reply(503, {"error": "rate limiter unavailable", "detail": f"{e.code().name}: {e.details()}"})
 
         headers = {"X-RateLimit-Limit": resp.limit, "X-RateLimit-Remaining": resp.remaining}
+        if resp.reset_after_ms:
+            headers["X-RateLimit-Reset"] = math.ceil(resp.reset_after_ms / 1000)
         if not resp.allowed:
+            reason = pb.Reason.Name(resp.reason)
+            if resp.reason == pb.REASON_UNAVAILABLE:  # Redis down, rule fails closed: not the caller's fault
+                return self.reply(503, {"error": "rate limiter unavailable", "reason": reason}, headers)
+            if resp.reason == pb.REASON_SUSPENDED:
+                return self.reply(403, {"error": "account suspended", "reason": reason}, headers)
             headers["Retry-After"] = max(1, math.ceil(resp.retry_after_ms / 1000))
-            return self.reply(429, {"error": "too many requests", "retry_after_ms": resp.retry_after_ms}, headers)
+            return self.reply(429, {"error": "too many requests", "reason": reason,
+                                    "retry_after_ms": resp.retry_after_ms}, headers)
 
         # Stand-in for forwarding to the real upstream service.
         return self.reply(200, {"message": f"hello {key}", "route": path, "rule": rule}, headers)

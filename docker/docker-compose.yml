@@ -1,4 +1,4 @@
-# Local test environment: 3-master Redis Cluster + 3 limiter instances.
+# Local test environment: 3-master Redis Cluster + 3 limiter instances (each seeds from redis-1).
 # Usage (from repo root): docker compose -f docker/docker-compose.yml up --build
 name: ratelimiter
 
@@ -16,8 +16,7 @@ x-limiter: &limiter
   volumes:
     - ../config:/etc/ratelimiter:ro
   depends_on:
-    redis-cluster-init:
-      condition: service_completed_successfully
+    redis-cluster-init: {condition: service_completed_successfully}
   networks: [rl]
 
 services:
@@ -32,9 +31,10 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        sleep 2
-        redis-cli --cluster create redis-1:6379 redis-2:6379 redis-3:6379 \
-          --cluster-replicas 0 --cluster-yes
+        for h in redis-1 redis-2 redis-3; do until redis-cli -h $$h ping >/dev/null 2>&1; do sleep 0.2; done; done
+        redis-cli -h redis-1 cluster info | grep -q cluster_state:ok ||
+          redis-cli --cluster create redis-1:6379 redis-2:6379 redis-3:6379 --cluster-replicas 0 --cluster-yes
+        until redis-cli -h redis-1 cluster info | grep -q cluster_state:ok; do sleep 0.2; done  # converged before limiters start
 
   limiter-1:
     <<: *limiter

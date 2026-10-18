@@ -5,11 +5,15 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: Week 3 started.** The default engine serves non-strict rules from a lock-free local lease
-and refills it from Redis through pipelined Lua calls; `strict: true` rules ask Redis per check.
-Token bucket, fixed window and sliding window scripts are implemented and tested against real
-Redis. Measured on one laptop: ~31k checks/s, bound by the load generator (raw data and setup in
-`results/2026-10-12_lease_engine/`, git-ignored). **Start with
+**Status: Weeks 1 to 4 done (Week 3 gate partly met, Week 4 gate met): overage policies, request
+IDs, deny cache, `CompositeCore`, plan cache with Pub/Sub, usage events, `tools/rlctl` and leased
+quota for large plans; lock-free on the common customer path.** The limiter runs on a
+3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3) and enforces per-customer
+daily quotas from plan hashes in Redis: a Free customer is stopped at exactly 200 through gRPC
+(`tests/grpc_quota_it.cc`). The default engine serves non-strict rules from a lock-free local lease
+refilled through pipelined Lua calls; strict and plan rules ask Redis per check. Measured on one
+laptop: strict quota checks 25k checks/s median at c=1,024 (10k at p99 10 ms), leased ~31k bound by
+the load generator (raw data and setup in `results/`, git-ignored). **Start with
 [docs/ROADMAP.md](docs/ROADMAP.md)**: it is the week-by-week checklist, and every module folder has a
 `README.md` with a skeleton, build order and hints.
 
@@ -40,17 +44,26 @@ results/                Raw benchmark output (git-ignored)             results/R
 
 ## Build and test
 
-Develop on Linux (WSL2 Ubuntu works). Ubuntu 24.04 packages:
+Develop on Linux (WSL2 Ubuntu 24.04 works) with Docker Desktop running and its WSL integration on.
+One-time setup: Ubuntu packages, redis-plus-plus from source, `ghz` and `grpcurl`, and the
+development Redis (cluster on 127.0.0.1:7001-7003, throwaway plain Redis on 127.0.0.1:6380):
 
 ```bash
-sudo apt-get install -y build-essential cmake ninja-build pkg-config libgrpc++-dev \
-  protobuf-compiler-grpc libprotobuf-dev libspdlog-dev libyaml-cpp-dev libgtest-dev libbenchmark-dev
+scripts/setup.sh             # asks for sudo; safe to run again
+docker compose -f docker/docker-compose.dev.yml up -d   # after a reboot: development Redis only
 
 scripts/build.sh release     # -O3 -march=native
 scripts/test.sh release
 scripts/test.sh asan
 scripts/test.sh tsan
 ```
+
+Levels: `ctest --test-dir build/release -L unit` (no network), `-L redis` (Lua scripts on the plain
+Redis at 127.0.0.1:6380, `RL_TEST_REDIS`), `-L integration` (backend and gRPC on the dev cluster at
+127.0.0.1:7001, `RL_TEST_CLUSTER`). Redis-backed tests skip when their Redis is down.
+
+Seed customer plans into the dev cluster (Free `cust:1..N`, Pay `cust:pay:1..N`, Enterprise
+`cust:ent:1..10`): `tools/seed_plans.sh 10000`.
 
 `vcpkg.json` lists all dependencies (including the Redis client and prometheus-cpp needed later) if
 you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake`.
@@ -59,14 +72,14 @@ you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scr
 
 ```bash
 # args: [listen] [rules.yaml] [redis host:port] [lua dir] [engine: leased | strict | allow_all]
-# one plain Redis, not Cluster
-./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:6379 lua leased
+# redis = any node of the cluster (default 127.0.0.1:7001, the dev cluster)
+./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:7001 lua leased
+grpcurl -plaintext -d '{"key":"cust:42","rule":"daily_quota"}' localhost:50051 ratelimiter.v1.RateLimiter/Check
 ```
 
-End-to-end demo (curl -> Python gateway on :8080 -> limiter -> Redis), starts Redis if needed:
+End-to-end demo (curl -> Python gateway on :8080 -> limiter -> dev Redis Cluster on :7001-7003):
 
 ```bash
-sudo apt-get install -y libhiredis-dev   # once
 scripts/demo.sh
 ```
 
@@ -75,7 +88,8 @@ Gateway alone: `python3 examples/gateway-python/gateway.py`, then
 
 `SIGINT`/`SIGTERM` marks health NOT_SERVING and drains in-flight requests for up to 5 seconds.
 
-Docker environment (3 Redis masters + 3 limiter instances on ports 50051-50053):
+Docker environment (3 limiter instances on ports 50051-50053 sharing one Redis, plus the 3-master
+cluster they move to with the Week 2 cluster backend):
 
 ```bash
 docker compose -f docker/docker-compose.yml up --build
@@ -83,8 +97,8 @@ docker compose -f docker/docker-compose.yml up --build
 
 ## Benchmarks
 
-Micro: `./build/release/bench/bench_core`. One load-test cell: `bench/ghz_run.sh` (needs a throwaway
-Redis on port 6380: it flushes it). Load test by hand: use [`ghz`](https://ghz.sh) against
+Micro: `./build/release/bench/bench_core`. One load-test cell: `bench/ghz_run.sh` (runs FLUSHALL on
+every master of the dev cluster, then seeds plans: never point it at a cluster holding real data). Load test by hand: use [`ghz`](https://ghz.sh) against
 `ratelimiter.v1.RateLimiter/Check` with `--proto proto/rate_limiter.proto`. Save raw output in
 `results/` together with the command that produced it.
 

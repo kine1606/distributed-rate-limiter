@@ -1,5 +1,5 @@
 // Lua script tests against a REAL Redis (no mocks: the whole point is Redis semantics).
-// Redis address: env RL_TEST_REDIS="host:port" (default 127.0.0.1:6379).
+// Redis address: env RL_TEST_REDIS="host:port" (default 127.0.0.1:6380).
 // If Redis is unreachable the tests are skipped, not failed.
 #include <hiredis/hiredis.h>
 #include <gtest/gtest.h>
@@ -33,7 +33,7 @@ class LuaTest : public ::testing::Test {
  protected:
   void SetUp() override {
     std::string host = "127.0.0.1";
-    int port = 6379;
+    int port = 6380;
     if (const char* e = std::getenv("RL_TEST_REDIS")) {
       std::string a = e;
       auto c = a.find(':');
@@ -46,6 +46,7 @@ class LuaTest : public ::testing::Test {
     quota_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/quota.lua");
     fw_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/fixed_window.lua");
     sw_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/sliding_window.lua");
+    return_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/return_lease.lua");
   }
 
   std::string Load(const std::string& path) {
@@ -58,7 +59,12 @@ class LuaTest : public ::testing::Test {
   }
 
   Reply Run(const std::string& sha, const std::string& key, const std::vector<std::string>& args) {
-    std::vector<const char*> argv{"EVALSHA", sha.c_str(), "1", key.c_str()};
+    return RunKeys(sha, {key}, args);
+  }
+  Reply RunKeys(const std::string& sha, const std::vector<std::string>& keys, const std::vector<std::string>& args) {
+    const std::string nkeys = std::to_string(keys.size());
+    std::vector<const char*> argv{"EVALSHA", sha.c_str(), nkeys.c_str()};
+    for (auto& k : keys) argv.push_back(k.c_str());
     for (auto& a : args) argv.push_back(a.c_str());
     auto* r = static_cast<redisReply*>(redisCommandArgv(ctx_.get(), argv.size(), argv.data(), nullptr));
     Reply out;
@@ -87,6 +93,24 @@ class LuaTest : public ::testing::Test {
   }
   Reply Quota(const std::string& key, int limit, int cost) {
     return Run(quota_sha_, key, {std::to_string(limit), std::to_string(cost)});
+  }
+  // quota.lua v2: overage policy and extra; `req_key` non-empty deduplicates by request id.
+  Reply QuotaV2(const std::string& key, int limit, int cost, const std::string& policy, int extra,
+                const std::string& req_key = "") {
+    std::vector<std::string> keys{key};
+    if (!req_key.empty()) keys.push_back(req_key);
+    return RunKeys(quota_sha_, keys, {std::to_string(limit), std::to_string(cost), policy, std::to_string(extra)});
+  }
+  // Today's quota state, as if `used` units were already consumed (request used + 1 comes next).
+  void SetUsedToday(const std::string& key, int used) {
+    const std::string day = std::to_string(RedisNowMs() / 86400000);
+    freeReplyObject(redisCommand(ctx_.get(), "HSET %s day %s used %d", key.c_str(), day.c_str(), used));
+  }
+  std::string HGet(const std::string& key, const std::string& field) {
+    auto* r = static_cast<redisReply*>(redisCommand(ctx_.get(), "HGET %s %s", key.c_str(), field.c_str()));
+    std::string v = r && r->type == REDIS_REPLY_STRING ? r->str : "";
+    freeReplyObject(r);
+    return v;
   }
   // Fixed / sliding window: limit, window_ms, requested
   Reply FW(const std::string& key, int limit, int window_ms, int req = 1) {
@@ -137,7 +161,7 @@ class LuaTest : public ::testing::Test {
 
   struct Closer { void operator()(redisContext* c) const { redisFree(c); } };
   std::unique_ptr<redisContext, Closer> ctx_;
-  std::string tb_sha_, quota_sha_, fw_sha_, sw_sha_;
+  std::string tb_sha_, quota_sha_, fw_sha_, sw_sha_, return_sha_;
   std::chrono::steady_clock::time_point mono_start_;
   long long wall_start_ = 0;
 };
@@ -215,7 +239,7 @@ TEST_F(LuaTest, ConcurrentCallersNeverOverAdmit) {
   std::vector<std::thread> ts;
   for (int t = 0; t < 8; ++t) {
     ts.emplace_back([&] {
-      redisContext* c = redisConnect("127.0.0.1", 6379);
+      redisContext* c = redisConnect("127.0.0.1", 6380);
       if (const char* e = std::getenv("RL_TEST_REDIS")) {
         redisFree(c);
         std::string a = e;
@@ -298,6 +322,128 @@ TEST_F(LuaTest, QuotaKeyExpiresAfterDayEnds) {
   long long ttl = Pttl(k);
   EXPECT_GT(ttl, 0);
   EXPECT_LE(ttl, 86400000 + 3600000);
+}
+
+// ---- quota v2: overage policies and request id (Week 4) ----
+
+// The Week 4 gate on the script: the same request 2,001 on three plans gives three answers.
+TEST_F(LuaTest, Request2001OnHardGraceAndCapGivesThreeDifferentAnswers) {
+  const std::string hard = "{q7h}:quota", grace = "{q7g}:quota", cap = "{q7c}:quota";
+  for (const auto& k : {hard, grace, cap}) {
+    Del(k);
+    SetUsedToday(k, 2000);
+  }
+  const auto h = QuotaV2(hard, 2000, 1, "hard", 0);
+  const auto g = QuotaV2(grace, 2000, 1, "grace", 200);
+  const auto c = QuotaV2(cap, 2000, 1, "cap", 1000);
+  ASSERT_EQ(h.ints.size(), 6u);
+  EXPECT_EQ(h.ints[0], 0);  // hard: denied
+  EXPECT_EQ(h.ints[4], 0);
+  EXPECT_EQ(g.ints[0], 1);  // grace: allowed, free
+  EXPECT_EQ(g.ints[4], 0);
+  EXPECT_EQ(g.ints[2], 0);  // nothing left of the plan itself
+  EXPECT_EQ(c.ints[0], 1);  // cap: allowed, billed as overage
+  EXPECT_EQ(c.ints[4], 1);
+  EXPECT_EQ(HGet(cap, "used"), "2000");  // overage is counted apart from the plan
+  EXPECT_EQ(HGet(cap, "overage_used"), "1");
+}
+
+TEST_F(LuaTest, GraceAdmitsExactlyTheExtraThenDenies) {
+  const std::string k = "{q8}:quota";
+  Del(k);
+  for (int i = 1; i <= 5; ++i) EXPECT_EQ(QuotaV2(k, 3, 1, "grace", 2).ints[0], 1) << "request " << i;
+  const auto d = QuotaV2(k, 3, 1, "grace", 2);
+  EXPECT_EQ(d.ints[0], 0);
+  EXPECT_EQ(d.ints[1], 5);  // the denial is not counted
+}
+
+TEST_F(LuaTest, CapAdmitsExactlyTheCapAsOverageThenDenies) {
+  const std::string k = "{q9}:quota";
+  Del(k);
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(QuotaV2(k, 3, 1, "cap", 2).ints[4], 0);  // within the plan
+  for (int i = 0; i < 2; ++i) {
+    const auto r = QuotaV2(k, 3, 1, "cap", 2);
+    EXPECT_EQ(r.ints[0], 1);
+    EXPECT_EQ(r.ints[4], 1);
+  }
+  EXPECT_EQ(QuotaV2(k, 3, 1, "cap", 2).ints[0], 0);
+  EXPECT_EQ(HGet(k, "used"), "3");
+  EXPECT_EQ(HGet(k, "overage_used"), "2");
+}
+
+TEST_F(LuaTest, CapBillsOnlyThePartOfARequestBeyondTheLimit) {
+  const std::string k = "{q10}:quota";
+  Del(k);
+  SetUsedToday(k, 2);
+  const auto r = QuotaV2(k, 3, 2, "cap", 5);  // one unit still in the plan, one beyond it
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[4], 1);
+  EXPECT_EQ(HGet(k, "used"), "3");
+  EXPECT_EQ(HGet(k, "overage_used"), "1");
+}
+
+TEST_F(LuaTest, NewUtcDayResetsOverageToo) {
+  const std::string k = "{q11}:quota";
+  Del(k);
+  for (int i = 0; i < 5; ++i) QuotaV2(k, 3, 1, "cap", 2);
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s day 1", k.c_str()));  // yesterday's data
+  const auto r = QuotaV2(k, 3, 1, "cap", 2);
+  EXPECT_EQ(r.ints[1], 1);
+  EXPECT_EQ(r.ints[4], 0);
+  EXPECT_EQ(HGet(k, "overage_used"), "0");
+}
+
+TEST_F(LuaTest, RetryWithTheSameRequestIdIsCountedOnce) {
+  const std::string k = "{q12}:quota", req = "{q12}:quota:req:abc";
+  Del(k);
+  Del(req);
+  Del("{q12}:quota:req:other");  // stored answers outlive the test by 5 min
+  const auto first = QuotaV2(k, 10, 1, "hard", 0, req);
+  const auto retry = QuotaV2(k, 10, 1, "hard", 0, req);
+  EXPECT_EQ(first.ints[0], 1);
+  EXPECT_EQ(retry.ints[0], 1);
+  EXPECT_EQ(first.ints[5], 0);  // replayed: usage events skip the retry
+  EXPECT_EQ(retry.ints[5], 1);
+  EXPECT_EQ(retry.ints[1], first.ints[1]);
+  EXPECT_EQ(retry.ints[2], first.ints[2]);
+  EXPECT_EQ(HGet(k, "used"), "1");
+  EXPECT_EQ(QuotaV2(k, 10, 1, "hard", 0, "{q12}:quota:req:other").ints[1], 2);  // another id counts
+  const long long ttl = Pttl(req);
+  EXPECT_GT(ttl, 0);
+  EXPECT_LE(ttl, 300000);
+}
+
+TEST_F(LuaTest, RetryOfADeniedRequestGetsTheSameDenial) {
+  const std::string k = "{q13}:quota", req = "{q13}:quota:req:abc";
+  Del(k);
+  Del(req);
+  SetUsedToday(k, 3);
+  EXPECT_EQ(QuotaV2(k, 3, 1, "hard", 0, req).ints[0], 0);
+  EXPECT_EQ(QuotaV2(k, 10, 1, "hard", 0, req).ints[0], 0);  // upgraded since, but it is the same request
+  EXPECT_EQ(QuotaV2(k, 10, 1, "hard", 0).ints[0], 1);        // a new request sees the upgrade
+}
+
+// ---- return_lease.lua ----
+
+TEST_F(LuaTest, ReturnedTokensGoBackToTheBucketButNeverAboveCapacity) {
+  const std::string k = "{rl1}:tb";
+  Del(k);
+  for (int i = 0; i < 5; ++i) TB(k, 5, 0, 1);  // rate 0: nothing refills during the test
+  EXPECT_EQ(TB(k, 5, 0, 1).ints[0], 0);
+  EXPECT_EQ(Run(return_sha_, k, {"5", "2"}).ints[1], 2);
+  EXPECT_EQ(TB(k, 5, 0, 1).ints[0], 1);
+  EXPECT_EQ(Run(return_sha_, k, {"5", "100"}).ints[1], 5);  // clamped at the capacity
+  const long long ttl = Pttl(k);
+  EXPECT_GT(ttl, 0);  // returning keeps the bucket's TTL
+}
+
+TEST_F(LuaTest, ReturnToAMissingBucketCreatesNothing) {  // a missing bucket is already full
+  const std::string k = "{rl2}:tb";
+  Del(k);
+  EXPECT_EQ(Run(return_sha_, k, {"5", "1"}).ints[1], 5);
+  auto* r = static_cast<redisReply*>(redisCommand(ctx_.get(), "EXISTS %s", k.c_str()));
+  EXPECT_EQ(r->integer, 0);
+  freeReplyObject(r);
 }
 
 // ---- fixed window ----

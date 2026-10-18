@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdint>
 #include <functional>
 
 namespace ratelimiter {
@@ -15,8 +16,10 @@ LeaseTable::~LeaseTable() {
 }
 
 Lease* LeaseTable::FindOrCreate(const Rule& rule, std::string_view key) {
-  const std::hash<std::string_view> hash;
-  const std::size_t h = hash(key) ^ (hash(rule.name) * 0x9e3779b97f4a7c15ULL);
+  // The rule's address, not its name: rules live in the engine's immutable table, so the address is
+  // a stable identity (already used for equality below) and the name is not hashed on every check.
+  const std::uint64_t h = std::hash<std::string_view>{}(key) ^
+                          (static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&rule)) * 0x9e3779b97f4a7c15ULL);
   std::unique_ptr<Lease> fresh;  // built at most once, only for a key seen for the first time
 
   // Linear probing. Slots are never cleared, so a key is always at the first slot of its probe
@@ -25,14 +28,14 @@ Lease* LeaseTable::FindOrCreate(const Rule& rule, std::string_view key) {
     std::atomic<Lease*>& slot = slots_[(h + i) & mask_];
     Lease* l = slot.load(std::memory_order_acquire);  // pairs with the release below: sees key/rule
     if (l == nullptr) {
-      if (!fresh) fresh = std::make_unique<Lease>(rule, key);
+      if (!fresh) fresh = std::make_unique<Lease>(rule, key, h);
       if (slot.compare_exchange_strong(l, fresh.get(), std::memory_order_release,
                                        std::memory_order_acquire)) {
         return fresh.release();  // owned by the table from now on
       }
       // Another thread filled this slot first; `l` is its lease, compared like any other.
     }
-    if (&l->rule == &rule && l->key == key) return l;
+    if (l->id == h && &l->rule == &rule && l->key == key) return l;  // integers first; key only on a match
   }
   return nullptr;
 }

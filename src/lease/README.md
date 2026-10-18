@@ -1,6 +1,6 @@
 # Lease fast path and deny cache
 
-> Week 3 (leases), Week 4 (deny cache) · Flow steps A5, A7, A8 · Status: `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean), single-flight + early refill + local deny live in `src/core/leased_core.cc`; fixed chunk (10% of limit), no adaptive sizing, waiter bound or eviction yet
+> Week 3 (leases), Week 4 (deny cache, leased quota) · Flow steps A5, A7, A8 · Status: Week 4: the same leases serve large plans' daily quotas (chunks of 0.1%, `CompositeCore`; four instances admitted exactly 100,000 of 100,000, `tests/leased_quota_it.cc`); a deny lookup in a shard with no denial takes no lock. `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean); single-flight, early refill, top-up refills and local deny in `src/core/leased_core.cc`; adaptive chunk in `chunk_policy.h`; bound checked by the seeded harness `tests/lease_harness_test.cc`. interned 64-bit lease id (integer compare on lookup) and microbenchmarks in `bench/bench_lease.cc`. deny cache in `deny_cache.h` (Week 4: sharded, entries end at the Redis reset and are dropped when the plan changes). Not yet: waiter bound, eviction
 
 ## What this module does
 
@@ -76,8 +76,12 @@ struct ChunkPolicy {
    the reply comes, add the granted tokens, clear the flag, then serve parked waiters in order.
 4. **Early refill.** On a hit, if tokens fall below 30% of `last_chunk` and no refill is in flight,
    start one. Most refills then finish before the lease is empty, so almost nobody waits.
-5. **Chunk sizing.** Start at `min_chunk`. Double while the lease empties faster than one refill
-   round trip; halve when tokens sit unused. Never exceed `max_fraction_of_limit × capacity`.
+5. **Chunk sizing (done, `chunk_policy.h`).** Starts at the cap, not `min_chunk`: only a dry lease
+   doubles a chunk, so a moderately busy key started low would stay near the minimum (one Redis call
+   per 8 checks instead of per 25). Doubles when checks found the lease dry while its refill was out; halves when the last
+   chunk lasted more than 10 s; stays within [min(8, cap), cap]. Refills top the lease up to the
+   chunk instead of adding a chunk, and checks costlier than the cap go to Redis directly: both keep
+   an instance at no more than one chunk, which the bound needs (DESIGN.md section 6).
 6. **Waiter bound and deadline.** If the waiter queue is full, answer `RESOURCE_EXHAUSTED`. If a
    refill takes longer than a few milliseconds, answer waiters with the failure policy (Week 5).
 7. **Microbenchmark** `TryTake` with 1, 4 and 16 threads on one hot key and on 1,000 keys. The
@@ -120,7 +124,12 @@ integration test in Week 6 hammers one key from all instances and asserts
 
 ## Done when
 
-- [ ] TSan clean on all lease tests.
-- [ ] Single-flight proven: 500 concurrent misses on one key cause exactly one refill.
-- [ ] Microbenchmark results saved; lease hit ratio exported as a metric.
-- [ ] Week 4: deny cache tested, including clear on upgrade.
+- [x] TSan clean on all lease tests.
+- [x] Single-flight proven: 500 concurrent misses on one key cause exactly one refill.
+- [x] Seeded harness: 100,000 seeds keep admitted <= limit + N x C in every window (the default run
+      is 2,000 seeds; `RL_HARNESS_SEEDS=N`, replay one with `RL_HARNESS_SEED=<seed>`).
+- [x] Microbenchmark results saved (`results/2026-10-18_lease_microbench/`).
+- [ ] Lease hit ratio exported as a metric (Week 5, Prometheus).
+- [x] Week 4: deny cache tested, including clear on upgrade (`tests/deny_cache_test.cc`; an
+      upgrade also lifts the denial without a message, because each entry keeps a stamp of the plan
+      it was made under, `tests/composite_core_test.cc`).

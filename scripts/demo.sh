@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# End-to-end demo: curl -> gateway (HTTP :8080) -> rate_limiter_server (gRPC :50051) -> Redis (:6379).
-# Starts Redis if it is not already running, the limiter and the gateway, sends a burst of requests,
-# then stops what it started.  Usage: scripts/demo.sh [build preset, default release]
+# End-to-end demo: curl -> gateway (HTTP :8080) -> rate_limiter_server (gRPC :50051) -> Redis Cluster
+# (:7001-7003, docker/docker-compose.dev.yml). Starts the limiter and the gateway, sends a burst of
+# requests, then stops what it started.  Usage: scripts/demo.sh [build preset, default release]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 preset="${1:-release}"
 server="build/$preset/rate_limiter_server"
 
 pids=()
-started_redis=0
 tmp="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp"
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
-  if [[ $started_redis == 1 ]]; then redis-cli -p 6379 shutdown nosave >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
 
@@ -29,14 +27,16 @@ wait_port() {  # wait_port <port> <name>
 
 [[ -x $server ]] || scripts/build.sh "$preset"
 
-if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
-  redis-server --port 6379 --save "" --appendonly no --daemonize yes >/dev/null
-  started_redis=1
+if ! redis-cli -p 7001 cluster info 2>/dev/null | grep -q cluster_state:ok; then
+  echo "dev Redis Cluster not running: docker compose -f docker/docker-compose.dev.yml up -d" >&2
+  exit 1
 fi
-wait_port 6379 redis
-redis-cli -p 6379 --scan --pattern '{user:*}:*' | xargs -r redis-cli -p 6379 del >/dev/null  # fresh buckets
+masters="7001 7002 7003"
+for m in $masters; do  # fresh buckets; a key found on a master lives there, so DEL needs no redirect
+  redis-cli -p "$m" --scan --pattern '{user:*}:*' | sed 's/^/DEL /' | redis-cli -p "$m" >/dev/null
+done
 
-"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:6379 lua &
+"$server" 127.0.0.1:50051 config/rules.yaml 127.0.0.1:7001 lua &
 pids+=($!)
 wait_port 50051 rate_limiter_server
 
@@ -62,6 +62,8 @@ sleep 1.1
 hit alice /api/hello
 hit alice /api/hello
 echo "== what Redis holds"
-for k in $(redis-cli -p 6379 --scan --pattern '{user:*}:*'); do
-  echo "$k  $(redis-cli -p 6379 hgetall "$k" | paste -sd' ')"
+for m in $masters; do
+  for k in $(redis-cli -p "$m" --scan --pattern '{user:*}:*'); do
+    echo "$k  on :$m  $(redis-cli -p "$m" hgetall "$k" | paste -sd' ')"
+  done
 done

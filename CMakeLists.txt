@@ -43,6 +43,11 @@ if(TARGET hiredis::hiredis)
 else()
   set(RL_HIREDIS hiredis)
 endif()
+# redis-plus-plus with async (libuv) support: Ubuntu does not package it, scripts/setup.sh builds it.
+find_library(REDISPP_LIB redis++ REQUIRED)
+find_path(REDISPP_INCLUDE_DIR sw/redis++/async_redis++.h REQUIRED)
+find_library(UV_LIB uv REQUIRED)
+find_package(OpenSSL REQUIRED)  # SHA1 of the Lua scripts
 find_package(Protobuf REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
@@ -90,11 +95,13 @@ add_library(rl_config STATIC src/config/rule_config.cc)
 target_include_directories(rl_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_config PUBLIC rl_api yaml-cpp::yaml-cpp)
 
-add_library(rl_redis STATIC src/redis/hiredis_backend.cc)
-target_include_directories(rl_redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(rl_redis PUBLIC rl_api ${RL_HIREDIS} spdlog::spdlog Threads::Threads)
+add_library(rl_redis STATIC src/redis/redispp_backend.cc src/redis/batcher.cc src/redis/plan_listener.cc)
+target_include_directories(rl_redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${REDISPP_INCLUDE_DIR})
+target_link_libraries(rl_redis PUBLIC rl_api ${REDISPP_LIB} ${RL_HIREDIS} ${UV_LIB} OpenSSL::Crypto spdlog::spdlog
+                                      Threads::Threads)
 
-add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc)
+add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc src/core/composite_core.cc
+                             src/plan/plan_store.cc src/usage/usage_log.cc)
 target_include_directories(rl_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_engine PUBLIC rl_api Threads::Threads)
 

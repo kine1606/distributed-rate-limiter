@@ -75,6 +75,31 @@ The tests check the two halves of the thesis claim separately: exact per-custome
 - **Result:** behaviour per plan's failure policy (allowed, denied, unverified counts), breaker
   state over time, recovery time.
 
+## 10. Ablation
+
+- **Setup:** the Week 7 load with one mechanism switched off at a time: lease, batcher, early
+  refill, adaptive chunk, deny cache, plan cache, cache-line alignment.
+- **Result:** throughput and p99 change per mechanism, in one table.
+
+## 11. Noisy neighbour
+
+- **Setup:** one tenant sends ten times its quota while the others run normal load.
+- **Result:** the other tenants' p99 with and without the flood.
+
+## 12. Bound model check
+
+- **Setup:** a Python simulation of N instances leasing chunks of size C predicts over-admission;
+  compare with test 4 at chunk caps of 1%, 5% and 10%.
+- **Pass:** measured over-admission at or below the prediction and the worst case N × C.
+
+## 13. Scalability model
+
+- **Setup:** throughput at 1, 2, 4 instances and 1 to 8 worker threads, fitted to the Universal
+  Scalability Law.
+- **Result:** contention and coordination coefficients; projected instances for 1M checks/s.
+- **Hint:** report latency from the open-loop generator (fixed arrival rate, latency from the
+  scheduled send time); a closed-loop tool hides stalls from p99.
+
 ## Extrapolation to 1M checks/s
 
 Use the measured per-instance throughput (test 7) and the scaling result (test 8). Write every

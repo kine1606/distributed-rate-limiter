@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/leased_core.h"
@@ -23,11 +24,12 @@ class ManualBackend final : public RedisBackend {
     ScriptCallback done;
   };
 
-  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, ScriptCallback done) override {
+  void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view, ScriptCallback done) override {
     std::lock_guard lock(mu_);
     pending_.push_back({rule.name, std::string(key), requested, std::move(done)});
     ++total_;
   }
+  void HGetAll(std::string, HashCallback done) override { done({}); }  // every customer is Free
 
   // Answers the oldest pending call; returns what it had asked for.
   std::uint32_t Reply(ScriptResult r) {
@@ -71,7 +73,8 @@ RuleTable Rules() {
   Rule burst{.name = "burst", .limit = 100, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
   Rule open{.name = "open", .limit = 100, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailOpen};
   Rule exact{.name = "exact", .limit = 100, .refill_per_sec = 10, .strict = true};
-  return {{"burst", burst}, {"open", open}, {"exact", exact}};
+  Rule plan{.name = "plan", .limit_from = PlanLimit::kBurst};  // not strict, but limits come per customer
+  return {{"burst", burst}, {"open", open}, {"exact", exact}, {"plan", plan}};
 }
 
 // Starts a check; the result appears once the engine answers (inline or after a Reply).
@@ -91,7 +94,8 @@ CheckResult CheckNow(LeasedCore& core, std::string_view key, std::string_view ru
 
 TEST(LeasedCore, FirstCheckWaitsForOneRefillThenHitsStayLocal) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending first;
   first.Start(core, "u1", "burst");
@@ -112,15 +116,18 @@ TEST(LeasedCore, FirstCheckWaitsForOneRefillThenHitsStayLocal) {
   EXPECT_TRUE(CheckNow(core, "u1", "burst").allowed);  // 2 left: below 30% of the chunk
   EXPECT_EQ(redis.Total(), 2);                         // so a refill started early, nobody waits
   EXPECT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(core.GetStats().parked, 1u);   // only the very first check waited
+  EXPECT_EQ(core.GetStats().refills, 2u);
 }
 
 TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   std::atomic<int> denied{0}, answered{0};
   std::vector<std::thread> threads;
-  for (int t = 0; t < 8; ++t) {
+  for (int t = 0; t < 10; ++t) {
     threads.emplace_back([&] {
       for (int i = 0; i < 50; ++i) {
         core.Check({"hot", "burst", 1}, [&](const CheckResult& r) {
@@ -131,12 +138,12 @@ TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
     });
   }
   for (auto& t : threads) t.join();
-  EXPECT_EQ(redis.Total(), 1);  // 400 misses, one refill
+  EXPECT_EQ(redis.Total(), 1);  // 500 misses, one refill (Week 3 gate)
   EXPECT_EQ(answered.load(), 0);
 
   redis.Reply(Refused(0, 250));
-  EXPECT_EQ(answered.load(), 400);
-  EXPECT_EQ(denied.load(), 400);
+  EXPECT_EQ(answered.load(), 500);
+  EXPECT_EQ(denied.load(), 500);
 
   const auto r = CheckNow(core, "hot", "burst");  // Redis said no: answered locally for a while
   EXPECT_EQ(r.reason, Reason::kRateLimited);
@@ -146,7 +153,8 @@ TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
 
 TEST(LeasedCore, ShortRedisHandsOverExactlyWhatIsLeft) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending p;
   p.Start(core, "u2", "burst");
@@ -167,7 +175,8 @@ TEST(LeasedCore, ShortRedisHandsOverExactlyWhatIsLeft) {
 
 TEST(LeasedCore, UsedUpFullChunkRefillsAgainForTheRest) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   std::vector<Pending> checks(15);
   for (auto& p : checks) p.Start(core, "u3", "burst");
@@ -185,7 +194,8 @@ TEST(LeasedCore, UsedUpFullChunkRefillsAgainForTheRest) {
 
 TEST(LeasedCore, RedisDownAppliesTheRulesFailurePolicy) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
 
   Pending closed, open;
   closed.Start(core, "u4", "burst");
@@ -200,7 +210,8 @@ TEST(LeasedCore, RedisDownAppliesTheRulesFailurePolicy) {
 
 TEST(LeasedCore, StrictRulesAskRedisOnEveryCheck) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
   for (int i = 0; i < 3; ++i) {
     Pending p;
     p.Start(core, "u5", "exact", 2);
@@ -213,12 +224,82 @@ TEST(LeasedCore, StrictRulesAskRedisOnEveryCheck) {
 
 TEST(LeasedCore, UnknownRuleAndImpossibleCostNeverReachRedis) {
   ManualBackend redis;
-  LeasedCore core(redis, Rules());
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
   EXPECT_EQ(CheckNow(core, "u6", "nope").reason, Reason::kUnknownRule);
   const auto r = CheckNow(core, "u6", "burst", 101);
   EXPECT_FALSE(r.allowed);
   EXPECT_EQ(r.retry_after_ms, 0u);  // waiting would not help
   EXPECT_EQ(redis.Total(), 0);
+}
+
+TEST(LeasedCore, PlanRulesGoToTheExactPath) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+
+  Pending p;
+  p.Start(core, "cust:1", "plan", 1);
+  ASSERT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(redis.PendingRequested(), 1u);  // the check's own cost, not a lease chunk
+  redis.Reply(Granted());
+  ASSERT_TRUE(p.result.has_value());
+  EXPECT_TRUE(p.result->allowed);
+  EXPECT_EQ(p.result->limit, 2u);  // Free burst
+}
+
+TEST(LeasedCore, ACheckBiggerThanOneChunkAsksRedisDirectly) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+
+  Pending big;
+  big.Start(core, "u7", "burst", 11);  // chunk cap is 10: a lease could only serve it by holding 11
+  ASSERT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(redis.PendingRequested(), 11u);  // exactly its cost, on the shared bucket
+  redis.Reply(Granted());
+  ASSERT_TRUE(big.result.has_value());
+  EXPECT_TRUE(big.result->allowed);
+  Pending again;
+  again.Start(core, "u7", "burst", 11);
+  EXPECT_EQ(redis.Total(), 2);  // every big check is one Redis call
+}
+
+std::int64_t g_fake_ns = 0;
+std::int64_t FakeNow() { return g_fake_ns; }
+
+TEST(LeasedCore, ChunkHalvesAfterTokensSatUnusedAndDoublesWhenTheLeaseRunsDry) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  g_fake_ns = 1'000'000'000;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> changes;
+  const Rule big{.name = "big", .limit = 1000, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
+  LeasedCore core(redis, plans, {{"big", big}}, 1024, &FakeNow,
+                  [&](const Lease&, std::uint32_t from, std::uint32_t to) { changes.emplace_back(from, to); });
+
+  Pending first;
+  first.Start(core, "q", "big");
+  ASSERT_EQ(redis.Reply(Granted()), 100u);  // cap: 10% of 1,000; it ran dry, but cannot grow
+  EXPECT_TRUE(changes.empty());
+  for (int i = 0; i < 70; ++i) CheckNow(core, "q", "big");  // 29 left: below 30% of 100
+  ASSERT_EQ(redis.PendingRequested(), 71u);                   // tops up to one chunk, not 29 + 100
+
+  g_fake_ns += 11'000'000'000;  // that chunk lasted 11 s: its tokens sat unused
+  redis.Reply(Granted());
+  ASSERT_EQ(changes.size(), 1u);
+  EXPECT_EQ(changes[0], std::make_pair(100u, 50u));
+
+  for (int i = 0; i < 86; ++i) CheckNow(core, "q", "big");  // 100 -> 14: below 30% of 50
+  ASSERT_EQ(redis.PendingRequested(), 36u);                   // tops up to the halved chunk
+  for (int i = 0; i < 14; ++i) CheckNow(core, "q", "big");   // dry while that refill is out
+  Pending waiting;
+  waiting.Start(core, "q", "big");
+  EXPECT_FALSE(waiting.result.has_value());
+  redis.Reply(Granted());
+  ASSERT_TRUE(waiting.result.has_value());
+  EXPECT_TRUE(waiting.result->allowed);
+  ASSERT_EQ(changes.size(), 2u);
+  EXPECT_EQ(changes[1], std::make_pair(50u, 100u));  // demand outran the chunk: doubled
 }
 
 }  // namespace

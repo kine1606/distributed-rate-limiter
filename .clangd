@@ -1,0 +1,2 @@
+CompileFlags:
+  CompilationDatabase: build/release  # compile_commands.json from CMake (CMAKE_EXPORT_COMPILE_COMMANDS)

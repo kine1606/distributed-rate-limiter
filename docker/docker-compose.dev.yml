@@ -1,0 +1,41 @@
+# Development Redis reachable from WSL:   docker compose -f docker/docker-compose.dev.yml up -d
+#   127.0.0.1:7001-7003  3-master cluster for the server, demo, spike and integration tests;
+#                        bench/ghz_run.sh runs FLUSHALL on every master, so keep only test data here
+#   127.0.0.1:6380       plain throwaway Redis for the Lua script tests
+# The nodes share redis-1's network namespace, so the 127.0.0.1 address they announce is right for
+# each other (cluster bus) and for WSL clients (published ports). Separate containers announcing
+# 127.0.0.1 would break the bus, because each container's loopback is its own.
+# Fault tests here: stop redis-2 or redis-3; stopping redis-1 takes the shared network down with it.
+name: ratelimiter-dev
+
+x-node: &node
+  image: redis:7
+  network_mode: service:redis-1
+
+services:
+  redis-test:
+    image: redis:7
+    ports: ["6380:6379"]
+    command: redis-server --appendonly no --save ""
+
+  redis-1:
+    image: redis:7
+    ports: ["7001-7003:7001-7003"]
+    command: redis-server --port 7001 --cluster-enabled yes --cluster-node-timeout 5000 --appendonly no --save ""
+  redis-2:
+    <<: *node
+    command: redis-server --port 7002 --cluster-enabled yes --cluster-node-timeout 5000 --appendonly no --save ""
+  redis-3:
+    <<: *node
+    command: redis-server --port 7003 --cluster-enabled yes --cluster-node-timeout 5000 --appendonly no --save ""
+
+  redis-cluster-init:
+    <<: *node
+    depends_on: [redis-1, redis-2, redis-3]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for p in 7001 7002 7003; do until redis-cli -p $$p ping >/dev/null 2>&1; do sleep 0.2; done; done
+        redis-cli -p 7001 cluster info | grep -q cluster_state:ok ||
+          redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 --cluster-replicas 0 --cluster-yes
+        until redis-cli -p 7001 cluster info | grep -q cluster_state:ok; do sleep 0.2; done  # converged before limiters start

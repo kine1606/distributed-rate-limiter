@@ -1,6 +1,6 @@
 # Benchmarks
 
-> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: one placeholder microbenchmark
+> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`. Week 4: `bench_customer.cc` (plan cache hit, deny lookup, usage event; locks versus lock-free, `results/2026-10-18_customer_microbench/NOTES.md`) and the plan cache on the strict baseline (`results/2026-10-18_plancache/NOTES.md`). `ceiling_compare.sh`: how far one laptop gets (single checks, 4 instances, batches) and `envoyproxy/ratelimit` on the same laptop and load (`docs/thesis/evidence/ceiling_and_envoy_2026-10-19.md`)
 
 ## What this module does
 
@@ -23,14 +23,14 @@ These rules make your numbers trustworthy, which matters more than making them b
 ## Week 2: baseline
 
 ```bash
-# 1 instance, StrictCore, Free customers spread over 10,000 keys
-ghz --insecure --proto proto/rate_limiter.proto \
-    --call ratelimiter.v1.RateLimiter.Check \
-    -d '{"key":"cust:{{randomInt 1 10000}}","rule":"daily_quota","cost":1}' \
-    -c 64 -z 30s --connections 4 \
-    -O json -o results/2026-10-xx_strict_1inst_c64.json \
-    127.0.0.1:50051
+# 1 instance, StrictCore, Free customers spread over 10,000 keys. Flushes the dev cluster, seeds the
+# plans, starts the server, warms up 10 s, measures 30 s; summary in results/<date>_<label>.txt
+bench/ghz_run.sh strict 64 'cust:{{randomInt 1 10000}}' daily_quota baseline_strict_c64_r1
+bench/ghz_run.sh allow_all 64 'cust:{{randomInt 1 10000}}' daily_quota baseline_allow_all_c64_r1
 ```
+
+The script computes p50, p99 and p99.9 from every request in the ghz JSON (`details`), records the
+CPU of the server, of the three Redis containers (cgroup counters) and of ghz, then gzips the JSON.
 
 Hint: increase `-c` (concurrent workers) until throughput stops growing; that plateau is the
 number to report, together with the latency at that point. Report p50, p99 and p999 from the ghz
@@ -39,20 +39,22 @@ of Redis, which is exactly what the lease removes.
 
 ## Week 3: microbenchmarks
 
-```cpp
-// bench_lease.cc
-static void BM_TryTake_SingleKey(benchmark::State& s) {
-  // HINT: one Lease with a huge token count; each thread calls TryTake in a loop.
-  for (auto _ : s) { benchmark::DoNotOptimize(table.TryTake(lease, 1)); }
-}
-BENCHMARK(BM_TryTake_SingleKey)->Threads(1)->Threads(4)->Threads(16);
-
-static void BM_TryTake_ManyKeys(benchmark::State& s);   // 10,000 keys, thread picks one at random
-BENCHMARK(BM_TryTake_ManyKeys)->Threads(1)->Threads(4)->Threads(16);
+```bash
+build/release/bench/bench_lease --benchmark_repetitions=5 --benchmark_report_aggregates_only=true \
+    --benchmark_out=results/<date>_lease_microbench/run.json --benchmark_out_format=json
 ```
 
-The gap between one hot key and many keys measures contention on a cache line, which is the reason
-for the sharding and alignment choices in Chapter 4.
+| Benchmark | Measures |
+| --- | --- |
+| `BM_TakeCas_OneLease`, `BM_TakeFetchSub_OneLease` | contention on one lease: the CAS loop against `fetch_sub` with undo |
+| `BM_OwnCounter<Packed>`, `BM_OwnCounter<Padded>` | false sharing: per-thread counters packed against one per cache line |
+| `BM_FindAndTake/{1,10000}` | `LeaseTable::FindOrCreate` + `TryTake`, one hot key or 10,000 keys |
+| `BM_LeasedCheckHit/{1,10000}` | the whole engine on a hit: rule lookup, lease lookup, take, callback |
+
+Each runs at 1, 4 and 16 threads; `allocs/op` counts heap allocations during the timed loop (a hit
+must show zero). Results and readings: `results/2026-10-18_lease_microbench/NOTES.md`. For a
+before/after comparison on this noisy laptop, build both binaries and run them alternately, as that
+file describes, rather than comparing against an older run.
 
 ## Weeks 7 and 8: the matrix
 
@@ -85,6 +87,6 @@ See [loadgen/README.md](loadgen/README.md). Start with `ghz`; write the custom C
 
 ## Done when
 
-- [ ] Week 2: baseline JSON files and setup notes in `results/`.
-- [ ] Week 3: lease microbenchmarks saved.
+- [x] Week 2: baseline JSON files and setup notes in `results/`.
+- [x] Week 3: lease microbenchmarks saved.
 - [ ] Week 7: matrix and flamegraph saved; Chapter 5 tables generated from them.
