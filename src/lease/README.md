@@ -1,6 +1,6 @@
 # Lease fast path and deny cache
 
-> Week 3 (leases), Week 4 (deny cache) · Flow steps A5, A7, A8 · Status: `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean); single-flight, early refill, top-up refills and local deny in `src/core/leased_core.cc`; adaptive chunk in `chunk_policy.h`; bound checked by the seeded harness `tests/lease_harness_test.cc`. interned 64-bit lease id (integer compare on lookup) and microbenchmarks in `bench/bench_lease.cc`. Not yet: waiter bound, eviction
+> Week 3 (leases), Week 4 (deny cache) · Flow steps A5, A7, A8 · Status: `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean); single-flight, early refill, top-up refills and local deny in `src/core/leased_core.cc`; adaptive chunk in `chunk_policy.h`; bound checked by the seeded harness `tests/lease_harness_test.cc`. interned 64-bit lease id (integer compare on lookup) and microbenchmarks in `bench/bench_lease.cc`. deny cache in `deny_cache.h` (Week 4: sharded, entries end at the Redis reset and are dropped when the plan changes). Not yet: waiter bound, eviction
 
 ## What this module does
 
@@ -130,4 +130,6 @@ integration test in Week 6 hammers one key from all instances and asserts
       is 2,000 seeds; `RL_HARNESS_SEEDS=N`, replay one with `RL_HARNESS_SEED=<seed>`).
 - [x] Microbenchmark results saved (`results/2026-10-18_lease_microbench/`).
 - [ ] Lease hit ratio exported as a metric (Week 5, Prometheus).
-- [ ] Week 4: deny cache tested, including clear on upgrade.
+- [x] Week 4: deny cache tested, including clear on upgrade (`tests/deny_cache_test.cc`; an
+      upgrade also lifts the denial without a message, because each entry keeps a stamp of the plan
+      it was made under, `tests/composite_core_test.cc`).
