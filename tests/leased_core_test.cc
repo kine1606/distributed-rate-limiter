@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/leased_core.h"
@@ -124,7 +125,7 @@ TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
 
   std::atomic<int> denied{0}, answered{0};
   std::vector<std::thread> threads;
-  for (int t = 0; t < 8; ++t) {
+  for (int t = 0; t < 10; ++t) {
     threads.emplace_back([&] {
       for (int i = 0; i < 50; ++i) {
         core.Check({"hot", "burst", 1}, [&](const CheckResult& r) {
@@ -135,12 +136,12 @@ TEST(LeasedCore, ConcurrentMissesShareOneRefillAndAllGetItsAnswer) {
     });
   }
   for (auto& t : threads) t.join();
-  EXPECT_EQ(redis.Total(), 1);  // 400 misses, one refill
+  EXPECT_EQ(redis.Total(), 1);  // 500 misses, one refill (Week 3 gate)
   EXPECT_EQ(answered.load(), 0);
 
   redis.Reply(Refused(0, 250));
-  EXPECT_EQ(answered.load(), 400);
-  EXPECT_EQ(denied.load(), 400);
+  EXPECT_EQ(answered.load(), 500);
+  EXPECT_EQ(denied.load(), 500);
 
   const auto r = CheckNow(core, "hot", "burst");  // Redis said no: answered locally for a while
   EXPECT_EQ(r.reason, Reason::kRateLimited);
@@ -243,6 +244,60 @@ TEST(LeasedCore, PlanRulesGoToTheExactPath) {
   ASSERT_TRUE(p.result.has_value());
   EXPECT_TRUE(p.result->allowed);
   EXPECT_EQ(p.result->limit, 2u);  // Free burst
+}
+
+TEST(LeasedCore, ACheckBiggerThanOneChunkAsksRedisDirectly) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+
+  Pending big;
+  big.Start(core, "u7", "burst", 11);  // chunk cap is 10: a lease could only serve it by holding 11
+  ASSERT_EQ(redis.Pending(), 1u);
+  EXPECT_EQ(redis.PendingRequested(), 11u);  // exactly its cost, on the shared bucket
+  redis.Reply(Granted());
+  ASSERT_TRUE(big.result.has_value());
+  EXPECT_TRUE(big.result->allowed);
+  Pending again;
+  again.Start(core, "u7", "burst", 11);
+  EXPECT_EQ(redis.Total(), 2);  // every big check is one Redis call
+}
+
+std::int64_t g_fake_ns = 0;
+std::int64_t FakeNow() { return g_fake_ns; }
+
+TEST(LeasedCore, ChunkHalvesAfterTokensSatUnusedAndDoublesWhenTheLeaseRunsDry) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  g_fake_ns = 1'000'000'000;
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> changes;
+  const Rule big{.name = "big", .limit = 1000, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
+  LeasedCore core(redis, plans, {{"big", big}}, 1024, &FakeNow,
+                  [&](const Lease&, std::uint32_t from, std::uint32_t to) { changes.emplace_back(from, to); });
+
+  Pending first;
+  first.Start(core, "q", "big");
+  ASSERT_EQ(redis.Reply(Granted()), 100u);  // cap: 10% of 1,000; it ran dry, but cannot grow
+  EXPECT_TRUE(changes.empty());
+  for (int i = 0; i < 70; ++i) CheckNow(core, "q", "big");  // 29 left: below 30% of 100
+  ASSERT_EQ(redis.PendingRequested(), 71u);                   // tops up to one chunk, not 29 + 100
+
+  g_fake_ns += 11'000'000'000;  // that chunk lasted 11 s: its tokens sat unused
+  redis.Reply(Granted());
+  ASSERT_EQ(changes.size(), 1u);
+  EXPECT_EQ(changes[0], std::make_pair(100u, 50u));
+
+  for (int i = 0; i < 86; ++i) CheckNow(core, "q", "big");  // 100 -> 14: below 30% of 50
+  ASSERT_EQ(redis.PendingRequested(), 36u);                   // tops up to the halved chunk
+  for (int i = 0; i < 14; ++i) CheckNow(core, "q", "big");   // dry while that refill is out
+  Pending waiting;
+  waiting.Start(core, "q", "big");
+  EXPECT_FALSE(waiting.result.has_value());
+  redis.Reply(Granted());
+  ASSERT_TRUE(waiting.result.has_value());
+  EXPECT_TRUE(waiting.result->allowed);
+  ASSERT_EQ(changes.size(), 2u);
+  EXPECT_EQ(changes[1], std::make_pair(50u, 100u));  // demand outran the chunk: doubled
 }
 
 }  // namespace

@@ -8,16 +8,6 @@
 namespace ratelimiter {
 namespace {
 
-// shortcut: fixed chunk of 10% of the limit; switch to the adaptive sizing in src/lease/README.md
-// (step 5) once the benchmark shows refills on the critical path.
-std::uint32_t Chunk(const Rule& rule) { return std::max<std::uint32_t>(1, rule.limit / 10); }
-
-std::int64_t NowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
 CheckResult Allowed(const Rule& rule, std::int64_t left) {
   CheckResult r;
   r.allowed = true;
@@ -36,8 +26,20 @@ CheckResult Denied(const Rule& rule, std::int64_t wait_ns) {
 
 }  // namespace
 
-LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity)
-    : redis_(redis), rules_(std::move(rules)), strict_(redis, plans, rules_), leases_(lease_capacity) {}
+std::int64_t SteadyNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity,
+                       Clock clock, ChunkObserver on_chunk_change)
+    : redis_(redis),
+      now_(clock),
+      on_chunk_change_(std::move(on_chunk_change)),
+      rules_(std::move(rules)),
+      strict_(redis, plans, rules_),
+      leases_(lease_capacity) {}
 
 void LeasedCore::Check(const CheckRequest& request, CheckCallback done) {
   const auto it = rules_.find(request.rule);
@@ -52,6 +54,12 @@ void LeasedCore::Check(const CheckRequest& request, CheckCallback done) {
     done(Denied(rule, 0));
     return;
   }
+  // A check bigger than one chunk would make this instance hold more than a chunk, breaking the
+  // bound limit + N x C (the seeded harness found it). Rare, so it asks Redis directly.
+  if (request.cost > ChunkCap(rule)) {
+    strict_.Check(request, std::move(done));
+    return;
+  }
   Lease* lease = leases_.FindOrCreate(rule, request.key);
   if (lease == nullptr) {  // no room in the lease table around this key: exact path instead
     strict_.Check(request, std::move(done));
@@ -61,15 +69,17 @@ void LeasedCore::Check(const CheckRequest& request, CheckCallback done) {
   // Fast path: one CAS.
   if (const std::int64_t left = TryTake(*lease, request.cost); left >= 0) {
     // Refill before the lease runs dry, so under steady load nobody waits for Redis.
-    if (left < Chunk(rule) * 3 / 10 && NowNs() >= lease->deny_until_ns.load(std::memory_order_relaxed)) {
-      StartRefill(*lease, Chunk(rule));
+    const std::uint32_t chunk = lease->chunk.load(std::memory_order_relaxed);
+    if (left < std::int64_t{chunk} * 3 / 10 &&
+        now_() >= lease->deny_until_ns.load(std::memory_order_relaxed)) {
+      StartRefill(*lease, chunk);
     }
     done(Allowed(rule, left));
     return;
   }
 
   // Redis said no recently: answer locally until then instead of asking again.
-  if (const std::int64_t wait = lease->deny_until_ns.load(std::memory_order_relaxed) - NowNs(); wait > 0) {
+  if (const std::int64_t wait = lease->deny_until_ns.load(std::memory_order_relaxed) - now_(); wait > 0) {
     done(Denied(rule, wait));
     return;
   }
@@ -87,13 +97,18 @@ void LeasedCore::Park(Lease& l, std::uint32_t cost, CheckCallback done) {
     done(Allowed(l.rule, left));
     return;
   }
-  StartRefill(l, std::max(Chunk(l.rule), cost));
+  StartRefill(l, std::max(l.chunk.load(std::memory_order_relaxed), cost));
 }
 
-void LeasedCore::StartRefill(Lease& l, std::uint32_t amount) {
-  bool idle = false;
-  if (!l.refill_in_flight.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) return;
-  Refill(l, amount, 0);
+void LeasedCore::StartRefill(Lease& l, std::uint32_t target) {
+  bool expected = false;
+  if (!l.refill_in_flight.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+  // Top the lease up to `target` rather than adding `target` to what is left, so one instance never
+  // holds more than one chunk (beyond what a parked waiter takes at once): the bound limit + N x C
+  // counts exactly that. Adding a full chunk at the 30% watermark let an instance hold 1.3 x C, and
+  // the seeded harness caught a window over N x C (tests/lease_harness_test.cc).
+  const std::int64_t have = std::max<std::int64_t>(0, l.tokens.load(std::memory_order_relaxed));
+  Refill(l, static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have)), 0);
 }
 
 void LeasedCore::Refill(Lease& l, std::uint32_t amount, std::uint32_t partial_retry_ms) {
@@ -115,15 +130,25 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
   const std::uint32_t retry_ms = s.allowed ? partial_retry_ms : s.retry_after_ms;
 
   std::vector<Waiter> waiters;
+  std::uint32_t chunk_from = 0, chunk_to = 0;
   {
     std::lock_guard lock(l.mu);
     if (s.allowed) l.tokens.fetch_add(requested, std::memory_order_relaxed);
+    if (s.allowed && partial_retry_ms == 0) {  // only a full grant says something about demand
+      const std::int64_t now = now_();
+      const bool idle = l.last_refill_ns != 0 && now - l.last_refill_ns > kChunkIdleNs;
+      chunk_from = l.chunk.load(std::memory_order_relaxed);
+      chunk_to = NextChunk(chunk_from, !l.waiters.empty(), idle, l.rule);
+      l.chunk.store(chunk_to, std::memory_order_relaxed);  // still the refill owner: no other writer
+      l.last_refill_ns = now;
+    }
     if (redis_out && retry_ms > 0) {
-      l.deny_until_ns.store(NowNs() + std::int64_t{retry_ms} * 1'000'000, std::memory_order_relaxed);
+      l.deny_until_ns.store(now_() + std::int64_t{retry_ms} * 1'000'000, std::memory_order_relaxed);
     }
     l.refill_in_flight.store(false, std::memory_order_release);
     waiters.swap(l.waiters);
   }
+  if (chunk_to != chunk_from && on_chunk_change_) on_chunk_change_(l, chunk_from, chunk_to);
 
   // Answer waiters in arrival order, outside the lock (callbacks finish gRPC calls).
   std::vector<Waiter> unserved;
@@ -140,7 +165,7 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
   }
   if (unserved.empty()) return;
 
-  std::uint32_t amount = Chunk(l.rule);
+  std::uint32_t amount = l.chunk.load(std::memory_order_relaxed);
   {
     std::lock_guard lock(l.mu);
     for (auto& w : unserved) {

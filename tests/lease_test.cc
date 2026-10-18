@@ -75,5 +75,26 @@ TEST(LeaseTable, FullTableReturnsNullAndKeepsExistingLeases) {
   }
 }
 
+TEST(ChunkPolicy, StaysBetweenTheMinimumAndTenPercentOfTheLimit) {
+  const Rule big{.name = "big", .limit = 1000, .refill_per_sec = 1};
+  EXPECT_EQ(ChunkCap(big), 100u);
+  EXPECT_EQ(ChunkMin(big), 8u);
+  EXPECT_EQ(NextChunk(100, /*emptied=*/true, /*idle=*/false, big), 100u);  // never above the cap
+  EXPECT_EQ(NextChunk(8, false, true, big), 8u);                            // never below the minimum
+  const Rule tiny{.name = "tiny", .limit = 5, .refill_per_sec = 1};
+  EXPECT_EQ(ChunkCap(tiny), 1u);  // a chunk is at least one token, even when 10% rounds to zero
+  EXPECT_EQ(ChunkMin(tiny), 1u);
+}
+
+TEST(ChunkPolicy, DoublesWhenTheLeaseRanDryHalvesWhenTokensSatUnused) {
+  const Rule r{.name = "r", .limit = 1000, .refill_per_sec = 1};
+  EXPECT_EQ(NextChunk(25, true, false, r), 50u);
+  EXPECT_EQ(NextChunk(50, false, true, r), 25u);
+  EXPECT_EQ(NextChunk(50, true, true, r), 50u);    // a quiet key that bursts: no evidence either way
+  EXPECT_EQ(NextChunk(50, false, false, r), 50u);
+}
+
+TEST(ChunkPolicy, ANewLeaseStartsAtTheCap) { EXPECT_EQ(Lease(kRule, "k").chunk.load(), ChunkCap(kRule)); }
+
 }  // namespace
 }  // namespace ratelimiter

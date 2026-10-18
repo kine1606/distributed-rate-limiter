@@ -6,7 +6,10 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -70,11 +73,30 @@ int main(int argc, char** argv) {
   }
   spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
 
+  // RL_CHUNK_LOG=<file>: one CSV line per lease chunk change (ns,rule,key,from,to) for the
+  // chunk-versus-demand plot. Changes happen at most once per refill, never on a hit.
+  ChunkObserver chunk_log;
+  if (const char* path = std::getenv("RL_CHUNK_LOG")) {
+    std::shared_ptr<std::FILE> file(std::fopen(path, "a"), [](std::FILE* f) { if (f) std::fclose(f); });
+    if (!file) {
+      spdlog::critical("cannot open RL_CHUNK_LOG file {}", path);
+      return 1;
+    }
+    chunk_log = [file, mu = std::make_shared<std::mutex>()](const Lease& l, std::uint32_t from, std::uint32_t to) {
+      std::lock_guard lock(*mu);
+      std::fprintf(file.get(), "%lld,%s,%s,%u,%u\n", static_cast<long long>(SteadyNowNs()), l.rule.name.c_str(),
+                   l.key.c_str(), from, to);
+      std::fflush(file.get());
+    };
+    spdlog::info("logging lease chunk changes to {}", path);
+  }
+
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
   PlanStore plans(*redis);
   std::shared_ptr<RateLimiterCore> core;
   if (engine == "leased") {
-    core = std::make_shared<LeasedCore>(*redis, plans, std::move(rules));
+    core = std::make_shared<LeasedCore>(*redis, plans, std::move(rules), std::size_t{1} << 20, &SteadyNowNs,
+                                        std::move(chunk_log));
   } else if (engine == "strict") {
     core = std::make_shared<StrictCore>(*redis, plans, std::move(rules));
   } else if (engine == "allow_all") {
