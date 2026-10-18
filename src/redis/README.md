@@ -1,6 +1,6 @@
 # Redis client, backend and batcher
 
-> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Batcher not started
+> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Week 3: `batcher.{h,cc}` (timer and adaptive modes, off by default after measurement)
 
 ## What this module does
 
@@ -170,4 +170,4 @@ layer that only adds bounding and metrics, which is a perfectly good result to r
 - [x] Week 1: spike numbers written into `docs/DESIGN.md`; client chosen.
 - [x] Week 2: backend passes the integration test; `NOSCRIPT` fallback tested by running
       `SCRIPT FLUSH` mid-test (`QuotaCountsExactlyAcrossTheClusterWhileScriptsAreFlushed`).
-- [ ] Week 3: batcher benchmark table saved in `results/`; TSan clean.
+- [x] Week 3: batcher benchmark table saved in `results/` (`2026-10-18_batcher/NOTES.md`); TSan clean.

@@ -77,8 +77,8 @@ struct ChunkPolicy {
 4. **Early refill.** On a hit, if tokens fall below 30% of `last_chunk` and no refill is in flight,
    start one. Most refills then finish before the lease is empty, so almost nobody waits.
 5. **Chunk sizing (done, `chunk_policy.h`).** Starts at the cap, not `min_chunk`: only a dry lease
-   doubles a chunk, so a moderately busy key started low would stay near the minimum (87.5% hits at
-   chunk 8). Doubles when checks found the lease dry while its refill was out; halves when the last
+   doubles a chunk, so a moderately busy key started low would stay near the minimum (one Redis call
+   per 8 checks instead of per 25). Doubles when checks found the lease dry while its refill was out; halves when the last
    chunk lasted more than 10 s; stays within [min(8, cap), cap]. Refills top the lease up to the
    chunk instead of adding a chunk, and checks costlier than the cap go to Redis directly: both keep
    an instance at no more than one chunk, which the bound needs (DESIGN.md section 6).

@@ -1,6 +1,6 @@
 # Load generator
 
-> Week 2 (ghz), Week 7 if needed (custom client) · Status: not started
+> Week 2 (ghz), Week 7 if needed (custom client) · Status: `loadgen.cc` done (closed loop, callback API, one TCP connection per channel, log-scale latency histogram); about 2x the rate of ghz per core. Open-loop timing is Week 5
 
 ## What this module does
 
@@ -44,5 +44,6 @@ for the lease accuracy bound).
 
 ## Done when
 
-- [ ] You know, with a number, the maximum rate your load generator can produce.
+- [x] You know, with a number, the maximum rate your load generator can produce: 71,364 calls/s against
+      `allow_all` at 12 channels x 16 in flight, where the server (3.3 cores) and the generator share the laptop.
 - [ ] Every result file records which generator and options produced it.

@@ -1,6 +1,6 @@
 # Benchmarks
 
-> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`, `results/2026-10-18_lease_microbench/NOTES.md`)
+> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`
 
 ## What this module does
 

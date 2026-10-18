@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 83 tests passing: 51 unit, 24 script (plain Redis on 127.0.0.1:6380), 8 integration (dev cluster on 127.0.0.1:7001); one executable per level
+> Every week · Status: 87 tests passing: 55 unit, 24 script (plain Redis on 127.0.0.1:6380), 8 integration (dev cluster on 127.0.0.1:7001); one executable per level
 
 ## How tests are organised
 
@@ -29,6 +29,7 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | `redis_backend_it.cc` | integration | 2 | done: backend against the cluster, `NOSCRIPT` fallback |
 | `grpc_quota_it.cc` | integration | 2 | done: Week 2 gate, exactly 200 through gRPC |
 | `lease_test.cc` | unit + TSan | 3 | done: `TryTake`, lease table, chunk policy |
+| `batcher_test.cc` | unit + TSan | 3 | done: timer and adaptive batching, every caller its own reply, drain on destruction |
 | `lease_harness_test.cc` | unit | 3 | done: seeded fake Redis and fake clock, bound in every window; `RL_HARNESS_SEEDS`, `RL_HARNESS_SEED` |
 | `composite_core_test.cc` | unit | 4 | Every branch of the A2 decision tree |
 | `overage_test.cc` | script | 4 | Request 2,001 on three policies |

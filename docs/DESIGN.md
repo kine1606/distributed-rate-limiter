@@ -230,13 +230,22 @@ to 400 extra in a window.
 
 ## 7. Strict versus leased (Week 3, numbers in Week 7)
 
+Week 3 numbers, one instance on the laptop, C++ load generator at 192 calls in flight (medians of
+5, `results/2026-10-18_week3_gate/NOTES.md`); Week 7 repeats this as a full matrix.
+
 | Mode | Redis calls per check | Throughput (1 instance) | p50 | p99 | Accuracy |
 | --- | --- | --- | --- | --- | --- |
-| Strict | 1 | HINT | HINT | HINT | exact |
-| Leased | about 1 / chunk | HINT | HINT | HINT | within N × C |
+| gRPC alone (`allow_all`) | 0 | 71,364/s | 2.54 ms | 7.85 ms | none |
+| Strict, token bucket | 1 | 11,259/s | 17.1 ms | 27.6 ms | exact |
+| Strict, daily quota | 2 (plan read + script) | 10,534/s | 18.7 ms | 26.4 ms | exact |
+| Leased, token bucket | 0.9% of checks waited for a refill | 70,694/s | 2.66 ms | 7.19 ms | within N × C |
 
-> HINT: When to choose strict: when one chunk would be a large share of the limit (login attempts,
-> Free daily quota) or when exactness is a product promise.
+At equal load the lease is 6.3 times the strict throughput and costs under 1% over gRPC alone; the
+laptop's gRPC ceiling, not the lease, sets the leased number. At 10,000 checks/s offered (ghz) the
+leased p50 is 0.40 ms and p99 2.20 ms, against 1.89 ms for gRPC alone.
+
+When to choose strict: when one chunk would be a large share of the limit (login attempts, a Free
+daily quota of 200, where C would be 20), or when exactness is a product promise.
 
 ## 8. Failure modes (Week 5)
 
@@ -291,6 +300,7 @@ not.
 | --- | --- | --- | --- |
 | Chunk cap (fraction of limit) | 10% | Redis is the bottleneck | over-admission is too high |
 | Chunk idle window (`kChunkIdleNs`) | 10 s | refills of quiet keys show in the profile | stranded tokens are too many |
+| Batcher (`RL_BATCHER`) | off | a profile shows Redis writes per call on the critical path | (measured Week 3: no gain, timer +130 µs p50) |
 | Batcher `max_delay` | 200 µs | batches are small and Redis is busy | p99 is too high |
 | Batcher `max_batch` | 128 | flushes are mostly by size | |
 | Plan cache TTL | 5 s | plan reads show in the profile | upgrades must apply faster without Pub/Sub |

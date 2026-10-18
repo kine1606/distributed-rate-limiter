@@ -100,9 +100,12 @@ proves the lease never breaks its bound. About 16 h.
 - [x] Adaptive chunk size (2 h): double when the lease empties within one refill round trip, halve
       when tokens sit unused, never above the cap. Log changes for a chunk-vs-demand plot.
       Done (`src/lease/chunk_policy.h`; log with `RL_CHUNK_LOG=<file>`). Refills now top up to the chunk.
-- [ ] Adaptive batcher (3 h, Should): flush at once when idle, batch under load. Compare with a fixed
+- [x] Adaptive batcher (3 h, Should): flush at once when idle, batch under load. Compare with a fixed
       200 µs timer (p50 at light load, throughput at heavy load).
       See [src/redis/README.md](../src/redis/README.md#week-3-the-batcher).
+      Done (`src/redis/batcher.{h,cc}`, `RL_BATCHER=timer|adaptive`), off by default: the timer costs
+      +130 us p50 at light load, and neither mode gains throughput, because redis-plus-plus already
+      writes concurrent calls together (`results/2026-10-18_batcher/NOTES.md`).
 - [x] Deterministic test harness (2 h): fake Redis with a fake clock replying in seeded random order;
       thousands of seeds assert admitted <= limit + N × C; a failing seed replays exactly.
       Done (`tests/lease_harness_test.cc`): it found two ways the protocol broke the bound, both fixed;
@@ -113,11 +116,19 @@ proves the lease never breaks its bound. About 16 h.
       stays near 30 M/s at any thread count; `fetch_sub` is 2.5x faster than the CAS loop but not
       adopted (spurious denials). Shard counts do not apply to the lock-free table.
 - [x] `LeasedCore` for burst rules; TSan on every lease test from the first commit.
-- [ ] Thesis: lease protocol notes and the accuracy-bound derivation draft (Chapter 3).
+- [x] Thesis: lease protocol notes and the accuracy-bound derivation draft (Chapter 3).
+      `docs/thesis/ch3_design.md` section 3.5: protocol, theorem and proof, harness evidence, alternatives.
 
 Gate: lease hit ratio >= 95% under the Week 2 load; 500 concurrent misses cause one refill; lease
 mode >= 4× the 25,301 checks/s strict baseline on the same ghz command, p99 < 2 ms at 10,000/s offered.
 Cut first: adaptive batcher.
+
+Gate result (2026-10-18, `bench/week3_gate.sh`, `results/2026-10-18_week3_gate/NOTES.md`): hit ratio
+99.06% (met); 500 misses cause one refill (met); lease 6.3x strict at equal load on the C++ load
+generator and 99% of gRPC alone, but 1.44x on the ghz command, which is client-bound, and 2.8x the
+25,301 baseline in absolute terms, which is above what gRPC alone reaches on this laptop (71,364/s);
+p99 at 10,000/s is 2.20 ms against 1.89 ms for gRPC alone (not met by 0.2 ms; the laptop floor is the
+limit). The absolute 4x and the 2 ms p99 need separate machines (Week 8 bonus run).
 
 ## Week 4 (Nov 2 to 8): Business rules and leased quota for large plans
 

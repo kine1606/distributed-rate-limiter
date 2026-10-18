@@ -15,7 +15,7 @@ inline std::uint32_t ChunkCap(const Rule& r) { return std::max<std::uint32_t>(1,
 inline std::uint32_t ChunkMin(const Rule& r) { return std::min<std::uint32_t>(8, ChunkCap(r)); }
 
 // A chunk that lasted longer than this held its tokens unused (and invisible to other instances)
-// for too long. 10 s keeps a key at about 3 checks/s on a chunk of 25, a 96% hit ratio.
+// for too long. 10 s keeps a key at about 3 checks/s on a chunk of 25: one Redis call per 25 checks.
 inline constexpr std::int64_t kChunkIdleNs = 10'000'000'000;
 
 // The next chunk, decided when a full refill lands. `emptied`: checks found the lease dry while
