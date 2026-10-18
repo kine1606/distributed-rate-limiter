@@ -79,3 +79,18 @@ check the bibliographic details against the original before submission. Web page
     IETF, September 1999. Three parameters, "Committed Information Rate (CIR), Committed Burst Size
     (CBS), and Excess Burst Size (EBS)"; the meter uses "two token buckets, C and E, which both share
     the common rate CIR"
+20. **V** Gubernator project (developed at Mailgun). *gubernator* (README and docs/architecture.md).
+    https://github.com/gubernator-io/gubernator (Apache-2.0), read 2026-10-19. Peers hold limits in
+    memory, "doesn't rely on external caches like memcached or redis"; a consistent hash picks each
+    limit's owner; `BATCHING` (default 500 µs window) groups peer requests; `GLOBAL` answers on the
+    receiving peer and sends hits to the owner asynchronously: "the use of GLOBAL allows for greater
+    scale but at the cost of consistency". Production note: "a single gubernator node fields over
+    2,000 requests a second with most batched responses returned in under 1 millisecond".
+21. **V** Bucket4j project. *bucket4j*, `io.github.bucket4j.distributed.proxy.optimization`
+    (`Optimizations.java`, `DelayParameters.java`). https://github.com/bucket4j/bucket4j (Apache-2.0),
+    read 2026-10-19. `batching()` "combines independent requests to same bucket into batches in order
+    to reduce request count to remote storage"; `delaying()` "can serve requests locally without
+    synchronization with external storage until thresholds are not violated", the thresholds being
+    `maxUnsynchronizedTokens` and a maximum time between synchronizations; `predicting()` "tries to
+    predict aggregated consumption rate in whole cluster in order to reduce the risk of
+    overconsumption that caused by DelayOptimization".

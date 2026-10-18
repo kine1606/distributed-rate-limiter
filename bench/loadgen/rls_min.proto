@@ -1,0 +1,34 @@
+// The fields of envoy/service/ratelimit/v3/rls.proto this benchmark uses, same names, numbers and
+// service path; protobuf ignores the fields left out. Source: envoyproxy/envoy api/, main, 2026-10-19.
+// Used only by bench/loadgen to load envoyproxy/ratelimit for the comparison in bench/README.md.
+syntax = "proto3";
+package envoy.service.ratelimit.v3;
+
+service RateLimitService {
+  rpc ShouldRateLimit(RateLimitRequest) returns (RateLimitResponse);
+}
+message RateLimitDescriptor {  // envoy.extensions.common.ratelimit.v3.RateLimitDescriptor on the wire
+  message Entry {
+    string key = 1;
+    string value = 2;
+  }
+  repeated Entry entries = 1;
+}
+message RateLimitRequest {
+  string domain = 1;
+  repeated RateLimitDescriptor descriptors = 2;
+  uint32 hits_addend = 3;
+}
+message RateLimitResponse {
+  enum Code {
+    UNKNOWN = 0;
+    OK = 1;
+    OVER_LIMIT = 2;
+  }
+  message DescriptorStatus {
+    Code code = 1;
+    uint32 limit_remaining = 3;
+  }
+  Code overall_code = 1;
+  repeated DescriptorStatus statuses = 2;
+}

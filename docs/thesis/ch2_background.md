@@ -213,6 +213,8 @@ the hot path, how the system is deployed, and whether its source is open.
 | Unkey [6] | Converges: regional decisions, global convergence within seconds (vendor statement) | regional check, ~30 ms decisions stated by the vendor | managed service, self-hostable | source available, AGPL-3.0 |
 | Upstash Ratelimit [7] | Per Redis counter; fixed window recommended for multi-region | client library call to Redis per check | library over (serverless) Redis | open-source SDK |
 | Doorman [9] | Cooperative: clients receive capacity leases and are trusted to respect them | local, within the leased capacity | separate Go service, client libraries | open source, archived 2024 |
+| Gubernator [20] | Exact at each limit's owner peer; `GLOBAL` mode trades consistency for scale | forward to the owner peer, batched; with `GLOBAL`, local with asynchronous sync | Go service of peers, state in memory, no Redis | open source (Apache-2.0) |
+| Bucket4j [21] | Exact by default; the `delaying` optimization may over-consume up to a per-node token threshold | remote store per check, or local until the threshold | Java library over Redis, JCache or a database | open source (Apache-2.0) |
 | This thesis | Quota: yes (one atomic script per check). Burst: bounded by N × C, measured | quota: one Redis round trip; burst: one compare-and-swap, Redis only for refills | gRPC service with Redis Cluster | open source (this repository) |
 
 **Amazon API Gateway** attaches usage plans with a throttle (rate and burst) and a quota (requests
@@ -237,7 +239,9 @@ its features have counterparts in this design: an optional local cache of keys a
 limit, which avoids reading Redis again for a client that is being denied (the deny cache in Chapter
 3), and a `near_limit` statistic counting requests above a configurable ratio of the limit, 0.8 by
 default (the 80% warning described for the customer lifecycle). Every allowed request still costs a
-Redis update.
+Redis update. Measured on the same laptop with the same load generator, the service handled 38,167
+checks per second with one Redis update each, against 75,652 for this thesis's leased path
+(`docs/thesis/evidence/ceiling_and_envoy_2026-10-19.md`).
 
 **Unkey** and **Upstash Ratelimit** are recent services aimed at API businesses. Unkey implements a
 sliding window and makes decisions in the region nearest the caller; its documentation describes
@@ -247,6 +251,17 @@ bucket algorithms as a client library over its Redis service, and recommends the
 multi-region use because the sliding window then needs many Redis commands per check [7]. Both treat
 exactness across regions as eventual, and neither separates an exact quota from an approximate burst
 limit.
+
+**Gubernator** and **Bucket4j** show that serving checks locally and synchronizing later is a common
+answer to the cost of a shared store. Gubernator, developed at Mailgun, keeps limits in the memory of
+a cluster of peers and sends each check to the limit's owner, chosen by consistent hashing, in
+batches; its `GLOBAL` mode answers on the receiving peer and sends the hits to the owner
+asynchronously, which its documentation says "allows for greater scale but at the cost of
+consistency" [20]. Bucket4j, a Java library, offers a `delaying` optimization that serves requests
+locally until a number of unsynchronized tokens or a time limit is reached, and a `predicting`
+variant meant to reduce the over-consumption that delaying causes [21]. Neither states a bound on the
+over-admission across instances; Bucket4j's per-node threshold has the same form as the N × C bound
+derived in Chapter 3.
 
 **Doorman**, developed at YouTube, is the closest precedent for the lease half of this design [9].
 Clients ask a Doorman server for capacity, receive a share as a time-limited lease that they refresh

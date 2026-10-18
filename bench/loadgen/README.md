@@ -1,6 +1,6 @@
 # Load generator
 
-> Week 2 (ghz), Week 7 if needed (custom client) · Status: `loadgen.cc` done (closed loop, callback API, one TCP connection per channel, log-scale latency histogram); about 2x the rate of ghz per core. Open-loop timing is Week 5
+> Week 2 (ghz), Week 7 if needed (custom client) · Status: `loadgen.cc` done (closed loop, callback API, one TCP connection per channel, log-scale latency histogram); about 2x the rate of ghz per core. Also batched calls (`batch` argument: `CheckBatch`, `checks_per_s`) and `envoyproxy/ratelimit` as a target (rule `envoy:<domain>`, `rls_min.proto`), for `bench/ceiling_compare.sh`. Open-loop timing is Week 5
 
 ## What this module does
 

@@ -1,6 +1,6 @@
 # Benchmarks
 
-> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`. Week 4: `bench_customer.cc` (plan cache hit, deny lookup, usage event; locks versus lock-free, `results/2026-10-18_customer_microbench/NOTES.md`) and the plan cache on the strict baseline (`results/2026-10-18_plancache/NOTES.md`)
+> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`. Week 4: `bench_customer.cc` (plan cache hit, deny lookup, usage event; locks versus lock-free, `results/2026-10-18_customer_microbench/NOTES.md`) and the plan cache on the strict baseline (`results/2026-10-18_plancache/NOTES.md`). `ceiling_compare.sh`: how far one laptop gets (single checks, 4 instances, batches) and `envoyproxy/ratelimit` on the same laptop and load (`docs/thesis/evidence/ceiling_and_envoy_2026-10-19.md`)
 
 ## What this module does
 
