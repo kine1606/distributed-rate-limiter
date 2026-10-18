@@ -89,20 +89,30 @@ the Nov 22 freeze does not move. Each week lists what to cut first if it runs la
 Goal: burst checks served from local memory, Redis sees only batched refills, and a harness that
 proves the lease never breaks its bound. About 16 h.
 
-- [ ] Lease table (4 h): sharded map from interned key id to a 64-byte-aligned lease; `TryTake` is a
+- [x] Lease table (4 h): sharded map from interned key id to a 64-byte-aligned lease; `TryTake` is a
       CAS loop. Interning turns the key into a `uint64` once, so a hit allocates nothing.
       See [src/lease/README.md](../src/lease/README.md).
-- [ ] Single-flight refill with early refill at 30% of the last chunk (2 h).
-- [ ] Adaptive chunk size (2 h): double when the lease empties within one refill round trip, halve
+      Built as an interned 64-bit id stored in each lease: lookups compare integers, the key string
+      only on a match; a hit allocates nothing. +16 to 43% on lookups over 10,000 keys
+      (`results/2026-10-18_lease_microbench/NOTES.md`). The table is lock-free, so it has no shards.
+- [x] Single-flight refill with early refill at 30% of the last chunk (2 h). 500 concurrent
+      misses cause one refill (`ConcurrentMissesShareOneRefillAndAllGetItsAnswer`).
+- [x] Adaptive chunk size (2 h): double when the lease empties within one refill round trip, halve
       when tokens sit unused, never above the cap. Log changes for a chunk-vs-demand plot.
+      Done (`src/lease/chunk_policy.h`; log with `RL_CHUNK_LOG=<file>`). Refills now top up to the chunk.
 - [ ] Adaptive batcher (3 h, Should): flush at once when idle, batch under load. Compare with a fixed
       200 µs timer (p50 at light load, throughput at heavy load).
       See [src/redis/README.md](../src/redis/README.md#week-3-the-batcher).
-- [ ] Deterministic test harness (2 h): fake Redis with a fake clock replying in seeded random order;
+- [x] Deterministic test harness (2 h): fake Redis with a fake clock replying in seeded random order;
       thousands of seeds assert admitted <= limit + N × C; a failing seed replays exactly.
-- [ ] Microbenchmark ablation (2 h): `alignas(64)` on/off, CAS vs `fetch_sub`, 1/16/64 shards, at
+      Done (`tests/lease_harness_test.cc`): it found two ways the protocol broke the bound, both fixed;
+      100,000 seeds now pass (DESIGN.md section 6).
+- [x] Microbenchmark ablation (2 h): `alignas(64)` on/off, CAS vs `fetch_sub`, 1/16/64 shards, at
       1/4/16 threads, one hot key and 10,000 keys. False-sharing figure for Chapter 4.
-- [ ] `LeasedCore` for burst rules; TSan on every lease test from the first commit.
+      Done (`bench/bench_lease.cc`): false sharing costs 8.7x at 4 threads and 14x at 16; one hot key
+      stays near 30 M/s at any thread count; `fetch_sub` is 2.5x faster than the CAS loop but not
+      adopted (spurious denials). Shard counts do not apply to the lock-free table.
+- [x] `LeasedCore` for burst rules; TSan on every lease test from the first commit.
 - [ ] Thesis: lease protocol notes and the accuracy-bound derivation draft (Chapter 3).
 
 Gate: lease hit ratio >= 95% under the Week 2 load; 500 concurrent misses cause one refill; lease

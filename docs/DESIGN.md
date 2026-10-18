@@ -171,11 +171,62 @@ the active customers, not every customer ever seen.
 
 ## 6. Lease protocol and accuracy bound (Week 3, measured Week 6)
 
-> HINT: How a lease works (atomic take, single-flight refill, low watermark, adaptive chunk with a
-> cap). Then the derivation: with N instances and chunk C, at most N × C tokens are outside Redis,
-> so admitted ≤ limit + N × C per refill interval. Then the measured result from the accuracy test
-> and a plot of over-admission against chunk size. End with the tuning rule: choose the cap from
-> the over-admission you can accept.
+**The protocol as built** (`src/core/leased_core.cc`, `src/lease/`). A lease holds tokens that one
+instance has already taken from the shared Redis bucket of a (rule, key).
+
+- **Hit:** one compare-and-swap (`TryTake`) that never takes the lease below zero. No lock, no
+  allocation, no Redis.
+- **Single flight:** at most one refill per lease is in flight. A check that finds the lease empty
+  parks, and every parked check is answered when that refill lands (500 concurrent misses cause one
+  refill: `ConcurrentMissesShareOneRefillAndAllGetItsAnswer`).
+- **Early refill:** a hit that leaves less than 30% of the current chunk starts a refill, so steady
+  traffic never waits for Redis.
+- **Top-up:** a refill asks Redis for `target − tokens held`, not `target`. The target is the chunk,
+  or the cost of the parked check if that is larger. After a refill lands, the lease holds at most
+  one chunk.
+- **Big checks:** a check whose cost exceeds the chunk cap C skips the lease and asks Redis
+  directly, on the same bucket.
+- **Adaptive chunk:** each lease starts at the cap and changes once per full refill. It doubles when
+  checks found the lease dry while the refill was out (demand outran the chunk within one round
+  trip) and halves when the previous chunk lasted more than 10 s (its tokens sat unused, invisible
+  to other instances). It always stays within [min(8, C), C], with C = max(1, ⌊limit / 10⌋). Every
+  change can be logged (`RL_CHUNK_LOG=<file>`) for the chunk-versus-demand plot.
+- **Redis says no:** the lease denies locally until the retry time Redis returned.
+
+**Invariant.** An instance never holds more than C tokens of one bucket, except for the instant
+between a refill landing and the parked check that asked for those tokens taking them.
+
+**Bound.** Take any interval [a, b]. Every token admitted in it was either held by some instance at
+a or granted by Redis during [a, b]. The bucket holds at most `limit` tokens at a and refills at rate
+r, so Redis grants at most limit + r·(b − a) during the interval; N instances hold at most N·C at a.
+Hence
+
+    admitted(a, b) ≤ limit + r·(b − a) + N·C
+
+An exact bucket admits at most limit + r·(b − a) in the same interval, so the over-admission in any
+window is at most **N × C**. It is temporal: tokens taken from Redis earlier are spent later. Leases
+never create tokens, so over a whole day they admit no more than Redis granted.
+
+**Evidence so far (Week 3).** `tests/lease_harness_test.cc` runs N = 1 to 4 `LeasedCore` instances
+against a fake Redis that executes `token_bucket.lua`'s arithmetic. The fake answers in a seeded
+random order, fails 2% of calls, and runs under a fake clock with jumps of up to 3 s. Seeds draw
+limits of 10 to 2,000 and costs of 1 to 5. Every seed checks the bound over every window of
+admissions, in one pass. Over 100,000 seeds (165 million checks) no window exceeded N × C, and the
+worst reached it exactly, so the bound is tight, not loose. Before two fixes it was broken, and
+the harness found both:
+
+1. Adding a full chunk at the 30% watermark let an instance hold up to 1.3 × C. Seed 1177 (N = 2,
+   C = 9) admitted 18.79 over the exact bucket against a bound of 18. Fixed by the top-up.
+2. A check costing more than C made a lease hold more than C. Seed 4388 (N = 2, C = 1, costs up to
+   5) admitted 2.7 against a bound of 2. Fixed by sending such checks to Redis.
+
+The price of the top-up is refills of 0.7 to 1.0 × C instead of exactly C, so somewhat more of
+them; Week 7 measures it. The measured over-admission across instances against chunk size, on the
+real cluster, is the Week 6 accuracy test.
+
+**Tuning rule.** Over-admission per window is at most N × C, so choose the cap from the
+over-admission you can accept: with 4 instances and a 10% cap, a burst limit of 1,000 may admit up
+to 400 extra in a window.
 
 ## 7. Strict versus leased (Week 3, numbers in Week 7)
 
@@ -239,6 +290,7 @@ not.
 | Knob | Default | Raise it when | Lower it when |
 | --- | --- | --- | --- |
 | Chunk cap (fraction of limit) | 10% | Redis is the bottleneck | over-admission is too high |
+| Chunk idle window (`kChunkIdleNs`) | 10 s | refills of quiet keys show in the profile | stranded tokens are too many |
 | Batcher `max_delay` | 200 µs | batches are small and Redis is busy | p99 is too high |
 | Batcher `max_batch` | 128 | flushes are mostly by size | |
 | Plan cache TTL | 5 s | plan reads show in the profile | upgrades must apply faster without Pub/Sub |
