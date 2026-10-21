@@ -272,7 +272,8 @@ TEST_F(AdmissionTest, BeyondTheLimitACallIsRefusedAtOnce) {
 }
 
 TEST_F(AdmissionTest, ABatchCountsEveryEntry) {
-  EXPECT_EQ(Call(3).error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);  // 3 entries > 2
+  // 3 entries can never fit a limit of 2: invalid, not an overload to retry (code review, Week 5)
+  EXPECT_EQ(Call(3).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   std::thread release([this] {
     WaitHeld(2);
     core_->Release();

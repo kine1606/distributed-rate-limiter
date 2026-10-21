@@ -164,6 +164,22 @@ TEST_F(PlanStoreTest, AFailedReadAnswersWithTheLastPlanRead) {
   EXPECT_EQ(again, std::vector<std::uint32_t>{20000});
 }
 
+// The listener resubscribes (InvalidateAll) while a master may still be down: the plan must stay as
+// the fallback (code review, Week 5).
+TEST_F(PlanStoreTest, AnInvalidatedPlanIsStillTheFallbackWhenTheReadFails) {
+  Get();
+  redis.Answer("2000");
+  store.InvalidateAll();
+  auto& after = Get();
+  ASSERT_EQ(redis.pending.size(), 1u);  // asks Redis again
+  redis.Answer("", true);
+  EXPECT_EQ(after, std::vector<std::uint32_t>{2000});
+  store.Invalidate("cust:1");
+  auto& again = Get();
+  redis.Answer("", true);
+  EXPECT_EQ(again, std::vector<std::uint32_t>{2000});
+}
+
 TEST_F(PlanStoreTest, ErrorsReachEveryWaiterAndAreNotCached) {
   auto& a = Get();
   auto& b = Get();

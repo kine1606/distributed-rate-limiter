@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 196 tests: 146 unit, 33 script (plain Redis on 127.0.0.1:6380), 17 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
+> Every week · Status: 201 tests: 151 unit, 33 script (plain Redis on 127.0.0.1:6380), 17 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
 
 ## How tests are organised
 

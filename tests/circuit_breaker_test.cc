@@ -63,6 +63,14 @@ TEST_F(CircuitBreakerTest, OneProbeAfterTheOpenTimeThenItsAnswerDecides) {
   EXPECT_TRUE(breaker.Allow());
 }
 
+// A success while open answers a call sent before it opened: stale, so only the probe decides.
+TEST_F(CircuitBreakerTest, ALateSuccessDoesNotCloseAnOpenBreaker) {
+  Fail(20);
+  EXPECT_FALSE(breaker.OnSuccess());
+  EXPECT_EQ(breaker.state(), State::kOpen);
+  EXPECT_FALSE(breaker.Allow());
+}
+
 TEST_F(CircuitBreakerTest, AFailedProbeOpensItForAnotherPeriod) {
   Fail(20);
   g_now = 600 * kMs;
@@ -194,12 +202,21 @@ TEST_F(ResilientBackendTest, AnOpenBreakerAlsoStopsRetries) {
   EXPECT_EQ(redis.Calls(), 2);  // the second timeout opened the breaker: no third attempt
 }
 
-TEST_F(ResilientBackendTest, QuotaIsRetriedOnlyWithARequestId) {
+// A timed-out quota script may have counted the call. Sent again it counts twice, or, with a request
+// id, comes back replayed: then the admitted call is never recorded for billing (code review, Week 5).
+TEST_F(ResilientBackendTest, QuotaScriptsAreNeverRetried) {
   redis.script = {kTimeout};
   EvalAndWait(quota);
-  EXPECT_EQ(redis.Calls(), 1);
   EvalAndWait(quota, "req-1");
-  EXPECT_EQ(redis.Calls(), 1 + 3);
+  EXPECT_EQ(redis.Calls(), 2);
+}
+
+// MOVED or a script error means Redis answered: one bad rule must not open the breaker for everyone.
+TEST_F(ResilientBackendTest, ErrorRepliesDoNotFeedTheBreaker) {
+  redis.script = {{.redis_error = true, .reply_error = true}};
+  for (int i = 0; i < 10; ++i) EXPECT_TRUE(EvalAndWait(bucket).redis_error);
+  EXPECT_EQ(breaker.state(), State::kClosed);
+  EXPECT_EQ(redis.Calls(), 10);  // and not retried: they would fail again
 }
 
 TEST_F(ResilientBackendTest, TokenReturnsAreNeverRetried) {  // a repeat could give tokens back twice

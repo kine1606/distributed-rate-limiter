@@ -42,13 +42,15 @@ class LeasedCore final : public RateLimiterCore {
   void CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done);
 
   // Shutdown (Week 5): gives the unused tokens of every token-bucket lease back to Redis
-  // (lua/return_lease.lua) and waits up to `wait` for the answers, so a restart does not burn part
-  // of each bucket. Quota leases keep their units: at most one chunk (0.1% of the day) each, and
+  // (lua/return_lease.lua) and waits for the answers (1.5 x `wait` at most in all), so a restart does not burn part
+  // of each bucket. Refills still in flight are waited for first (within the same `wait`), so the
+  // tokens they bring are returned too. Quota leases keep their units: at most one chunk (0.1% of the day) each, and
   // giving units back to a day would need a script of its own. Call it once checks have stopped.
   struct Returned {
     std::uint64_t leases;  // leases that held tokens
     std::uint64_t tokens;  // tokens sent back
     std::uint64_t failed;  // returns that failed or did not answer in time (those tokens are lost)
+    std::uint64_t refills_unfinished;  // refills still out when the wait ended: their tokens are lost
   };
   Returned ReturnLeases(std::chrono::milliseconds wait);
 

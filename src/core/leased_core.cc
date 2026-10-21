@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -184,7 +185,19 @@ LeasedCore::Returned LeasedCore::ReturnLeases(std::chrono::milliseconds wait) {
     std::uint64_t left = 0, failed = 0;
   };
   auto pending = std::make_shared<Pending>();  // outlives a wait that times out
-  Returned out{0, 0, 0};
+  Returned out{0, 0, 0, 0};
+  const auto deadline = std::chrono::steady_clock::now() + wait;
+  std::vector<Lease*> refilling;  // checks have stopped, so no new refill starts
+  leases_.ForEach([&](Lease& l) {
+    if (l.rule.algorithm == Algorithm::kTokenBucket && l.refill_in_flight.load(std::memory_order_acquire)) {
+      refilling.push_back(&l);
+    }
+  });
+  while (!refilling.empty() && std::chrono::steady_clock::now() < deadline) {
+    std::erase_if(refilling, [](Lease* l) { return !l->refill_in_flight.load(std::memory_order_acquire); });
+    if (!refilling.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  out.refills_unfinished = refilling.size();
   leases_.ForEach([&](Lease& l) {
     if (l.rule.algorithm != Algorithm::kTokenBucket) return;
     const std::int64_t tokens = l.tokens.exchange(0, std::memory_order_relaxed);
@@ -202,7 +215,8 @@ LeasedCore::Returned LeasedCore::ReturnLeases(std::chrono::milliseconds wait) {
     });
   });
   std::unique_lock lock(pending->mu);
-  pending->cv.wait_for(lock, wait, [&] { return pending->left == 0; });
+  pending->cv.wait_until(lock, std::max(deadline, std::chrono::steady_clock::now() + wait / 2),
+                         [&] { return pending->left == 0; });
   out.failed = pending->failed + pending->left;
   return out;
 }

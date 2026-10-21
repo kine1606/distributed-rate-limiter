@@ -19,6 +19,7 @@ struct ScriptResult {
   std::uint32_t retry_after_ms{0};
   bool redis_error{false};  // transport/timeout error, not a "denied" decision
   bool timed_out{false};    // the error was a timeout: the script may have run all the same
+  bool reply_error{false};  // Redis answered with an error (MOVED, a script error): it is reachable
   std::uint32_t reset_after_ms{0};  // quota only: until 00:00 UTC
   bool overage{false};              // quota only: admitted as billed overage (cap policy)
   bool replayed{false};             // quota only: a retried request ID's stored answer, not counted again

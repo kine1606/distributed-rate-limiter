@@ -41,9 +41,12 @@ class CircuitBreaker {
 
   // Both return true when the breaker opened from closed, or closed again: the changes worth a log
   // line. A failed probe re-opens it silently (every `open_for` during an outage).
+  // While open, a success is a late answer to a call sent before it opened: only the probe, in
+  // half-open, may close it. When healthy this only reads (no shared write per call).
   bool OnSuccess() {
-    failures_.store(0, std::memory_order_relaxed);
-    return state_.exchange(State::kClosed, std::memory_order_acq_rel) != State::kClosed;
+    if (failures_.load(std::memory_order_relaxed) != 0) failures_.store(0, std::memory_order_relaxed);
+    State s = State::kHalfOpen;
+    return state_.compare_exchange_strong(s, State::kClosed, std::memory_order_acq_rel);
   }
 
   bool OnFailure() {

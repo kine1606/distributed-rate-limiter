@@ -121,27 +121,14 @@ void PlanStore::Invalidate(std::string_view customer) {
   Shard& s = ShardOf(customer);
   std::lock_guard lock(s.mu);
   const auto it = s.map.find(customer);
-  if (it != s.map.end()) {
-    if (it->second.loading) {
-      it->second.stale = true;
-    } else {
-      s.map.erase(it);
-    }
-  }
+  if (it != s.map.end()) Expire(it->second);
   generation_.fetch_add(1, std::memory_order_release);  // every thread's copies are stale now
 }
 
 void PlanStore::InvalidateAll() {
   for (Shard& s : shards_) {
     std::lock_guard lock(s.mu);
-    for (auto it = s.map.begin(); it != s.map.end();) {
-      if (it->second.loading) {
-        it->second.stale = true;
-        ++it;
-      } else {
-        it = s.map.erase(it);
-      }
-    }
+    for (auto& [customer, entry] : s.map) Expire(entry);
   }
   generation_.fetch_add(1, std::memory_order_release);
 }

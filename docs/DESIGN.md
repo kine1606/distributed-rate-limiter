@@ -352,9 +352,9 @@ daily quota of 200, where C would be 20), or when exactness is a product promise
 | Failure | Detection | Behaviour | Recovery |
 | --- | --- | --- | --- |
 | Redis master down | calls fail (refused or 50 ms timeout); breaker opens after 20 in a row | leases serve; then the plan decides: paid fail open (`UNVERIFIED`, not billed), Free and unknown fail closed (`UNAVAILABLE`, retry in 1 s); plans keep their last value (stale if error) | replica promoted after node timeout; breaker probe closes. Measured: `docs/thesis/evidence/reliability_2026-10-21.md` |
-| Redis slow (above 50 ms) | timeouts; breaker when 20 in a row | timed-out calls that cannot loosen a limit are retried twice (jittered); then as master down | automatic when replies come back in time |
+| Redis slow (above 50 ms) | timeouts; breaker when 20 in a row | timed-out calls that cannot loosen a limit (plan reads, token-bucket scripts; never quota) are retried twice (jittered); then as master down | automatic when replies come back in time |
 | `NOSCRIPT` after failover | error reply | `EVAL` with source once, then `EVALSHA` | automatic |
-| `MOVED` / `ASK` | redirect reply | plan reads (routed by redis++): followed. Scripts go straight to the node the slot map names and do not follow it: the call fails with Redis down (the plan's policy) until the map refreshes. Seen once on 2026-10-21 just after startup (one ASan run, then 5 of 5 passes) | shortcut: route scripts through a redirect-following path before the Week 5 failover test |
+| `MOVED` / `ASK` | redirect reply | plan reads (routed by redis++): followed. Scripts go straight to the node the slot map names and do not follow it: the call fails with Redis down (the plan's policy) until the map refreshes; an error reply does not feed the breaker. Seen once on 2026-10-21 just after startup (one ASan run, then 5 of 5 passes) | shortcut: route scripts through a redirect-following path before the Week 5 failover test |
 | Limiter overloaded | in-flight count above `RL_MAX_IN_FLIGHT` (10,000) | `RESOURCE_EXHAUSTED` at once, nothing queued | client backs off |
 | Limiter stopped (SIGTERM) | signal | health `NOT_SERVING`, drain up to 5 s, unused leased tokens returned (`return_lease.lua`), usage flushed | none needed |
 | Limiter crash with leased tokens | | tokens lost (stricter, never looser) | none needed |

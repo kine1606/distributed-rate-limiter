@@ -5,12 +5,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -43,6 +46,21 @@ using namespace ratelimiter;  // NOLINT
 
 std::atomic<bool> g_stop{false};
 extern "C" void HandleSignal(int) { g_stop.store(true, std::memory_order_relaxed); }
+
+// A numeric setting from the environment: `fallback` when unset, nullopt (logged) when it is not a
+// whole number from `min` to `max`. A bad value must stop the start, not become a silent default.
+std::optional<long long> EnvNumber(const char* name, long long fallback, long long min, long long max) {
+  const char* v = std::getenv(name);
+  if (v == nullptr) return fallback;
+  long long n = 0;
+  const char* last = v + std::strlen(v);
+  const auto [end, ec] = std::from_chars(v, last, n);
+  if (ec != std::errc{} || end != last || n < min || n > max) {
+    spdlog::critical("{}='{}' must be a whole number from {} to {}", name, v, min, max);
+    return std::nullopt;
+  }
+  return n;
+}
 
 // Splits "host:port"; the port defaults to 6379.
 std::pair<std::string, int> ParseHostPort(const std::string& addr) {
@@ -85,14 +103,17 @@ int main(int argc, char** argv) {
   // gave 36,283. The timeout is the smallest that raised no false timeouts at that load (10 ms: 8 in
   // 8 s, each dropping a connection and its calls). results/2026-10-21_reliability/NOTES.md
   std::unique_ptr<RedisBackend> redis;
-  const char* loops_env = std::getenv("RL_REDIS_LOOPS");
-  const int loops = loops_env ? std::stoi(loops_env) : 4;
-  const char* timeout_env = std::getenv("RL_REDIS_TIMEOUT_MS");
-  const std::chrono::milliseconds timeout(timeout_env ? std::stoi(timeout_env) : 50);
+  const auto loops = EnvNumber("RL_REDIS_LOOPS", 4, 1, 64);
+  const auto timeout_ms = EnvNumber("RL_REDIS_TIMEOUT_MS", 50, 1, 60'000);  // 0 would mean no timeout at all
+  const auto batcher_us = EnvNumber("RL_BATCHER_DELAY_US", 200, 1, 1'000'000);
+  const auto plan_ttl_ms = EnvNumber("RL_PLAN_TTL_MS", 5000, 0, 3'600'000);
+  const auto max_in_flight = EnvNumber("RL_MAX_IN_FLIGHT", 10'000, 1, 100'000'000);
+  if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight) return 1;
+  const std::chrono::milliseconds timeout(*timeout_ms);
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
     std::vector<std::unique_ptr<RedisBackend>> shards;
-    for (int i = 0; i < std::max(1, loops); ++i) {
+    for (long long i = 0; i < *loops; ++i) {
       shards.push_back(std::make_unique<RedisPPBackend>(host, port, lua_dir, timeout));
     }
     redis = shards.size() == 1 ? std::move(shards.front()) : std::make_unique<ShardedBackend>(std::move(shards));
@@ -101,7 +122,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   spdlog::info("using redis at {} with scripts from {}/, {} client(s), timeout {} ms", redis_addr, lua_dir,
-               std::max(1, loops), timeout.count());
+               *loops, timeout.count());
 
   // RL_BATCHER=timer|adaptive puts a Batcher in front of Redis (off by default: measured in
   // results/<date>_batcher/); RL_BATCHER_DELAY_US sets its timer (default 200).
@@ -113,11 +134,10 @@ int main(int argc, char** argv) {
       spdlog::critical("RL_BATCHER must be timer or adaptive, not '{}'", m);
       return 1;
     }
-    const char* delay = std::getenv("RL_BATCHER_DELAY_US");
     batcher = std::make_unique<Batcher>(*redis, m == "timer" ? Batcher::Mode::kTimer : Batcher::Mode::kAdaptive,
-                                        std::chrono::microseconds(delay ? std::stoi(delay) : 200));
+                                        std::chrono::microseconds(*batcher_us));
     backend = batcher.get();
-    spdlog::info("batcher: {}, {} us", m, delay ? delay : "200");
+    spdlog::info("batcher: {}, {} us", m, *batcher_us);
   }
 
   // Everything above Redis goes through the breaker (src/reliability): 20 failures in a row stop
@@ -169,8 +189,7 @@ int main(int argc, char** argv) {
   }
 
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
-  const char* ttl = std::getenv("RL_PLAN_TTL_MS");
-  PlanStore plans(*backend, std::chrono::milliseconds(ttl ? std::stoi(ttl) : 5000));
+  PlanStore plans(*backend, std::chrono::milliseconds(*plan_ttl_ms));
   DenyCache deny;
   // An announced plan change drops the cached plan and the local denial at once (step B5); the TTL
   // covers a message missed while the subscription was down.
@@ -203,9 +222,8 @@ int main(int argc, char** argv) {
     spdlog::critical("unknown engine '{}' (leased | strict | allow_all)", engine);
     return 1;
   }
-  spdlog::info("engine: {}, plan cache {} ms", engine, ttl ? ttl : "5000");
-  const char* max_in_flight = std::getenv("RL_MAX_IN_FLIGHT");
-  RateLimiterService service(core, max_in_flight ? std::stoll(max_in_flight) : 10'000);
+  spdlog::info("engine: {}, plan cache {} ms, at most {} checks in flight", engine, *plan_ttl_ms, *max_in_flight);
+  RateLimiterService service(core, *max_in_flight);
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -235,8 +253,8 @@ int main(int argc, char** argv) {
     const auto s = leased->GetStats();
     spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
     const auto r = leased->ReturnLeases(std::chrono::seconds(1));
-    spdlog::info("returned {} unused tokens of {} leases to Redis ({} returns failed)", r.tokens, r.leases,
-                 r.failed);
+    spdlog::info("returned {} unused tokens of {} leases to Redis ({} returns failed, {} refills unfinished)",
+                 r.tokens, r.leases, r.failed, r.refills_unfinished);
   }
   if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
   resilient.StopRetries();  // no retry may reach Redis after this

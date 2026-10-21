@@ -78,6 +78,12 @@ class PlanStore {
     return next.fetch_add(1, std::memory_order_relaxed);
   }
   void Read(std::string_view customer, Callback done);  // no cache
+  // The next Get reads Redis. The plan itself stays, as the fallback if that read fails: an
+  // InvalidateAll after the subscription came back may happen while a master is still down.
+  static void Expire(Entry& e) {
+    if (e.loading) e.stale = true;
+    e.expires_ns = 0;
+  }
   void Load(const std::string& customer);
   void OnLoad(const std::string& customer, const HashResult& h);
 

@@ -337,5 +337,32 @@ TEST(LeasedCore, ReturnLeasesGivesBackWhatEachLeaseStillHolds) {
   EXPECT_EQ(core.ReturnLeases(std::chrono::seconds(1)).tokens, 0u);  // nothing left to give twice
 }
 
+// A refill still in flight at shutdown brings tokens; they must be returned too (code review, Week 5).
+TEST(LeasedCore, ReturnLeasesWaitsForARefillInFlight) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending first;
+  first.Start(core, "u1", "burst");  // its refill of 10 is out
+  LeasedCore::Returned r{};
+  std::thread shutdown([&] { r = core.ReturnLeases(std::chrono::seconds(2)); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  redis.Reply(Granted());  // lands during the shutdown: 10, one taken by the parked check
+  shutdown.join();
+  EXPECT_EQ(r.tokens, 9u);
+  EXPECT_EQ(r.refills_unfinished, 0u);
+}
+
+TEST(LeasedCore, ReturnLeasesReportsARefillThatNeverLanded) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending first;
+  first.Start(core, "u1", "burst");
+  const auto r = core.ReturnLeases(std::chrono::milliseconds(30));
+  EXPECT_EQ(r.refills_unfinished, 1u);  // logged, not hidden behind "0 returns failed"
+  redis.Reply(Granted());               // let the parked check finish before the core goes
+}
+
 }  // namespace
 }  // namespace ratelimiter

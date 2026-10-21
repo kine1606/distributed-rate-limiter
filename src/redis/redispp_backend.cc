@@ -163,7 +163,7 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
         Send(c, true);
         return;
       }
-      Fail(*c, e.what());
+      Fail(*c, e.what(), false, true);
       return;
     } catch (const sw::redis::TimeoutError& e) {
       Fail(*c, e.what(), true);
@@ -221,11 +221,12 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
   }
 }
 
-void RedisPPBackend::Fail(Call& c, std::string_view why, bool timed_out) {
+void RedisPPBackend::Fail(Call& c, std::string_view why, bool timed_out, bool reply_error) {
   Health(false, why);
   ScriptResult r;
   r.redis_error = true;
   r.timed_out = timed_out;
+  r.reply_error = reply_error;
   c.done(r);
 }
 

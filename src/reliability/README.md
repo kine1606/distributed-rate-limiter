@@ -83,11 +83,19 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
 - `failure_policy.h` was not needed: `CompositeCore` maps any "Redis down" answer to the plan's
   policy in one function (`PlanDown`), and `retry.h` lives inside `ResilientBackend`.
 - Retries only where a repeat cannot loosen a limit, because a timed-out script may have run: plan
-  reads, token-bucket and window scripts (a repeat takes one more token: stricter), quota scripts
-  with a request id (deduplicated). Quota without an id and token returns are never retried.
-- The breaker counts consecutive failures across the cluster, so one dead master among healthy ones
-  does not open it; its calls fail by timeout (50 ms) or at once when the connection is refused.
-  It reports opening and closing, not every failed probe.
+  reads, token-bucket and window scripts (a repeat takes one more token: stricter). Quota scripts
+  are never retried: a repeat counts twice, or with a request id comes back `replayed` and the
+  admitted call is never recorded for billing (found by the code review). Token returns neither.
+- The breaker counts consecutive failures of an unreachable or slow Redis across the cluster, so one
+  dead master among healthy ones does not open it; its calls fail by timeout (50 ms) or at once when
+  the connection is refused. An error reply (`MOVED`, a script error) is not a failure: Redis
+  answered. While open, only the probe can close it (a late success from before is ignored). It
+  reports opening and closing, not every failed probe.
+- Code review of the Week 5 commits (the `code-review` skill, 10 findings): fixed quota retries,
+  error replies feeding the breaker, late successes closing it, plans erased by invalidation during
+  an outage, refills in flight at shutdown, batches larger than the in-flight bound, unchecked
+  numeric settings. Not changed: the per-call copy for retries (already inside the measured 36,283
+  checks/s; no profile shows it) and "Redis down" read from the reason code (no other cause exists).
 - Timeout: 10 ms raised false timeouts under load with one Redis client (the I/O thread also
   finishes gRPC calls), and one timeout drops a whole connection. Four clients
   (`src/redis/sharded_backend.h`) and 50 ms gave none; see `docs/thesis/evidence/reliability_2026-10-21.md`.

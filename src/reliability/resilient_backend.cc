@@ -46,16 +46,20 @@ void ResilientBackend::Account(bool failed) {
   if ((failed ? breaker_.OnFailure() : breaker_.OnSuccess()) && on_change_) on_change_(breaker_.state());
 }
 
+// An error reply (MOVED, a script error) means Redis answered: not a reason to stop calling it.
+void ResilientBackend::Account(const ScriptResult& r) { Account(r.redis_error && !r.reply_error); }
+
 void ResilientBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
                             std::string_view request_id, ScriptCallback done) {
   if (!breaker_.Allow()) {
     done({.redis_error = true});
     return;
   }
-  const bool retryable = rule.algorithm != Algorithm::kQuota || !request_id.empty();
-  if (!retryable || retry_.max_retries == 0) {
+  // A timed-out quota script may have counted the call; even with a request id, the retry would get
+  // the stored answer marked replayed, and the admitted call would never be recorded for billing.
+  if (rule.algorithm == Algorithm::kQuota || retry_.max_retries == 0) {
     inner_.Eval(rule, key, requested, request_id, [this, done = std::move(done)](const ScriptResult& r) {
-      Account(r.redis_error);
+      Account(r);
       done(r);
     });
     return;
@@ -66,7 +70,7 @@ void ResilientBackend::Eval(const Rule& rule, std::string_view key, std::uint32_
 
 void ResilientBackend::Send(const std::shared_ptr<ScriptCall>& c) {
   inner_.Eval(c->rule, c->key, c->requested, c->request_id, [this, c](const ScriptResult& r) {
-    Account(r.redis_error);
+    Account(r);
     if (r.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
           if (run && breaker_.Allow()) {
@@ -87,7 +91,7 @@ void ResilientBackend::Return(const Rule& rule, std::string_view key, std::uint3
     return;
   }
   inner_.Return(rule, key, tokens, [this, done = std::move(done)](const ScriptResult& r) {
-    Account(r.redis_error);
+    Account(r);
     done(r);
   });
 }
@@ -102,7 +106,7 @@ void ResilientBackend::HGetAll(std::string key, HashCallback done) {
 
 void ResilientBackend::Send(const std::shared_ptr<HashCall>& c) {
   inner_.HGetAll(c->key, [this, c](const HashResult& h) {
-    Account(h.redis_error);
+    Account(h.redis_error);  // plan reads are routed: redirects are followed, errors mean unreachable
     if (h.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
           if (run && breaker_.Allow()) {

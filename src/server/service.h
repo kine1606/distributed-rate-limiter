@@ -83,6 +83,10 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
         return reactor;
       }
     }
+    if (n > max_in_flight_) {  // could never be admitted: not a transient overload to retry
+      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch larger than the server's in-flight limit"));
+      return reactor;
+    }
     if (!Admit(n)) {
       reactor->Finish(Overloaded());
       return reactor;
