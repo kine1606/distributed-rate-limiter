@@ -298,8 +298,17 @@ int main(int argc, char** argv) {
   server->GetHealthCheckService()->SetServingStatus(true);
   spdlog::info("rate limiter listening on {}", listen);
 
+  // Readiness follows the breakers: NOT_SERVING while every slot group's breaker is open, that is
+  // while this instance reaches no Redis master, so a load balancer prefers instances that do. One
+  // dead master is not a reason: every instance sees it, and the plans' failure policies cover it.
+  bool ready = true;
   while (!g_stop.load(std::memory_order_relaxed)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (const bool now = breakers.Open() < SlotBreakers::kGroups; now != ready) {
+      ready = now;
+      server->GetHealthCheckService()->SetServingStatus(ready);
+      spdlog::warn("health: {}", ready ? "SERVING again" : "NOT_SERVING, no Redis master reachable");
+    }
   }
 
   // Graceful shutdown (Week 5): health NOT_SERVING so load balancers stop sending, drain for up to

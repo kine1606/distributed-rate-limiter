@@ -1,6 +1,6 @@
 # gRPC server
 
-> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server in `service.h` (header-only, run in-process by `tests/grpc_quota_it.cc`); `main.cc` builds `RedisPPBackend` (cluster, default 127.0.0.1:7001), `PlanStore` and the engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`; proto v1 conversions and request validation in `convert.h`. Week 5: in-flight bound (`RL_MAX_IN_FLIGHT`, `RESOURCE_EXHAUSTED`) in `service.h`; shutdown drains, returns leased tokens, then stops Redis
+> Week 2 (wire StrictCore), Week 4 (proto v1 fields), Week 5 (threads, shutdown, health) · Flow steps A4, A13 · Status: callback server in `service.h` (header-only, run in-process by `tests/grpc_quota_it.cc`); `main.cc` builds `RedisPPBackend` (cluster, default 127.0.0.1:7001), `PlanStore` and the engine chosen by the 5th argument: `leased` (default), `strict`, `allow_all`; proto v1 conversions and request validation in `convert.h`. Week 5: in-flight bound (`RL_MAX_IN_FLIGHT`, `RESOURCE_EXHAUSTED`) in `service.h`; at most 100 concurrent calls per connection (`RL_MAX_STREAMS`); readiness `NOT_SERVING` while no Redis master is reachable (every slot breaker open) and during shutdown; shutdown drains, returns leased tokens, then stops Redis
 
 ## What this module does
 

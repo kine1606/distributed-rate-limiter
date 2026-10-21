@@ -202,6 +202,10 @@ About 16 h.
       Done: one in-flight bound in the service (`RL_MAX_IN_FLIGHT`, 10,000) bounds every queue behind
       it, no measurable cost; SIGTERM drains, returns leased tokens (72,194 from 1,000 leases in 7 ms).
 - [ ] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
+      Readiness done: gRPC health is `NOT_SERVING` while every slot group's breaker is open (this
+      instance reaches no Redis master) and during shutdown; checked by stopping every node of the
+      fault cluster under load (NOT_SERVING after about 1 s, SERVING again once they were back).
+      SIGHUP reload not started (the plan's first cut).
 - [x] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
       Done: own text exposition (prometheus-cpp is not installed), striped lock-free counters,
       `/metrics` on `RL_METRICS_ADDR` (127.0.0.1:9100); Prometheus in `docker-compose.yml`. Overhead
