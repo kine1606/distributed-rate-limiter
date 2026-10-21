@@ -38,8 +38,8 @@
 #include "redis/plan_listener.h"
 #include "redis/redispp_backend.h"
 #include "redis/sharded_backend.h"
-#include "reliability/circuit_breaker.h"
 #include "reliability/resilient_backend.h"
+#include "reliability/slot_breakers.h"
 #include "server/service.h"
 #include "usage/usage_log.h"
 
@@ -82,6 +82,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
+//        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
@@ -120,7 +121,12 @@ int main(int argc, char** argv) {
   const auto batcher_us = EnvNumber("RL_BATCHER_DELAY_US", 200, 1, 1'000'000);
   const auto plan_ttl_ms = EnvNumber("RL_PLAN_TTL_MS", 5000, 0, 3'600'000);
   const auto max_in_flight = EnvNumber("RL_MAX_IN_FLIGHT", 10'000, 1, 100'000'000);
-  if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight) return 1;
+  // Concurrent calls per client connection. Unlimited (gRPC's default, 0 here), an open-loop load past
+  // capacity piled up thousands of streams and collapsed even with no limiter (allow_all, 30,000/s:
+  // p99 2 s, calls lost); capped at 100, the same load queued and drained (p99 137 ms). The cost: a
+  // client on one connection with 192 calls in flight on the exact path, 28,251 to 22,957 checks/s.
+  const auto max_streams = EnvNumber("RL_MAX_STREAMS", 100, 0, 1'000'000);
+  if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight || !max_streams) return 1;
   const std::chrono::milliseconds timeout(*timeout_ms);
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
@@ -155,13 +161,15 @@ int main(int argc, char** argv) {
 
   // Everything above Redis goes through the breaker (src/reliability): 20 failures in a row stop
   // calls for 500 ms, then one probe; timed-out calls that cannot loosen a limit are retried twice.
-  CircuitBreaker breaker;
-  ResilientBackend resilient(*backend, breaker, {}, [](CircuitBreaker::State s) {
-    static constexpr const char* kName[] = {"closed", "half-open", "open"};
-    if (s == CircuitBreaker::State::kOpen) {
-      spdlog::error("redis circuit breaker {}: calls fail at once, plan failure policies apply", kName[2]);
+  SlotBreakers breakers;
+  ResilientBackend resilient(*backend, breakers, {}, [](std::size_t open) {
+    static std::atomic<bool> any_open{false};  // log the start and the end of an outage, not each group
+    if ((open > 0) == any_open.exchange(open > 0)) return;
+    if (open > 0) {
+      spdlog::error("redis circuit breakers open for {} of {} slot groups: their calls fail at once, plan "
+                    "failure policies apply", open, SlotBreakers::kGroups);
     } else {
-      spdlog::info("redis circuit breaker {}", kName[static_cast<int>(s)]);
+      spdlog::info("redis circuit breakers all closed again");
     }
   });
   backend = &resilient;
@@ -249,8 +257,8 @@ int main(int argc, char** argv) {
         redis_metrics.Render(out);
         AppendFamily(out, "rl_in_flight", "gauge", "Checks admitted and not answered yet");
         AppendSample(out, "rl_in_flight", "", static_cast<double>(service.InFlight()));
-        AppendFamily(out, "rl_breaker_state", "gauge", "Redis circuit breaker: 0 closed, 1 half-open, 2 open");
-        AppendSample(out, "rl_breaker_state", "", static_cast<double>(breaker.state()));
+        AppendFamily(out, "rl_breaker_open_groups", "gauge", "Slot groups (of 64) whose Redis breaker is not closed");
+        AppendSample(out, "rl_breaker_open_groups", "", static_cast<double>(breakers.Open()));
         if (leased != nullptr) {
           const auto s = leased->GetStats();
           AppendFamily(out, "rl_lease_waits_total", "counter", "Checks that waited for a lease refill");
@@ -280,6 +288,7 @@ int main(int argc, char** argv) {
 
   grpc::ServerBuilder builder;
   builder.AddListeningPort(listen, grpc::InsecureServerCredentials());
+  if (*max_streams > 0) builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, static_cast<int>(*max_streams));
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
   if (!server) {

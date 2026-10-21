@@ -63,6 +63,7 @@ struct RedisMetrics {
                                                          "quota",        "return",         "hgetall"};
   std::array<Histogram, kCall.size()> latency;
   Counter timeouts, reply_errors, other_errors;
+  Counter reroutes;  // scripts sent again after MOVED or a lost node (a failover)
   void Render(std::string& out) const;
 };
 

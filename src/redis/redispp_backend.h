@@ -47,6 +47,7 @@ class RedisPPBackend final : public RedisBackend {
 
   static std::array<Script, 5> LoadScripts(const std::string& lua_dir);
   void Send(const std::shared_ptr<Call>& call, bool with_source);
+  bool Reroute(const std::shared_ptr<Call>& call, bool with_source, bool may_have_run);
   void Fail(Call& call, std::string_view why, bool timed_out = false, bool reply_error = false);
   void Health(bool ok, std::string_view why);
 

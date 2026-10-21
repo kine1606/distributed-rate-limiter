@@ -2,6 +2,7 @@
 // retry rules on a fake Redis whose answers the test scripts.
 #include "reliability/circuit_breaker.h"
 #include "reliability/resilient_backend.h"
+#include "reliability/slot_breakers.h"
 
 #include <gtest/gtest.h>
 
@@ -162,8 +163,9 @@ class ResilientBackendTest : public ::testing::Test {
   }
 
   ScriptedRedis redis;
-  CircuitBreaker breaker{{.failure_threshold = 6, .open_for = milliseconds(60'000)}};
-  ResilientBackend backend{redis, breaker, {.max_retries = 2, .base = std::chrono::microseconds(100)}};
+  SlotBreakers breakers{{.failure_threshold = 6, .open_for = milliseconds(60'000)}};
+  CircuitBreaker& breaker = breakers.ForEntity("k");  // every test call uses key "k"
+  ResilientBackend backend{redis, breakers, {.max_retries = 2, .base = std::chrono::microseconds(100)}};
   const Rule bucket{.name = "b", .limit = 10, .refill_per_sec = 1};
   const Rule quota{.name = "q", .algorithm = Algorithm::kQuota, .limit = 10};
 };
@@ -193,7 +195,7 @@ TEST_F(ResilientBackendTest, OtherErrorsAreNotRetried) {  // a script error woul
 // A timed-out quota script may have counted the call; sending it again would count it twice,
 // unless a request id lets quota.lua recognise the repeat.
 TEST_F(ResilientBackendTest, AnOpenBreakerAlsoStopsRetries) {
-  CircuitBreaker b({.failure_threshold = 2, .open_for = milliseconds(60'000)});
+  SlotBreakers b({.failure_threshold = 2, .open_for = milliseconds(60'000)});
   ResilientBackend r(redis, b, {.max_retries = 2, .base = std::chrono::microseconds(100)});
   redis.script = {kTimeout};
   std::promise<ScriptResult> p;
@@ -253,7 +255,7 @@ TEST_F(ResilientBackendTest, AnOpenBreakerAnswersAtOnceWithoutCallingRedis) {
   EXPECT_EQ(breaker.state(), State::kOpen);
   EXPECT_TRUE(EvalAndWait(bucket).redis_error);
   bool read_failed = false;
-  backend.HGetAll("{c}:plan", [&](const HashResult& h) { read_failed = h.redis_error; });
+  backend.HGetAll("{k}:plan", [&](const HashResult& h) { read_failed = h.redis_error; });  // same slot as "k"
   EXPECT_TRUE(read_failed);
   EXPECT_EQ(redis.Calls(), 6);
   EXPECT_EQ(redis.reads, 0);
@@ -262,7 +264,7 @@ TEST_F(ResilientBackendTest, AnOpenBreakerAnswersAtOnceWithoutCallingRedis) {
 TEST_F(ResilientBackendTest, StoppingAnswersWaitingRetriesWithoutSendingThem) {
   ScriptedRedis slow;
   slow.script = {kTimeout};
-  CircuitBreaker b;
+  SlotBreakers b;
   ResilientBackend r(slow, b, {.max_retries = 2, .base = std::chrono::microseconds(10'000'000)});  // 10 s
   ScriptResult got;
   bool answered = false;
@@ -277,14 +279,41 @@ TEST_F(ResilientBackendTest, StoppingAnswersWaitingRetriesWithoutSendingThem) {
   EXPECT_EQ(slow.Calls(), 1);
 }
 
-TEST_F(ResilientBackendTest, BreakerChangesAreReported) {
-  std::vector<State> seen;
-  CircuitBreaker b({.failure_threshold = 1, .open_for = milliseconds(0)});
-  ResilientBackend r(redis, b, {.max_retries = 0}, [&](State s) { seen.push_back(s); });
+TEST_F(ResilientBackendTest, BreakerChangesAreReportedWithTheOpenGroupCount) {
+  std::vector<std::size_t> seen;
+  SlotBreakers b({.failure_threshold = 1, .open_for = milliseconds(0)});
+  ResilientBackend r(redis, b, {.max_retries = 0}, [&](std::size_t open) { seen.push_back(open); });
   redis.script = {{.redis_error = true}, {.allowed = true}};
-  r.Eval(bucket, "k", 1, [](const ScriptResult&) {});  // fails: opens
+  r.Eval(bucket, "k", 1, [](const ScriptResult&) {});  // fails: its group opens
   r.Eval(bucket, "k", 1, [](const ScriptResult&) {});  // the probe succeeds: closes
-  EXPECT_EQ(seen, (std::vector<State>{State::kOpen, State::kClosed}));
+  EXPECT_EQ(seen, (std::vector<std::size_t>{1, 0}));
+}
+
+// The Week 5 gate found it: with one breaker for the cluster, a dead master's failures opened it for
+// every customer. A key in another slot group must still reach Redis.
+TEST_F(ResilientBackendTest, ADeadSlotGroupDoesNotStopOtherGroups) {
+  std::string other = "k0";
+  for (int i = 1; &breakers.ForEntity(other) == &breaker; ++i) other = "k" + std::to_string(i);
+  redis.script = {{.redis_error = true}};
+  for (int i = 0; i < 6; ++i) EvalAndWait(bucket);
+  EXPECT_EQ(breaker.state(), State::kOpen);
+  EXPECT_EQ(breakers.Open(), 1u);
+  redis.script = {{.allowed = true}};
+  std::promise<ScriptResult> p;
+  backend.Eval(bucket, other, 1, [&p](const ScriptResult& r) { p.set_value(r); });
+  EXPECT_FALSE(p.get_future().get().redis_error);
+  EXPECT_EQ(redis.Calls(), 7);  // it went out
+}
+
+// Slots as Redis computes them (redis.io cluster specification and CLUSTER KEYSLOT).
+TEST(SlotBreakers, HashSlotFollowsRedis) {
+  EXPECT_EQ(HashSlot("123456789"), 12739);  // CRC16/XMODEM check value 0x31C3
+  EXPECT_EQ(HashSlot("{user1000}.following"), HashSlot("{user1000}.followers"));
+  EXPECT_EQ(HashSlot("{user1000}.following"), HashSlot("user1000"));
+  EXPECT_EQ(HashSlot("foo{}{bar}"), Crc16Slot("foo{}{bar}"));  // an empty tag: the whole key
+  EXPECT_EQ(HashSlot("foo{{bar}}zap"), Crc16Slot("{bar"));     // the tag ends at the first }
+  SlotBreakers b;
+  EXPECT_EQ(&b.ForEntity("cust:42"), &b.ForKey("{cust:42}:daily_quota:q"));  // keys.h builds this form
 }
 
 }  // namespace

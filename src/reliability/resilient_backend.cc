@@ -12,18 +12,20 @@ struct ResilientBackend::ScriptCall {
   std::uint32_t requested;
   std::string request_id;
   ScriptCallback done;
+  CircuitBreaker* breaker;  // of the key's slot group
   int retries = 0;
 };
 
 struct ResilientBackend::HashCall {
   std::string key;
   HashCallback done;
+  CircuitBreaker* breaker;
   int retries = 0;
 };
 
-ResilientBackend::ResilientBackend(RedisBackend& inner, CircuitBreaker& breaker, RetryOptions retry,
+ResilientBackend::ResilientBackend(RedisBackend& inner, SlotBreakers& breakers, RetryOptions retry,
                                    StateObserver on_change)
-    : inner_(inner), breaker_(breaker), retry_(retry), on_change_(std::move(on_change)) {
+    : inner_(inner), breakers_(breakers), retry_(retry), on_change_(std::move(on_change)) {
   timer_ = std::jthread([this](std::stop_token stop) { RunTimer(stop); });
 }
 
@@ -42,38 +44,39 @@ void ResilientBackend::StopRetries() {
   for (auto& [when, retry] : left) retry(false);
 }
 
-void ResilientBackend::Account(bool failed) {
-  if ((failed ? breaker_.OnFailure() : breaker_.OnSuccess()) && on_change_) on_change_(breaker_.state());
+void ResilientBackend::Account(CircuitBreaker& b, bool failed) {
+  if ((failed ? b.OnFailure() : b.OnSuccess()) && on_change_) on_change_(breakers_.Open());
 }
 
 // An error reply (MOVED, a script error) means Redis answered: not a reason to stop calling it.
-void ResilientBackend::Account(const ScriptResult& r) { Account(r.redis_error && !r.reply_error); }
+void ResilientBackend::Account(CircuitBreaker& b, const ScriptResult& r) { Account(b, r.redis_error && !r.reply_error); }
 
 void ResilientBackend::Eval(const Rule& rule, std::string_view key, std::uint32_t requested,
                             std::string_view request_id, ScriptCallback done) {
-  if (!breaker_.Allow()) {
+  CircuitBreaker& breaker = breakers_.ForEntity(key);
+  if (!breaker.Allow()) {
     done({.redis_error = true});
     return;
   }
   // A timed-out quota script may have counted the call; even with a request id, the retry would get
   // the stored answer marked replayed, and the admitted call would never be recorded for billing.
   if (rule.algorithm == Algorithm::kQuota || retry_.max_retries == 0) {
-    inner_.Eval(rule, key, requested, request_id, [this, done = std::move(done)](const ScriptResult& r) {
-      Account(r);
+    inner_.Eval(rule, key, requested, request_id, [this, &breaker, done = std::move(done)](const ScriptResult& r) {
+      Account(breaker, r);
       done(r);
     });
     return;
   }
   Send(std::make_shared<ScriptCall>(
-      ScriptCall{rule, std::string(key), requested, std::string(request_id), std::move(done)}));
+      ScriptCall{rule, std::string(key), requested, std::string(request_id), std::move(done), &breaker}));
 }
 
 void ResilientBackend::Send(const std::shared_ptr<ScriptCall>& c) {
   inner_.Eval(c->rule, c->key, c->requested, c->request_id, [this, c](const ScriptResult& r) {
-    Account(r);
+    Account(*c->breaker, r);
     if (r.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
-          if (run && breaker_.Allow()) {
+          if (run && c->breaker->Allow()) {
             Send(c);
           } else {
             c->done({.redis_error = true});
@@ -86,30 +89,32 @@ void ResilientBackend::Send(const std::shared_ptr<ScriptCall>& c) {
 }
 
 void ResilientBackend::Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) {
-  if (!breaker_.Allow()) {
+  CircuitBreaker& breaker = breakers_.ForEntity(key);
+  if (!breaker.Allow()) {
     done({.redis_error = true});
     return;
   }
-  inner_.Return(rule, key, tokens, [this, done = std::move(done)](const ScriptResult& r) {
-    Account(r);
+  inner_.Return(rule, key, tokens, [this, &breaker, done = std::move(done)](const ScriptResult& r) {
+    Account(breaker, r);
     done(r);
   });
 }
 
 void ResilientBackend::HGetAll(std::string key, HashCallback done) {
-  if (!breaker_.Allow()) {
+  CircuitBreaker& breaker = breakers_.ForKey(key);
+  if (!breaker.Allow()) {
     done({.redis_error = true});
     return;
   }
-  Send(std::make_shared<HashCall>(HashCall{std::move(key), std::move(done)}));
+  Send(std::make_shared<HashCall>(HashCall{std::move(key), std::move(done), &breaker}));
 }
 
 void ResilientBackend::Send(const std::shared_ptr<HashCall>& c) {
   inner_.HGetAll(c->key, [this, c](const HashResult& h) {
-    Account(h.redis_error);  // plan reads are routed: redirects are followed, errors mean unreachable
+    Account(*c->breaker, h.redis_error);  // plan reads are routed: redirects are followed, errors mean unreachable
     if (h.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
-          if (run && breaker_.Allow()) {
+          if (run && c->breaker->Allow()) {
             Send(c);
           } else {
             c->done({.redis_error = true});

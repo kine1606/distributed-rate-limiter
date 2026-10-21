@@ -1,0 +1,52 @@
+# Redis Cluster with replicas for the fault tests (Week 5 gate), reachable from WSL:
+#   docker compose -f docker/docker-compose.faults.yml up -d
+#   127.0.0.1:7101-7106  3 masters with one replica each (which node is which: cluster nodes)
+# The nodes share the network of `net`, a container that only sleeps, so the 127.0.0.1 address they
+# announce works for the cluster bus and for WSL clients, and any Redis node can be stopped or
+# killed without taking the network down. cluster-node-timeout 2000: a replica takes over a dead
+# master about 2 to 3 s after it stops answering. cluster-require-full-coverage no: the healthy
+# masters keep answering while a dead master's slots are uncovered; with Redis's default (yes) every
+# node answers CLUSTERDOWN from the failure until the promotion (measured in
+# docs/thesis/evidence/fault_kill_master_2026-10-21.md). No persistence: test data only.
+name: ratelimiter-faults
+
+x-node: &node
+  image: redis:7
+  network_mode: service:net
+
+services:
+  net:
+    image: redis:7
+    ports: ["7101-7106:7101-7106"]
+    entrypoint: ["sleep", "infinity"]
+
+  redis-1:
+    <<: *node
+    command: redis-server --port 7101 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+  redis-2:
+    <<: *node
+    command: redis-server --port 7102 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+  redis-3:
+    <<: *node
+    command: redis-server --port 7103 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+  redis-4:
+    <<: *node
+    command: redis-server --port 7104 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+  redis-5:
+    <<: *node
+    command: redis-server --port 7105 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+  redis-6:
+    <<: *node
+    command: redis-server --port 7106 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+
+  init:
+    <<: *node
+    depends_on: [redis-1, redis-2, redis-3, redis-4, redis-5, redis-6]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for p in 7101 7102 7103 7104 7105 7106; do until redis-cli -p $$p ping >/dev/null 2>&1; do sleep 0.2; done; done
+        redis-cli -p 7101 cluster info | grep -q cluster_state:ok ||
+          redis-cli --cluster create 127.0.0.1:7101 127.0.0.1:7102 127.0.0.1:7103 127.0.0.1:7104 127.0.0.1:7105 \
+            127.0.0.1:7106 --cluster-replicas 1 --cluster-yes
+        until redis-cli -p 7101 cluster info | grep -q cluster_state:ok; do sleep 0.2; done

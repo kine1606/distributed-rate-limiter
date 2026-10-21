@@ -57,6 +57,8 @@ void RedisMetrics::Render(std::string& out) const {
   AppendSample(out, "rl_redis_errors_total", "kind=\"timeout\"", static_cast<double>(timeouts.Value()));
   AppendSample(out, "rl_redis_errors_total", "kind=\"reply\"", static_cast<double>(reply_errors.Value()));
   AppendSample(out, "rl_redis_errors_total", "kind=\"other\"", static_cast<double>(other_errors.Value()));
+  AppendFamily(out, "rl_redis_reroutes_total", "counter", "Scripts sent again after MOVED or a lost node");
+  AppendSample(out, "rl_redis_reroutes_total", "", static_cast<double>(reroutes.Value()));
 }
 
 }  // namespace ratelimiter

@@ -120,6 +120,7 @@ struct RedisPPBackend::Call {
   std::size_t script;   // index into scripts_ (and RedisMetrics::kCall)
   ScriptCallback done;
   std::int64_t start_ns = 0;  // first send, for the latency metric
+  bool rerouted = false;      // sent again after a failover once already
 };
 
 RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
@@ -166,12 +167,14 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
         Send(c, true);
         return;
       }
+      if (dynamic_cast<const sw::redis::RedirectionError*>(&e) != nullptr && Reroute(c, with_source, false)) return;
       Fail(*c, e.what(), false, true);
       return;
     } catch (const sw::redis::TimeoutError& e) {
       Fail(*c, e.what(), true);
       return;
-    } catch (const std::exception& e) {  // connection lost, CLUSTERDOWN
+    } catch (const std::exception& e) {  // connection lost or refused: the node may have failed over
+      if (Reroute(c, with_source, true)) return;
       Fail(*c, e.what());
       return;
     }
@@ -184,9 +187,8 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
     c->done(r);
   };
   try {
-    // shortcut: AsyncRedisCluster has no callback EVALSHA, so scripts go straight to the node that
-    // owns the key's slot and do not follow MOVED: after a failover they fail until the slot map
-    // refreshes (every 10 s). Retry through a routed command when the failover tests need it (Week 5).
+    // AsyncRedisCluster has no routed callback EVALSHA, so a script goes straight to the node the
+    // slot map names for its key. After a failover that node is gone or answers MOVED: Reroute.
     auto node = cluster_.redis(c->keys.front(), false);
     if (with_source) {
       node.eval<Reply>(script.source, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
@@ -195,8 +197,30 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
       node.evalsha<Reply>(script.sha, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
                           std::move(on_reply));
     }
-  } catch (const std::exception& e) {  // no usable connection to that node: answer now
-    Fail(*c, e.what());
+  } catch (const std::exception& e) {  // no usable connection to that node
+    if (!Reroute(c, with_source, false)) Fail(*c, e.what());  // never sent
+  }
+}
+
+// Once per call: a routed command for the key makes redis-plus-plus follow the redirect or the
+// failed node and refresh its slot map, and the script is then sent again, to the node now named.
+// A redirect or a call never sent did not run; a lost connection may have run it, so a quota
+// script is not sent again then (it could count twice, as for ResilientBackend's retries).
+bool RedisPPBackend::Reroute(const std::shared_ptr<Call>& c, bool with_source, bool may_have_run) {
+  if (c->rerouted || (may_have_run && c->algorithm == Algorithm::kQuota)) return false;
+  c->rerouted = true;
+  if (metrics_ != nullptr) metrics_->reroutes.Add();
+  try {
+    cluster_.command<long long>("EXISTS", c->keys.front(), [this, c, with_source](sw::redis::Future<long long>&& f) {
+      try {
+        f.get();
+      } catch (const std::exception&) {  // only the refreshed map matters; the resend reports errors
+      }
+      Send(c, with_source);
+    });
+    return true;
+  } catch (const std::exception&) {
+    return false;
   }
 }
 

@@ -13,6 +13,7 @@
 
 #include "redis/redis_backend.h"
 #include "reliability/circuit_breaker.h"
+#include "reliability/slot_breakers.h"
 
 namespace ratelimiter {
 
@@ -23,18 +24,19 @@ struct RetryOptions {
 
 // A RedisBackend decorator (src/reliability/README.md): calls fail at once while the breaker is
 // open, every answer feeds the breaker, and a timed-out call is sent again after a jittered delay,
-// at most `max_retries` times. Only calls that cannot make a limit looser are retried, because a
+// at most `max_retries` times. Each call is gated by the breaker of its key's slot group, so a dead
+// master stops calls to its own slots only. Only calls that cannot make a limit looser are retried, because a
 // timed-out script may have run: plan reads, token-bucket and window scripts (a repeat takes one
 // more token: stricter). Quota scripts are never retried (a repeat counts twice, or with a request
 // id comes back replayed and goes unbilled), nor are token returns. Only an unreachable or slow
 // Redis feeds the breaker; an error reply (MOVED, a script error) does not.
 class ResilientBackend final : public RedisBackend {
  public:
-  using StateObserver = std::function<void(CircuitBreaker::State)>;
+  using StateObserver = std::function<void(std::size_t open_groups)>;
 
-  // `inner` and `breaker` must outlive this backend. `on_change` runs when the breaker opens from
-  // closed or closes again (not on each failed probe), on the thread whose answer changed it.
-  ResilientBackend(RedisBackend& inner, CircuitBreaker& breaker, RetryOptions retry = {},
+  // `inner` and `breakers` must outlive this backend. `on_change(open groups)` runs when a group
+  // opens from closed or closes again (not on each failed probe), on the thread whose answer changed it.
+  ResilientBackend(RedisBackend& inner, SlotBreakers& breakers, RetryOptions retry = {},
                    StateObserver on_change = {});
   ~ResilientBackend() override;
 
@@ -57,14 +59,14 @@ class ResilientBackend final : public RedisBackend {
 
   void Send(const std::shared_ptr<ScriptCall>& c);
   void Send(const std::shared_ptr<HashCall>& c);
-  void Account(bool failed);  // feeds the breaker
-  void Account(const ScriptResult& r);
+  void Account(CircuitBreaker& b, bool failed);  // feeds the breaker
+  void Account(CircuitBreaker& b, const ScriptResult& r);
   // Runs `retry(true)` after the n-th retry's delay, or `retry(false)` if stopped first.
   bool Schedule(int n, std::function<void(bool)> retry);
   void RunTimer(std::stop_token stop);
 
   RedisBackend& inner_;
-  CircuitBreaker& breaker_;
+  SlotBreakers& breakers_;
   const RetryOptions retry_;
   const StateObserver on_change_;
 

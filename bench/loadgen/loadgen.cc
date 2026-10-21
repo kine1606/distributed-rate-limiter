@@ -2,7 +2,7 @@
 // Check calls outstanding for a fixed time and prints one JSON line: calls/s and latency percentiles.
 // Faster than ghz, so at high load the limiter, not the client, is the limit.
 //   loadgen <target> <rule> <seconds> [channels=8] [in_flight_per_channel=128] [keys=10000] [warmup_s=5]
-//           [batch=1] [rate=0]
+//           [batch=1] [rate=0] [key_prefix=cust:]
 // Each check picks cust:1..keys uniformly; a call has a 1 s deadline. Each channel is its own TCP
 // connection. Latency is measured from send to reply (closed loop: Week 5 adds open-loop timing).
 // batch > 1 sends CheckBatch calls of that many checks: calls_per_s counts calls, checks_per_s checks.
@@ -11,9 +11,11 @@
 // rate > 0 runs open loop instead (Week 5): `rate` Check calls a second on a fixed schedule over the
 // channels, whatever earlier calls are doing, and latency counts from each call's scheduled time, so
 // a stall shows in the percentiles (no coordinated omission). in_flight per channel then caps the
-// calls outstanding; a call the cap stops is counted as skipped, and any skip spoils the run.
+// calls outstanding; a call the cap stops is counted as skipped, and any skip spoils the run. Open
+// loop also counts answers by reason, in total and per second of the run (the fault tests' timeline).
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -65,7 +67,8 @@ struct Slot {
   std::uint64_t ok = 0, checks = 0, allowed = 0, errors = 0;
   std::function<void()> on_finished;
 
-  std::string Key() { return "cust:" + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)); }
+  std::string prefix = "cust:";
+  std::string Key() { return prefix + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)); }
 
   void Issue() {
     ctx = std::make_unique<grpc::ClientContext>();
@@ -143,13 +146,22 @@ struct OpenCall {
   ratelimiter::v1::CheckRequest req;
   ratelimiter::v1::CheckResponse resp;
   Clock::time_point scheduled;
+  Clock::time_point measure_from;
   bool measured = false;
 };
 
+// Answers by proto Reason (0 to 7), then calls that failed (8).
+constexpr int kOutcomes = 9;
+constexpr std::array<const char*, kOutcomes> kOutcome{"unspecified", "ok",          "rate_limited",
+                                                      "quota_exhausted", "overage", "suspended",
+                                                      "unavailable", "unverified",  "error"};
 struct OpenStats {
+  explicit OpenStats(int seconds) : per_second(static_cast<std::size_t>(seconds)) {}
   std::array<std::atomic<std::uint64_t>, kBuckets> latency{}, lag{};  // from schedule; send minus schedule
   std::atomic<std::uint64_t> sent{0}, ok{0}, allowed{0}, errors{0}, skipped{0};
   std::atomic<std::int64_t> outstanding{0};
+  std::array<std::atomic<std::uint64_t>, kOutcomes> outcomes{};
+  std::vector<std::array<std::atomic<std::uint64_t>, kOutcomes>> per_second;  // by scheduled second
 };
 
 std::vector<std::uint64_t> Snapshot(const std::array<std::atomic<std::uint64_t>, kBuckets>& h) {
@@ -160,10 +172,31 @@ std::vector<std::uint64_t> Snapshot(const std::array<std::atomic<std::uint64_t>,
 
 double Us(Clock::duration d) { return std::chrono::duration<double, std::micro>(d).count(); }
 
+// "outcomes":{...},"timeline":[[...], ...]: answers by kOutcome, in total and per second.
+std::string Outcomes(const OpenStats& st) {
+  std::string out = "\"outcomes\":{";
+  for (int i = 1; i < kOutcomes; ++i) {
+    out += std::string(i > 1 ? "," : "") + "\"" + kOutcome[static_cast<std::size_t>(i)] +
+           "\":" + std::to_string(st.outcomes[static_cast<std::size_t>(i)].load());
+  }
+  out += "},\"timeline_fields\":[";
+  for (int i = 1; i < kOutcomes; ++i) out += std::string(i > 1 ? "," : "") + "\"" + kOutcome[static_cast<std::size_t>(i)] + "\"";
+  out += "],\"timeline\":[";
+  for (std::size_t sec = 0; sec < st.per_second.size(); ++sec) {
+    out += sec > 0 ? ",[" : "[";
+    for (int i = 1; i < kOutcomes; ++i) {
+      out += (i > 1 ? "," : "") + std::to_string(st.per_second[sec][static_cast<std::size_t>(i)].load());
+    }
+    out += "]";
+  }
+  return out + "]";
+}
+
 // One sender per channel, each at rate / channels, staggered so the channels interleave.
 int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& stubs, const std::string& rule,
-             int seconds, int warmup, int keys, double rate, std::int64_t max_outstanding, const std::string& target) {
-  auto shared = std::make_shared<OpenStats>();  // callbacks may outlive this function's wait
+             int seconds, int warmup, int keys, double rate, std::int64_t max_outstanding, const std::string& target,
+             const std::string& prefix) {
+  auto shared = std::make_shared<OpenStats>(seconds);  // callbacks may outlive this function's wait
   OpenStats& st = *shared;
   const auto n = static_cast<int>(stubs.size());
   const auto interval = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(n / rate));
@@ -184,9 +217,10 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
         }
         auto c = std::make_shared<OpenCall>();
         c->scheduled = t;
+        c->measure_from = measure_from;
         c->measured = measured;
         c->ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-        c->req.set_key("cust:" + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)));
+        c->req.set_key(prefix + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)));
         c->req.set_rule(rule);
         ++st.outstanding;
         if (measured) ++st.sent;
@@ -194,6 +228,10 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
           OpenStats& st = *shared;
           if (c->measured) {
             ++st.latency[Bucket(Us(Clock::now() - c->scheduled))];
+            const int outcome = s.ok() ? std::clamp(static_cast<int>(c->resp.reason()), 0, 7) : 8;
+            ++st.outcomes[static_cast<std::size_t>(outcome)];
+            const auto second = static_cast<std::size_t>((c->scheduled - c->measure_from) / std::chrono::seconds(1));
+            if (second < st.per_second.size()) ++st.per_second[second][static_cast<std::size_t>(outcome)];
             if (s.ok()) {
               ++st.ok;
               st.allowed += c->resp.allowed();
@@ -214,12 +252,13 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
       "{\"generator\":\"loadgen\",\"mode\":\"open\",\"target\":\"%s\",\"rule\":\"%s\",\"channels\":%d,"
       "\"max_outstanding\":%lld,\"keys\":%d,\"warmup_s\":%d,\"seconds\":%d,\"rate\":%.0f,"
       "\"sent_per_s\":%.0f,\"ok\":%llu,\"allowed\":%llu,\"errors\":%llu,\"skipped\":%llu,\"unanswered\":%lld,"
-      "\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f,\"send_lag_p99_ms\":%.3f}\n",
+      "\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f,\"send_lag_p99_ms\":%.3f,%s}\n",
       target.c_str(), rule.c_str(), n, static_cast<long long>(max_outstanding), keys, warmup, seconds, rate,
       static_cast<double>(st.sent.load()) / seconds, static_cast<unsigned long long>(st.ok.load()),
       static_cast<unsigned long long>(st.allowed.load()), static_cast<unsigned long long>(st.errors.load()),
       static_cast<unsigned long long>(st.skipped.load()), static_cast<long long>(st.outstanding.load()),
-      Percentile(lat, 0.50), Percentile(lat, 0.99), Percentile(lat, 0.999), Percentile(lag, 0.99));
+      Percentile(lat, 0.50), Percentile(lat, 0.99), Percentile(lat, 0.999), Percentile(lag, 0.99),
+      Outcomes(st).c_str());
   return st.outstanding.load() > 0 ? 1 : 0;
 }
 
@@ -228,7 +267,8 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
 int main(int argc, char** argv) {
   if (argc < 4) {
     std::fprintf(stderr,
-                 "usage: loadgen <target> <rule> <seconds> [channels] [in_flight] [keys] [warmup_s] [batch] [rate]\n");
+                 "usage: loadgen <target> <rule> <seconds> [channels] [in_flight] [keys] [warmup_s] [batch] [rate] "
+                 "[key_prefix]\n");
     return 2;
   }
   const std::string target = argv[1], rule = argv[2];
@@ -239,6 +279,7 @@ int main(int argc, char** argv) {
   const int warmup = argc > 7 ? std::stoi(argv[7]) : 5;
   const int batch = argc > 8 ? std::stoi(argv[8]) : 1;
   const double rate = argc > 9 ? std::stod(argv[9]) : 0;
+  const std::string prefix = argc > 10 ? argv[10] : "cust:";
 
   const bool envoy = rule.starts_with("envoy:");
   std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>> stubs;
@@ -251,7 +292,9 @@ int main(int argc, char** argv) {
     rls_stubs.push_back(envoy::service::ratelimit::v3::RateLimitService::NewStub(channel));
   }
 
-  if (rate > 0) return OpenLoop(stubs, rule, seconds, warmup, keys, rate, std::int64_t{channels} * in_flight, target);
+  if (rate > 0) {
+    return OpenLoop(stubs, rule, seconds, warmup, keys, rate, std::int64_t{channels} * in_flight, target, prefix);
+  }
 
   std::mutex mu;
   std::condition_variable cv;
@@ -264,6 +307,7 @@ int main(int argc, char** argv) {
     s->rule = envoy ? rule.substr(6) : rule;
     s->keys = keys;
     s->batch = batch;
+    s->prefix = prefix;
     s->rng.seed(static_cast<std::uint64_t>(i) + 1);
     s->on_finished = [&] {
       std::lock_guard lock(mu);
