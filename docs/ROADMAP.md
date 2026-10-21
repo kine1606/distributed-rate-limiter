@@ -190,10 +190,17 @@ stays within limit + N × C (four instances, 100,000 a day: exactly 100,000 admi
 
 About 16 h.
 
-- [ ] Timeouts (5 to 10 ms), circuit breaker, retries only on timeouts with jitter (3 h).
+- [x] Timeouts (5 to 10 ms), circuit breaker, retries only on timeouts with jitter (3 h).
+      Done (`src/reliability/`): breaker (20 in a row, one probe after 500 ms), retries of timeouts
+      that cannot loosen a limit. 10 ms raised false timeouts under load, so the default is 50 ms,
+      with four Redis clients (exact path 8,896 to 36,283 checks/s). See `docs/thesis/evidence/reliability_2026-10-21.md`.
       See [src/reliability/README.md](../src/reliability/README.md).
-- [ ] Failure policy per plan after leases run out; fail-open admissions marked `unverified` (1.5 h).
-- [ ] Bounded queues and `RESOURCE_EXHAUSTED`; graceful shutdown returns leases (2.5 h).
+- [x] Failure policy per plan after leases run out; fail-open admissions marked `unverified` (1.5 h).
+      Done: the plan's `failure` field decides for customer checks; stale-if-error plans. Master
+      stopped 3.3 s: Pay 59 of 59 `UNVERIFIED`, Free 59 of 59 `UNAVAILABLE`.
+- [x] Bounded queues and `RESOURCE_EXHAUSTED`; graceful shutdown returns leases (2.5 h).
+      Done: one in-flight bound in the service (`RL_MAX_IN_FLIGHT`, 10,000) bounds every queue behind
+      it, no measurable cost; SIGTERM drains, returns leased tokens (72,194 from 1,000 leases in 7 ms).
 - [ ] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
 - [ ] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
 - [ ] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids

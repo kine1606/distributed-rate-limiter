@@ -1,6 +1,6 @@
 # Redis client, backend and batcher
 
-> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Week 3: `batcher.{h,cc}` (timer and adaptive modes, off by default after measurement). Week 4: `plan_listener.{h,cc}` (sync redis++ `Subscriber` on its own thread, `plan-changes`, reconnects and resyncs the plan cache); `quota.lua` replies carry `replayed`
+> Week 1 (spike), Week 2 (backend), Week 3 (batcher) · Flow step A9 · Status: Week 2 done: `redispp_backend.{h,cc}` on redis-plus-plus `AsyncRedisCluster` (scripts and `HGETALL`, local SHA1, `NOSCRIPT` → `EVAL`), keys in `keys.h`; tested against the dev cluster in `tests/redis_backend_it.cc`. Week 3: `batcher.{h,cc}` (timer and adaptive modes, off by default after measurement). Week 5: `sharded_backend.h` (four Redis clients by default, keys spread over them: exact path 4.1x), call timeout 50 ms (`RL_REDIS_TIMEOUT_MS`), timeouts reported as `timed_out`. Week 4: `plan_listener.{h,cc}` (sync redis++ `Subscriber` on its own thread, `plan-changes`, reconnects and resyncs the plan cache); `quota.lua` replies carry `replayed`
 
 ## What this module does
 

@@ -1,6 +1,6 @@
 # Reliability
 
-> Week 5 · Flow step A12 · Status: not started
+> Week 5 · Flow step A12 · Status: Week 5 done: `circuit_breaker.h` (lock-free, fake-clock tests), `resilient_backend.{h,cc}` (breaker gating, retries of timeouts with jitter); failure policy per plan in `src/core/composite_core.cc`. Measurements: `docs/thesis/evidence/reliability_2026-10-21.md`
 
 ## What this module does
 
@@ -78,8 +78,23 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
 - **`MOVED` and `ASK`** are handled by the cluster client; verify in the spike that it refreshes
   its slot map, and count redirects in a metric.
 
+## What was built (Week 5)
+
+- `failure_policy.h` was not needed: `CompositeCore` maps any "Redis down" answer to the plan's
+  policy in one function (`PlanDown`), and `retry.h` lives inside `ResilientBackend`.
+- Retries only where a repeat cannot loosen a limit, because a timed-out script may have run: plan
+  reads, token-bucket and window scripts (a repeat takes one more token: stricter), quota scripts
+  with a request id (deduplicated). Quota without an id and token returns are never retried.
+- The breaker counts consecutive failures across the cluster, so one dead master among healthy ones
+  does not open it; its calls fail by timeout (50 ms) or at once when the connection is refused.
+  It reports opening and closing, not every failed probe.
+- Timeout: 10 ms raised false timeouts under load with one Redis client (the I/O thread also
+  finishes gRPC calls), and one timeout drops a whole connection. Four clients
+  (`src/redis/sharded_backend.h`) and 50 ms gave none; see `docs/thesis/evidence/reliability_2026-10-21.md`.
+
 ## Done when
 
-- [ ] Breaker unit tests with a fake clock.
-- [ ] Kill-master test: documented behaviour per plan observed and saved in `results/`.
+- [x] Breaker unit tests with a fake clock (`tests/circuit_breaker_test.cc`).
+- [ ] Kill-master test under load with replicas (Week 5 gate). A first outage smoke without
+      replicas is in `docs/thesis/evidence/reliability_2026-10-21.md`, part B.
 - [ ] Added 20 ms latency (via `tc` or toxiproxy): p99 and breaker behaviour recorded.

@@ -7,7 +7,8 @@ for the schedule.
 
 **Status: Weeks 1 to 4 done (Week 3 gate partly met, Week 4 gate met): overage policies, request
 IDs, deny cache, `CompositeCore`, plan cache with Pub/Sub, usage events, `tools/rlctl` and leased
-quota for large plans; lock-free on the common customer path.** The limiter runs on a
+quota for large plans; lock-free on the common customer path. Week 5: timeouts, circuit breaker,
+failure policy per plan, backpressure and graceful shutdown done.** The limiter runs on a
 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3) and enforces per-customer
 daily quotas from plan hashes in Redis: a Free customer is stopped at exactly 200 through gRPC
 (`tests/grpc_quota_it.cc`). The default engine serves non-strict rules from a lock-free local lease
