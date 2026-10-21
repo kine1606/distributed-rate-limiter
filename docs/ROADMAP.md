@@ -206,8 +206,11 @@ About 16 h.
       Done: own text exposition (prometheus-cpp is not installed), striped lock-free counters,
       `/metrics` on `RL_METRICS_ADDR` (127.0.0.1:9100); Prometheus in `docker-compose.yml`. Overhead
       not measurable: leased 77,377 checks/s on, 75,394 off (medians of 3).
-- [ ] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids
+- [x] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids
       coordinated omission). Try `ghz --rps` first. See [bench/loadgen/README.md](../bench/loadgen/README.md).
+      Done: `bench/loadgen` with a `rate` argument (`ghz --rps` times calls from their send, so it
+      has the same blind spot). Server frozen 0.5 s at 10,000/s: open-loop p99 480.8 ms, closed-loop
+      5.8 ms. Leased rule open loop: p99 1.02 ms at 10,000/s, 3.76 ms at 40,000/s; saturates by 50,000.
 - [ ] Thesis: Chapter 3 draft.
 
 Gate: kill a Redis master under load and observe the documented behaviour per plan; latency at a
