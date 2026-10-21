@@ -31,8 +31,8 @@ class ResilientBackend final : public RedisBackend {
  public:
   using StateObserver = std::function<void(CircuitBreaker::State)>;
 
-  // `inner` and `breaker` must outlive this backend. `on_change` runs when the breaker opens,
-  // half-opens or closes, on the thread whose answer changed it.
+  // `inner` and `breaker` must outlive this backend. `on_change` runs when the breaker opens from
+  // closed or closes again (not on each failed probe), on the thread whose answer changed it.
   ResilientBackend(RedisBackend& inner, CircuitBreaker& breaker, RetryOptions retry = {},
                    StateObserver on_change = {});
   ~ResilientBackend() override;

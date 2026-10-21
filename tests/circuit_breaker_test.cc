@@ -67,7 +67,7 @@ TEST_F(CircuitBreakerTest, AFailedProbeOpensItForAnotherPeriod) {
   Fail(20);
   g_now = 600 * kMs;
   ASSERT_TRUE(breaker.Allow());
-  EXPECT_TRUE(breaker.OnFailure());
+  EXPECT_FALSE(breaker.OnFailure());  // re-opening is not news: no log line every probe
   EXPECT_EQ(breaker.state(), State::kOpen);
   g_now = 1099 * kMs;
   EXPECT_FALSE(breaker.Allow());  // 500 ms from the failed probe, not from the first opening

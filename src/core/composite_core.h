@@ -27,6 +27,8 @@ using UsageObserver = std::function<void(std::string_view customer, Reason reaso
 //   3. burst: a denial answers at once and uses no quota
 //   4. daily quota under the plan's overage policy, deduplicated by request id; on a denial the
 //      burst token goes back and the denial is cached
+// When Redis cannot answer step 3 or 4 (or a quota lease refill), the plan's failure policy
+// decides: fail open admits the call as kUnverified, fail closed denies it as kUnavailable.
 // Every other rule goes to `inner` unchanged.
 //
 // Leased quota (Week 4): with `quota_leases` set and quota_mode: auto, a plan of kLeasedQuotaFrom

@@ -33,6 +33,13 @@ TEST(Plan, QuotaStampChangesWithTheQuotaTerms) {
             QuotaStamp(ParsePlan({{"overage", "cap"}, {"extra", "5"}})));
 }
 
+TEST(Plan, FailurePolicyIsOpenOnlyWhenTheHashSaysSo) {  // Week 5: paid open, Free closed
+  EXPECT_EQ(ParsePlan({}).failure, FailurePolicy::kFailClosed);
+  EXPECT_EQ(ParsePlan({{"failure", "open"}}).failure, FailurePolicy::kFailOpen);
+  EXPECT_EQ(ParsePlan({{"failure", "closed"}}).failure, FailurePolicy::kFailClosed);
+  EXPECT_EQ(ParsePlan({{"failure", "OPEN"}}).failure, FailurePolicy::kFailClosed);  // unknown: the safe side
+}
+
 TEST(Plan, MissingHashIsFree) {
   const Plan p = ParsePlan({});
   EXPECT_EQ(p.daily, 200u);

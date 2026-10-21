@@ -99,10 +99,14 @@ void PlanStore::OnLoad(const std::string& customer, const HashResult& h) {
       waiters.swap(it->second.waiters);
       if (plan) {
         it->second.plan = *plan;
+        it->second.has_plan = true;
         it->second.expires_ns = now_() + ttl_ns_;
         it->second.loading = false;
+      } else if (it->second.has_plan) {  // stale if error; still expired, so the next check asks again
+        plan = it->second.plan;
+        it->second.loading = false;
       } else {
-        s.map.erase(it);  // an error is not cached: the next check asks Redis again
+        s.map.erase(it);  // nothing to fall back on: the next check asks Redis again
       }
     }
   }

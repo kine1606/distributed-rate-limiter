@@ -2,7 +2,6 @@
 
 #include <openssl/sha.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -85,8 +84,8 @@ sw::redis::ConnectionOptions Options(const std::string& host, int port, std::chr
   sw::redis::ConnectionOptions o;
   o.host = host;
   o.port = port;
-  o.connect_timeout = std::max(timeout, std::chrono::milliseconds(200));  // a reconnect needs a handshake
-  o.socket_timeout = timeout;  // also bounds each async command
+  o.connect_timeout = timeout;  // no longer than a call: a dead node must fail fast, not on connect
+  o.socket_timeout = timeout;   // also bounds each async command
   return o;
 }
 

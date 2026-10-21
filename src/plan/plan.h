@@ -11,7 +11,6 @@ namespace ratelimiter {
 
 // What a customer bought, from the hash {cust:N}:plan (docs/CUSTOMER_PLANS.md). The defaults are the
 // Free plan: a missing hash or field can never give away more than the cheapest plan.
-// failure is read once the engines use it (Week 5).
 struct Plan {
   std::uint32_t daily{200};
   std::uint32_t burst{2};
@@ -19,6 +18,7 @@ struct Plan {
   Overage overage{Overage::kHard};
   std::uint32_t extra{0};   // grace amount or overage cap
   bool suspended{false};    // plan "suspended" (step B9)
+  FailurePolicy failure{FailurePolicy::kFailClosed};  // when Redis cannot be asked (Week 5)
 };
 
 // Identifies a plan's quota terms, so a denial recorded under them (DenyCache) is ignored once the
@@ -47,6 +47,9 @@ inline Plan ParsePlan(const std::unordered_map<std::string, std::string>& fields
     if (it->second == "cap") p.overage = Overage::kCap;
   }
   if (const auto it = fields.find("plan"); it != fields.end()) p.suspended = it->second == "suspended";
+  if (const auto it = fields.find("failure"); it != fields.end() && it->second == "open") {
+    p.failure = FailurePolicy::kFailOpen;  // anything else keeps the safe default
+  }
   return p;
 }
 

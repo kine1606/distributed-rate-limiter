@@ -150,6 +150,20 @@ TEST_F(PlanStoreTest, InvalidateAllDropsEveryPlanAndMarksReadsInFlight) {
   EXPECT_EQ(redis.keys.size(), 4u);  // cust:1 read again
 }
 
+// During an outage a known customer keeps their plan (and its failure policy) past the TTL.
+TEST_F(PlanStoreTest, AFailedReadAnswersWithTheLastPlanRead) {
+  Get();
+  redis.Answer("2000");
+  g_now = 6 * kSec;  // expired
+  auto& during = Get();
+  redis.Answer("", true);
+  EXPECT_EQ(during, std::vector<std::uint32_t>{2000});
+  auto& again = Get();  // still expired: asks Redis again, which is back
+  ASSERT_EQ(redis.pending.size(), 1u);
+  redis.Answer("20000");
+  EXPECT_EQ(again, std::vector<std::uint32_t>{20000});
+}
+
 TEST_F(PlanStoreTest, ErrorsReachEveryWaiterAndAreNotCached) {
   auto& a = Get();
   auto& b = Get();
