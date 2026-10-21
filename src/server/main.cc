@@ -3,6 +3,7 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -13,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <unistd.h>
 
@@ -29,6 +31,9 @@
 #include "redis/batcher.h"
 #include "redis/plan_listener.h"
 #include "redis/redispp_backend.h"
+#include "redis/sharded_backend.h"
+#include "reliability/circuit_breaker.h"
+#include "reliability/resilient_backend.h"
 #include "server/service.h"
 #include "usage/usage_log.h"
 
@@ -53,6 +58,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //   Redis; measures pure gRPC overhead). With leased and strict, customer rules (burst then quota,
 //   config/rules.yaml) go through CompositeCore.
 //   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
+//        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
@@ -73,15 +79,28 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
 
-  std::unique_ptr<RedisPPBackend> redis;
+  // N Redis clients, each with its own I/O thread, keys spread over them: one thread that also
+  // finishes every gRPC call it answers held the exact path to 8,896 checks/s at 192 in flight; four
+  // gave 36,283. The timeout is the smallest that raised no false timeouts at that load (10 ms: 8 in
+  // 8 s, each dropping a connection and its calls). results/2026-10-21_reliability/NOTES.md
+  std::unique_ptr<RedisBackend> redis;
+  const char* loops_env = std::getenv("RL_REDIS_LOOPS");
+  const int loops = loops_env ? std::stoi(loops_env) : 4;
+  const char* timeout_env = std::getenv("RL_REDIS_TIMEOUT_MS");
+  const std::chrono::milliseconds timeout(timeout_env ? std::stoi(timeout_env) : 50);
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
-    redis = std::make_unique<RedisPPBackend>(host, port, lua_dir);
+    std::vector<std::unique_ptr<RedisBackend>> shards;
+    for (int i = 0; i < std::max(1, loops); ++i) {
+      shards.push_back(std::make_unique<RedisPPBackend>(host, port, lua_dir, timeout));
+    }
+    redis = shards.size() == 1 ? std::move(shards.front()) : std::make_unique<ShardedBackend>(std::move(shards));
   } catch (const std::exception& e) {
     spdlog::critical("cannot set up redis backend: {}", e.what());
     return 1;
   }
-  spdlog::info("using redis at {} with scripts from {}/", redis_addr, lua_dir);
+  spdlog::info("using redis at {} with scripts from {}/, {} client(s), timeout {} ms", redis_addr, lua_dir,
+               std::max(1, loops), timeout.count());
 
   // RL_BATCHER=timer|adaptive puts a Batcher in front of Redis (off by default: measured in
   // results/<date>_batcher/); RL_BATCHER_DELAY_US sets its timer (default 200).
@@ -99,6 +118,19 @@ int main(int argc, char** argv) {
     backend = batcher.get();
     spdlog::info("batcher: {}, {} us", m, delay ? delay : "200");
   }
+
+  // Everything above Redis goes through the breaker (src/reliability): 20 failures in a row stop
+  // calls for 500 ms, then one probe; timed-out calls that cannot loosen a limit are retried twice.
+  CircuitBreaker breaker;
+  ResilientBackend resilient(*backend, breaker, {}, [](CircuitBreaker::State s) {
+    static constexpr const char* kName[] = {"closed", "half-open", "open"};
+    if (s == CircuitBreaker::State::kOpen) {
+      spdlog::error("redis circuit breaker {}: calls fail at once, plan failure policies apply", kName[2]);
+    } else {
+      spdlog::info("redis circuit breaker {}", kName[static_cast<int>(s)]);
+    }
+  });
+  backend = &resilient;
 
   // RL_CHUNK_LOG=<file>: one CSV line per lease chunk change (ns,rule,key,from,to) for the
   // chunk-versus-demand plot. Changes happen at most once per refill, never on a hit.
@@ -200,6 +232,7 @@ int main(int argc, char** argv) {
     spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
   }
   if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
+  resilient.StopRetries();  // no retry may reach Redis after this
   batcher.reset();  // sends what it holds and waits for the replies, while Redis is still there
   redis.reset();    // stop Redis I/O while the core lives: an early refill may still be in flight
   return 0;

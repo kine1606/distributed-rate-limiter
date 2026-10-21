@@ -101,7 +101,7 @@ target_link_libraries(rl_redis PUBLIC rl_api ${REDISPP_LIB} ${RL_HIREDIS} ${UV_L
                                       Threads::Threads)
 
 add_library(rl_engine STATIC src/lease/lease_table.cc src/core/leased_core.cc src/core/composite_core.cc
-                             src/plan/plan_store.cc src/usage/usage_log.cc)
+                             src/plan/plan_store.cc src/usage/usage_log.cc src/reliability/resilient_backend.cc)
 target_include_directories(rl_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(rl_engine PUBLIC rl_api Threads::Threads)
 

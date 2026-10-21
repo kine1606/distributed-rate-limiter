@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -19,8 +20,10 @@ class RedisPPBackend final : public RedisBackend {
  public:
   // `host`:`port` is any cluster node; `lua_dir` holds the scripts (throws std::runtime_error if
   // one cannot be read). Waits up to 2 s for the cluster's slot map, then starts anyway: calls then
-  // fail with redis_error until the cluster answers.
-  RedisPPBackend(const std::string& host, int port, const std::string& lua_dir);
+  // fail with redis_error until the cluster answers. `timeout` bounds each call (and connecting):
+  // hiredis drops a connection that sends no reply for that long, failing its pending calls.
+  RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds(200));
 
   RedisPPBackend(const RedisPPBackend&) = delete;
   RedisPPBackend& operator=(const RedisPPBackend&) = delete;
@@ -42,7 +45,7 @@ class RedisPPBackend final : public RedisBackend {
 
   static std::array<Script, 5> LoadScripts(const std::string& lua_dir);
   void Send(const std::shared_ptr<Call>& call, bool with_source);
-  void Fail(Call& call, std::string_view why);
+  void Fail(Call& call, std::string_view why, bool timed_out = false);
   void Health(bool ok, std::string_view why);
 
   std::array<Script, 5> scripts_;  // indexed by Algorithm, then return_lease.lua

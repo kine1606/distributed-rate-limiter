@@ -2,6 +2,7 @@
 
 #include <openssl/sha.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -80,12 +81,12 @@ ScriptResult Parse(Algorithm algorithm, const Reply& v) {
   return r;
 }
 
-sw::redis::ConnectionOptions Options(const std::string& host, int port) {
+sw::redis::ConnectionOptions Options(const std::string& host, int port, std::chrono::milliseconds timeout) {
   sw::redis::ConnectionOptions o;
   o.host = host;
   o.port = port;
-  o.connect_timeout = std::chrono::milliseconds(200);
-  o.socket_timeout = std::chrono::milliseconds(200);  // also bounds each async command
+  o.connect_timeout = std::max(timeout, std::chrono::milliseconds(200));  // a reconnect needs a handshake
+  o.socket_timeout = timeout;  // also bounds each async command
   return o;
 }
 
@@ -120,8 +121,9 @@ struct RedisPPBackend::Call {
   ScriptCallback done;
 };
 
-RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir)
-    : scripts_(LoadScripts(lua_dir)), cluster_(Options(host, port), PoolOptions()) {
+RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
+                               std::chrono::milliseconds timeout)
+    : scripts_(LoadScripts(lua_dir)), cluster_(Options(host, port, timeout), PoolOptions()) {
   // The slot map loads in the background. A routed call waits for it, so the first scripts, which
   // go straight to a key's node, are not sent to the seed node by mistake.
   auto ready = cluster_.exists("{rl}:startup");
@@ -164,7 +166,10 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
       }
       Fail(*c, e.what());
       return;
-    } catch (const std::exception& e) {  // timeout, connection lost, CLUSTERDOWN
+    } catch (const sw::redis::TimeoutError& e) {
+      Fail(*c, e.what(), true);
+      return;
+    } catch (const std::exception& e) {  // connection lost, CLUSTERDOWN
       Fail(*c, e.what());
       return;
     }
@@ -205,6 +210,7 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
       } catch (const std::exception& e) {
         Health(false, e.what());
         r.redis_error = true;
+        r.timed_out = dynamic_cast<const sw::redis::TimeoutError*>(&e) != nullptr;
       }
       (*shared_done)(r);
     });
@@ -216,10 +222,11 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
   }
 }
 
-void RedisPPBackend::Fail(Call& c, std::string_view why) {
+void RedisPPBackend::Fail(Call& c, std::string_view why, bool timed_out) {
   Health(false, why);
   ScriptResult r;
   r.redis_error = true;
+  r.timed_out = timed_out;
   c.done(r);
 }
 

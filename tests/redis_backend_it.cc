@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "it_cluster.h"
@@ -175,6 +176,45 @@ TEST_F(RedisBackendIT, ReturnGivesTokensBackUpToTheCapacity) {
   ASSERT_FALSE(r.redis_error);
   EXPECT_EQ(r.remaining, 1u);
   EXPECT_TRUE(EvalSync(*backend_, rule, "it:ret").allowed);
+}
+
+// Week 5: a node that stops answering surfaces as a timeout (which ResilientBackend may retry),
+// within about the timeout, while calls to other nodes go on. A Lua loop keeps one master busy.
+TEST_F(RedisBackendIT, ABusyNodeTimesOutAndOnlyItsCallsFail) {
+  RedisPPBackend fast(ClusterSeed().first, ClusterSeed().second, std::string(RL_SOURCE_DIR) + "/lua",
+                      std::chrono::milliseconds(20));
+  const Rule rule{.name = "it_slow", .limit = 1000, .refill_per_sec = 1};
+  // Two keys on different masters: the busy one and one of the others.
+  const std::string busy = "it:slow";
+  std::string other;
+  const auto node_of = [this](const std::string& key) {
+    return admin_->redis(RedisKey(Rule{.name = "x"}, key), false).command<std::string>("CLUSTER", "MYID");
+  };
+  for (int i = 0; other.empty(); ++i) {
+    if (node_of("it:other" + std::to_string(i)) != node_of(busy)) other = "it:other" + std::to_string(i);
+  }
+  EvalSync(fast, rule, busy);  // connections and scripts in place before the stall
+  EvalSync(fast, rule, other);
+
+  std::chrono::steady_clock::duration stalled{};
+  std::thread stall([this, &busy, &stalled] {
+    // A counting loop (TIME is frozen inside a script): about 0.3 s of a busy master on this laptop.
+    const auto t0 = std::chrono::steady_clock::now();
+    admin_->eval<long long>("for i = 1, 100000000 do end return 1", {"{" + busy + "}:spin"}, {});
+    stalled = std::chrono::steady_clock::now() - t0;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));  // the script is running
+  const auto start = std::chrono::steady_clock::now();
+  const auto slow = EvalSync(fast, rule, busy);
+  const auto waited = std::chrono::steady_clock::now() - start;
+  const auto fine = EvalSync(fast, rule, other);
+  stall.join();
+
+  ASSERT_GT(stalled, std::chrono::milliseconds(150)) << "the stall was too short to test a 20 ms timeout";
+  EXPECT_TRUE(slow.redis_error);
+  EXPECT_TRUE(slow.timed_out);
+  EXPECT_LT(waited, stalled / 2);  // gave up long before the node answered
+  EXPECT_FALSE(fine.redis_error);
 }
 
 TEST_F(RedisBackendIT, HGetAllReadsTheHashAndAMissingKeyIsEmpty) {

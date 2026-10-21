@@ -18,6 +18,7 @@ struct ScriptResult {
   std::uint32_t remaining{0};
   std::uint32_t retry_after_ms{0};
   bool redis_error{false};  // transport/timeout error, not a "denied" decision
+  bool timed_out{false};    // the error was a timeout: the script may have run all the same
   std::uint32_t reset_after_ms{0};  // quota only: until 00:00 UTC
   bool overage{false};              // quota only: admitted as billed overage (cap policy)
   bool replayed{false};             // quota only: a retried request ID's stored answer, not counted again
@@ -27,8 +28,9 @@ using ScriptCallback = std::function<void(const ScriptResult&)>;
 
 // A Redis hash (HGETALL); empty when the key does not exist.
 struct HashResult {
-  std::unordered_map<std::string, std::string> fields;
+  std::unordered_map<std::string, std::string> fields{};
   bool redis_error{false};
+  bool timed_out{false};
 };
 
 using HashCallback = std::function<void(const HashResult&)>;
