@@ -1,7 +1,8 @@
 # Chapter 3. Design
 
 > Started Week 2 (2026-10-18) with the product decisions (3.1.3); the lease protocol and its bound
-> (3.5) added in Week 3; quota and overage logic (3.4) in Week 4. The rest of the chapter (3.1 to 3.8 in `OUTLINE.md`) is written in Week 5
+> (3.5) added in Week 3; quota and overage logic (3.4) in Week 4; failure policies and failure
+> modes (3.7) in Week 5. The rest of the chapter (3.1 to 3.8 in `OUTLINE.md`) is written in Week 5
 > from `docs/DESIGN.md`. Section numbers may shift then. Results still to come are marked
 > **[Pending: Week N]**.
 
@@ -292,3 +293,107 @@ as a function of chunk size, and its comparison with a simulation, is evaluation
   the minimum. Its checks would rarely wait, but one in eight would cost a Redis call. Starting at
   the cap and halving idle chunks keeps a key at 3 checks per second near 25 tokens: one Redis call
   per 25 checks.
+
+## 3.7 Failure policies and failure modes
+
+### 3.7.1 What the limiter promises when Redis fails
+
+A Redis outage must not become a limiter outage, nor a storm of retries that keeps Redis down. The
+limiter therefore answers every check whatever Redis does, and the answer is decided in a fixed
+order. A lease that still holds tokens keeps serving, because those tokens were granted before the
+failure. When the lease is empty, or for a check that needs Redis directly, the customer's plan
+decides: a paid plan fails open and the call is admitted as `UNVERIFIED`, which is neither counted nor
+billed (product decision of 3.1.3); a Free plan, and any customer whose plan was never read, fails
+closed with `UNAVAILABLE` and a retry time of one second. The plan cache keeps answering with the last
+plan it read while Redis cannot be asked, so a customer keeps their policy through an outage longer
+than the cache's five-second lifetime.
+
+### 3.7.2 Detecting a failure: timeouts, retries and breakers
+
+**Timeouts.** Every Redis call has a timeout of 50 ms. The plan asked for 5 to 10 ms, and a 10 ms
+timeout was tried first; under load it fired while Redis was healthy. With a single Redis client,
+replies waited tens of milliseconds behind its one I/O thread, which also finished every gRPC call it
+answered, and a timeout makes the client library drop the whole connection, failing every call
+pending on it. Four clients with the keys spread over them took the exact path from 8,896 to 36,283
+checks per second at 192 calls in flight; with four clients, 50 ms was the smallest timeout that
+raised no false alarm. A tighter timeout needs the I/O thread freed of finishing calls, which is
+future work.
+
+**Retries.** A call that timed out may still have run, so only calls whose repetition cannot make a
+limit looser are sent again: plan reads, and token-bucket scripts, where a repeat at worst takes one
+more token. Quota scripts are never retried by the limiter. A repeat would count the call twice, and
+with a request id it would come back as a replayed answer, so the admitted call would never be
+recorded for billing; a code review of the first version found exactly that. A retried call waits a
+random 0.5 to 1.5 times an exponentially growing delay, so calls that timed out together do not
+return together, and is sent at most twice.
+
+**Circuit breakers.** After 20 consecutive failures a breaker stops calls for 500 ms and then lets a
+single probe through; the probe's answer closes it or opens it again. An answer that is an error from
+Redis itself, such as a redirect or a failing script, does not count: Redis answered. The first
+version used one breaker for the whole cluster, on the reasoning that one dead master among healthy
+ones could never produce 20 failures in a row. The fault test of 3.7.3 proved the reasoning wrong:
+when a master dies, every call pending on its connections fails at the same moment, and the breaker
+opened six times in four seconds for every customer, including those on the two healthy masters.
+There is now one breaker per group of 256 of Redis Cluster's 16,384 hash slots, computed from each
+key exactly as Redis computes it, so a dead master opens only the groups of its own slots.
+
+### 3.7.3 Failover
+
+When a master dies, the cluster promotes its replica after the node timeout, and the client must find
+the new master. Plan reads go through the client library's routed path, which follows the change.
+Scripts are sent straight to the node the client's slot map names, so a script that meets a redirect
+or a lost node is sent once more after a routed command has refreshed the map. A quota script whose
+connection was lost is the exception, since it may already have run. The Redis Cluster itself must
+also be configured for partial service: with its default, `cluster-require-full-coverage yes`, every
+node refuses every command from the moment a master is marked failed until its replica is promoted,
+which made a third of the slots' outage briefly an outage of all of them.
+
+*Table 3.z: A master killed under load (3 runs, open-loop load over 30 s, master killed at 10 s).*
+
+| Stream | Offered | Answers while its slots were without a master | Recovery |
+| --- | --- | --- | --- |
+| Free customers, `customer` rule | 1,000 checks/s | 1,095 to 1,442 `UNAVAILABLE`, none admitted | 4 to 5 s |
+| Pay customers, `customer` rule | 5,000 checks/s | 5,417 to 7,113 `UNVERIFIED`, none denied | 4 to 5 s |
+| Leased rule `api_default` | 10,000 checks/s | leases served for 2 s, then 48 to 519 `UNVERIFIED` | 4 to 5 s |
+
+During the outage exactly one third of each stream was affected, the share of the dead master's
+slots, and no call failed. The four to five seconds are the node timeout of two seconds, the
+promotion, and the first re-routed call.
+
+### 3.7.4 Overload and shutdown
+
+**Backpressure.** At most 10,000 checks may wait for an answer at once; beyond that a call is refused
+immediately with `RESOURCE_EXHAUSTED`. Every queue behind the gRPC service holds admitted checks only,
+so this one bound limits the memory a Redis stall can consume. Its cost was not measurable. A second
+bound proved necessary in the open-loop tests: with gRPC's default of unlimited concurrent calls per
+connection, a load beyond capacity piled up thousands of calls per connection and collapsed even with
+no limiter in the server, losing most calls at their deadline. At most 100 concurrent calls per
+connection turned the collapse into queueing that drains (p99 137 ms instead of 2 s at 30,000 calls
+per second), at the price of a single-connection client on the exact path reaching 22,957 instead of
+28,251 checks per second.
+
+**Readiness.** The gRPC health service reports `NOT_SERVING` while every slot group's breaker is open,
+that is while this instance reaches no Redis master, and during shutdown, so a load balancer sends the
+traffic to instances that can reach Redis. A single dead master does not count: every instance sees
+it, and the plans' failure policies already answer for it.
+
+**Shutdown and crash.** On SIGTERM the server reports `NOT_SERVING`, drains its calls for up to five
+seconds, and gives the unused tokens of every token-bucket lease back to Redis before it stops: 72,194
+tokens from 1,000 leases in 7 ms in a test, which brought a customer's bucket from 929 tokens back to
+its capacity of 1,000. A crash loses the leased tokens instead. That makes the limiter briefly
+stricter, never looser, and needs no recovery.
+
+*Table 3.w: Failure modes.*
+
+| Failure | Detected by | Behaviour | Recovery |
+| --- | --- | --- | --- |
+| Redis master down | refused calls, 50 ms timeouts, slot-group breakers | leases serve; then the plan decides for that master's slots only | replica promoted; next call re-routed; breaker probes close |
+| Redis slow | timeouts | safe calls retried twice with jitter; then as master down | automatic |
+| No master reachable from an instance | every breaker open | health `NOT_SERVING`; answers from leases and plan policies | first successful probe |
+| Missed plan-change message | | old plan until the five-second cache lifetime ends | automatic |
+| Limiter overloaded | in-flight count, calls per connection | `RESOURCE_EXHAUSTED`, or queueing on the connection | the client backs off |
+| Limiter stopped | SIGTERM | drain, return leased tokens, flush usage events | none needed |
+| Limiter crash | | leased tokens lost: stricter, never looser | none needed |
+
+The measurements behind this section are in `docs/thesis/evidence/reliability_2026-10-21.md` and
+`docs/thesis/evidence/week5_gate_2026-10-21.md`.

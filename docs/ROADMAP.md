@@ -216,6 +216,8 @@ About 16 h.
       has the same blind spot). Server frozen 0.5 s at 10,000/s: open-loop p99 480.8 ms, closed-loop
       5.8 ms. Leased rule open loop: p99 1.02 ms at 10,000/s, 3.76 ms at 40,000/s; saturates by 50,000.
 - [ ] Thesis: Chapter 3 draft.
+      In progress: 3.1.3, 3.4, 3.5 and 3.7 (failure policies and failure modes, written 2026-10-21)
+      are drafted; 3.1, 3.2, 3.3, 3.6 and 3.8 to do.
 
 Gate: kill a Redis master under load and observe the documented behaviour per plan; latency at a
 fixed rate measured open-loop. Cut first: SIGHUP reload.
