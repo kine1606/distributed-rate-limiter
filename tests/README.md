@@ -1,6 +1,6 @@
 # Tests
 
-> Every week · Status: 201 tests: 151 unit, 33 script (plain Redis on 127.0.0.1:6380), 17 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
+> Every week · Status: 208 tests: 158 unit, 33 script (plain Redis on 127.0.0.1:6380), 17 integration (dev cluster on 127.0.0.1:7001); one executable per level; release, ASan and TSan clean (gRPC tests skip under TSan: Ubuntu's gRPC is not instrumented)
 
 ## How tests are organised
 
@@ -38,6 +38,7 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | `usage_log_test.cc` | unit + TSan | 4 | done: sums per customer and outcome, escaping, periodic flush, every event written or counted as dropped |
 | `plan_change_it.cc` | integration | 4 | done: steps B5 and B9 through `rlctl` on two instances within one second; `rlctl` input checks |
 | `leased_quota_it.cc` | integration | 4 | done: Week 4 gate, four instances on one leased customer stay within limit + N × C |
+| `metrics_test.cc` | unit | 5 | done: counters across threads, histogram text, label escaping, the `/metrics` endpoint over a socket |
 | `circuit_breaker_test.cc` | unit + TSan | 5 | done: breaker states on a fake clock, one probe, retries of timeouts only where safe, open breaker answers without Redis, stopping answers waiting retries |
 | `overage_test.cc` | script | 4 | built inside `lua_scripts_test.cc` and `grpc_quota_it.cc` instead |
 | `breaker_test.cc` | unit | 5 | built as `circuit_breaker_test.cc` |

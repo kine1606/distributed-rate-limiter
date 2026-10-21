@@ -12,6 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "ratelimiter/clock.h"
 #include "redis/keys.h"
 
 namespace ratelimiter {
@@ -116,13 +117,14 @@ struct RedisPPBackend::Call {
   std::vector<std::string> keys;  // the first routes the call; all share its hash tag
   std::vector<std::string> args;
   Algorithm algorithm;  // shapes the reply
-  std::size_t script;   // index into scripts_
+  std::size_t script;   // index into scripts_ (and RedisMetrics::kCall)
   ScriptCallback done;
+  std::int64_t start_ns = 0;  // first send, for the latency metric
 };
 
 RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
-                               std::chrono::milliseconds timeout)
-    : scripts_(LoadScripts(lua_dir)), cluster_(Options(host, port, timeout), PoolOptions()) {
+                               std::chrono::milliseconds timeout, RedisMetrics* metrics)
+    : scripts_(LoadScripts(lua_dir)), metrics_(metrics), cluster_(Options(host, port, timeout), PoolOptions()) {
   // The slot map loads in the background. A routed call waits for it, so the first scripts, which
   // go straight to a key's node, are not sent to the seed node by mistake.
   auto ready = cluster_.exists("{rl}:startup");
@@ -153,6 +155,7 @@ void RedisPPBackend::Return(const Rule& rule, std::string_view key, std::uint32_
 
 void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
   const Script& script = scripts_[c->script];
+  if (metrics_ != nullptr && c->start_ns == 0) c->start_ns = SteadyNowNs();
   auto on_reply = [this, c, with_source](sw::redis::Future<Reply>&& f) {
     ScriptResult r;
     try {
@@ -177,6 +180,7 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
       return;
     }
     Health(true, {});
+    if (metrics_ != nullptr) metrics_->latency[c->script].Observe(SteadyNowNs() - c->start_ns);
     c->done(r);
   };
   try {
@@ -200,16 +204,19 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
   using Fields = std::unordered_map<std::string, std::string>;
   // Shared so `done` survives a call that throws after taking the lambda.
   auto shared_done = std::make_shared<HashCallback>(std::move(done));
+  const std::int64_t start = metrics_ != nullptr ? SteadyNowNs() : 0;
   try {
-    cluster_.hgetall<Fields>(key, [this, shared_done](sw::redis::Future<Fields>&& f) {
+    cluster_.hgetall<Fields>(key, [this, shared_done, start](sw::redis::Future<Fields>&& f) {
       HashResult r;
       try {
         r.fields = f.get();
         Health(true, {});
+        if (metrics_ != nullptr) metrics_->latency[5].Observe(SteadyNowNs() - start);  // kCall: hgetall
       } catch (const std::exception& e) {
         Health(false, e.what());
         r.redis_error = true;
         r.timed_out = dynamic_cast<const sw::redis::TimeoutError*>(&e) != nullptr;
+        if (metrics_ != nullptr) (r.timed_out ? metrics_->timeouts : metrics_->other_errors).Add();
       }
       (*shared_done)(r);
     });
@@ -227,6 +234,7 @@ void RedisPPBackend::Fail(Call& c, std::string_view why, bool timed_out, bool re
   r.redis_error = true;
   r.timed_out = timed_out;
   r.reply_error = reply_error;
+  if (metrics_ != nullptr) (timed_out ? metrics_->timeouts : reply_error ? metrics_->reply_errors : metrics_->other_errors).Add();
   c.done(r);
 }
 

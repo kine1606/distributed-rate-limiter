@@ -9,6 +9,7 @@
 
 #include <sw/redis++/async_redis++.h>
 
+#include "metrics/metrics.h"
 #include "redis/redis_backend.h"
 
 namespace ratelimiter {
@@ -22,8 +23,9 @@ class RedisPPBackend final : public RedisBackend {
   // one cannot be read). Waits up to 2 s for the cluster's slot map, then starts anyway: calls then
   // fail with redis_error until the cluster answers. `timeout` bounds each call (and connecting):
   // hiredis drops a connection that sends no reply for that long, failing its pending calls.
+  // `metrics`, if set, must outlive this backend; several backends may share one.
   RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
-                 std::chrono::milliseconds timeout = std::chrono::milliseconds(200));
+                 std::chrono::milliseconds timeout = std::chrono::milliseconds(200), RedisMetrics* metrics = nullptr);
 
   RedisPPBackend(const RedisPPBackend&) = delete;
   RedisPPBackend& operator=(const RedisPPBackend&) = delete;
@@ -50,6 +52,7 @@ class RedisPPBackend final : public RedisBackend {
 
   std::array<Script, 5> scripts_;  // indexed by Algorithm, then return_lease.lua
   std::atomic<bool> down_{false};
+  RedisMetrics* const metrics_;
   sw::redis::AsyncRedisCluster cluster_;  // last: destroyed first, so no callback outlives the rest
 };
 

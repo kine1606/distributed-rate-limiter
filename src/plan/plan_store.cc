@@ -23,6 +23,7 @@ thread_local std::array<LocalPlan, 256> t_plans;
 }  // namespace
 
 void PlanStore::Read(std::string_view customer, Callback done) {
+  reads_.Add();
   redis_.HGetAll(PlanKey(customer), [done = std::move(done)](const HashResult& h) {
     if (h.redis_error) {
       done(nullptr);
@@ -80,6 +81,7 @@ void PlanStore::Get(std::string_view customer, Callback done) {
 }
 
 void PlanStore::Load(const std::string& customer) {
+  reads_.Add();
   redis_.HGetAll(PlanKey(customer), [this, customer](const HashResult& h) { OnLoad(customer, h); });
 }
 

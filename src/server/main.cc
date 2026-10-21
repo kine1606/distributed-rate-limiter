@@ -29,6 +29,9 @@
 #include "core/leased_core.h"
 #include "core/strict_core.h"
 #include "lease/deny_cache.h"
+#include "metrics/check_metrics.h"
+#include "metrics/exposer.h"
+#include "metrics/metrics.h"
 #include "plan/plan_store.h"
 #include "ratelimiter/core.h"
 #include "redis/batcher.h"
@@ -78,6 +81,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
 //        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
+//        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
@@ -94,6 +98,14 @@ int main(int argc, char** argv) {
     return 1;
   }
   spdlog::info("loaded {} rules from {}", rules.size(), rules_path);
+
+  // Metrics (src/metrics): recorded on the request path unless RL_METRICS_ADDR=off. Declared before
+  // everything that records into them, so they outlive it.
+  const char* metrics_env = std::getenv("RL_METRICS_ADDR");
+  const std::string metrics_addr = metrics_env ? metrics_env : "127.0.0.1:9100";
+  const bool metrics_on = metrics_addr != "off";
+  CheckMetrics check_metrics(rules);
+  RedisMetrics redis_metrics;
 
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
@@ -114,7 +126,8 @@ int main(int argc, char** argv) {
     const auto [host, port] = ParseHostPort(redis_addr);
     std::vector<std::unique_ptr<RedisBackend>> shards;
     for (long long i = 0; i < *loops; ++i) {
-      shards.push_back(std::make_unique<RedisPPBackend>(host, port, lua_dir, timeout));
+      shards.push_back(
+          std::make_unique<RedisPPBackend>(host, port, lua_dir, timeout, metrics_on ? &redis_metrics : nullptr));
     }
     redis = shards.size() == 1 ? std::move(shards.front()) : std::make_unique<ShardedBackend>(std::move(shards));
   } catch (const std::exception& e) {
@@ -223,7 +236,44 @@ int main(int argc, char** argv) {
     return 1;
   }
   spdlog::info("engine: {}, plan cache {} ms, at most {} checks in flight", engine, *plan_ttl_ms, *max_in_flight);
-  RateLimiterService service(core, *max_in_flight);
+  RateLimiterService service(core, *max_in_flight, metrics_on ? &check_metrics : nullptr);
+
+  // After everything it reads, so it stops first. A port in use (several servers on one machine)
+  // leaves the server running without an endpoint.
+  std::unique_ptr<MetricsExposer> exposer;
+  if (metrics_on) {
+    try {
+      exposer = std::make_unique<MetricsExposer>(metrics_addr, [&] {
+        std::string out;
+        check_metrics.Render(out);
+        redis_metrics.Render(out);
+        AppendFamily(out, "rl_in_flight", "gauge", "Checks admitted and not answered yet");
+        AppendSample(out, "rl_in_flight", "", static_cast<double>(service.InFlight()));
+        AppendFamily(out, "rl_breaker_state", "gauge", "Redis circuit breaker: 0 closed, 1 half-open, 2 open");
+        AppendSample(out, "rl_breaker_state", "", static_cast<double>(breaker.state()));
+        if (leased != nullptr) {
+          const auto s = leased->GetStats();
+          AppendFamily(out, "rl_lease_waits_total", "counter", "Checks that waited for a lease refill");
+          AppendSample(out, "rl_lease_waits_total", "", static_cast<double>(s.parked));
+          AppendFamily(out, "rl_lease_refills_total", "counter", "Lease refills sent to Redis");
+          AppendSample(out, "rl_lease_refills_total", "", static_cast<double>(s.refills));
+        }
+        AppendFamily(out, "rl_plan_cache_reads_total", "counter", "Plan reads sent to Redis (cache misses)");
+        AppendSample(out, "rl_plan_cache_reads_total", "", static_cast<double>(plans.Reads()));
+        AppendFamily(out, "rl_deny_cache_hits_total", "counter", "Checks denied by the deny cache, no Redis call");
+        AppendSample(out, "rl_deny_cache_hits_total", "", static_cast<double>(deny.Hits()));
+        if (usage) {
+          AppendFamily(out, "rl_usage_dropped_total", "counter", "Usage events dropped (buffer full or write failed)");
+          AppendSample(out, "rl_usage_dropped_total", "", static_cast<double>(usage->Dropped()));
+        }
+        return out;
+      });
+      spdlog::info("metrics on http://{}:{}/metrics", metrics_addr.substr(0, metrics_addr.rfind(':')),
+                   exposer->port());
+    } catch (const std::exception& e) {
+      spdlog::warn("metrics endpoint off: {}", e.what());
+    }
+  }
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();

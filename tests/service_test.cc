@@ -66,6 +66,7 @@ class ServiceTest : public ::testing::Test {
   }
 
   friend class AdmissionTest;
+  friend class ServiceMetrics_EveryAnswerIsCountedByRuleAndReason_Test;
   static v1::CheckRequest Req(const std::string& key, const std::string& rule = "api_default", std::uint32_t cost = 0) {
     v1::CheckRequest r;
     r.set_key(key);
@@ -178,6 +179,42 @@ TEST_F(ServiceTest, OneUnknownRuleFailsTheWholeBatch) {
   v1::CheckBatchResponse resp;
   EXPECT_EQ(Batch({Req("a"), Req("b", "bad"), Req("c")}, &resp).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   EXPECT_EQ(core_->seen.size(), 3u);  // the others were checked; the RPC still fails as a whole
+}
+
+// ---- metrics (Week 5) ----
+
+TEST(ServiceMetrics, EveryAnswerIsCountedByRuleAndReason) {
+#if defined(__SANITIZE_THREAD__)
+  GTEST_SKIP() << "needs a TSan-instrumented gRPC";
+#endif
+  const RuleTable rules{{"api_default", Rule{.name = "api_default"}}};
+  CheckMetrics metrics(rules);
+  auto core = std::make_shared<FakeCore>();
+  core->answer = [](const CheckRequest& q) {
+    return q.rule == "api_default" ? CheckResult{.allowed = true} : CheckResult{.reason = Reason::kUnknownRule};
+  };
+  RateLimiterService service(core, 10'000, &metrics);
+  grpc::ServerBuilder builder;
+  builder.RegisterService(&service);
+  auto server = builder.BuildAndStart();
+  auto stub = v1::RateLimiter::NewStub(server->InProcessChannel(grpc::ChannelArguments()));
+  const auto call = [&](const std::string& key, const std::string& rule) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    v1::CheckResponse resp;
+    return stub->Check(&ctx, ServiceTest::Req(key, rule), &resp);
+  };
+  EXPECT_TRUE(call("k", "api_default").ok());
+  EXPECT_TRUE(call("k", "api_default").ok());
+  EXPECT_FALSE(call("", "api_default").ok());  // malformed
+  EXPECT_FALSE(call("k", "no_such_rule").ok());  // unknown: no series of its own
+  std::string out;
+  metrics.Render(out);
+  EXPECT_NE(out.find("rl_checks_total{rule=\"api_default\",reason=\"ok\"} 2\n"), std::string::npos) << out;
+  EXPECT_NE(out.find("rl_check_latency_seconds_count{rule=\"api_default\"} 2\n"), std::string::npos);
+  EXPECT_NE(out.find("rl_rejected_total{reason=\"invalid\"} 2\n"), std::string::npos);
+  EXPECT_EQ(out.find("no_such_rule"), std::string::npos);
+  server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
 }
 
 // ---- backpressure (Week 5) ----

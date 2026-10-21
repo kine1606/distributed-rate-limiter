@@ -202,7 +202,10 @@ About 16 h.
       Done: one in-flight bound in the service (`RL_MAX_IN_FLIGHT`, 10,000) bounds every queue behind
       it, no measurable cost; SIGTERM drains, returns leased tokens (72,194 from 1,000 leases in 7 ms).
 - [ ] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
-- [ ] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
+- [x] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
+      Done: own text exposition (prometheus-cpp is not installed), striped lock-free counters,
+      `/metrics` on `RL_METRICS_ADDR` (127.0.0.1:9100); Prometheus in `docker-compose.yml`. Overhead
+      not measurable: leased 77,377 checks/s on, 75,394 off (medians of 3).
 - [ ] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids
       coordinated omission). Try `ghz --rps` first. See [bench/loadgen/README.md](../bench/loadgen/README.md).
 - [ ] Thesis: Chapter 3 draft.

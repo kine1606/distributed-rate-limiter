@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "metrics/metrics.h"
 #include "ratelimiter/rule.h"
 
 namespace ratelimiter {
@@ -51,6 +52,7 @@ class DenyCache {
       s.size.store(s.map.size(), std::memory_order_relaxed);
       return 0;
     }
+    hits_.Add();
     return static_cast<std::uint32_t>((it->second.until_ns - now_ns + 999'999) / 1'000'000);
   }
 
@@ -60,6 +62,8 @@ class DenyCache {
     if (const auto it = s.map.find(customer); it != s.map.end()) s.map.erase(it);
     s.size.store(s.map.size(), std::memory_order_relaxed);
   }
+
+  std::uint64_t Hits() const { return hits_.Value(); }  // checks denied without a Redis call
 
   std::size_t Size() {
     std::size_t n = 0;
@@ -94,6 +98,7 @@ class DenyCache {
   }
 
   std::array<Shard, kShards> shards_;
+  Counter hits_;
 };
 
 }  // namespace ratelimiter

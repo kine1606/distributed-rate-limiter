@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "metrics/metrics.h"
 #include "plan/plan.h"
 #include "ratelimiter/clock.h"
 #include "redis/redis_backend.h"
@@ -45,6 +46,8 @@ class PlanStore {
   // may have read the hash before the change was written.
   void Invalidate(std::string_view customer);
   void InvalidateAll();  // after the plan-change subscription was lost: messages may be missing
+
+  std::uint64_t Reads() const { return reads_.Value(); }  // plan reads sent to Redis (the misses)
 
   std::size_t Size() {  // cached plans and reads in flight
     std::size_t n = 0;
@@ -92,6 +95,7 @@ class PlanStore {
   const Clock now_;
   const std::uint64_t id_;  // tells this store's plans apart in the per-thread copies
   std::atomic<std::uint64_t> generation_{0};  // bumped after every invalidation
+  Counter reads_;
   std::array<Shard, kShards> shards_;
 };
 
