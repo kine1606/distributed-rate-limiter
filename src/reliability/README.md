@@ -103,6 +103,7 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
 ## Done when
 
 - [x] Breaker unit tests with a fake clock (`tests/circuit_breaker_test.cc`).
-- [ ] Kill-master test under load with replicas (Week 5 gate). A first outage smoke without
-      replicas is in `docs/thesis/evidence/reliability_2026-10-21.md`, part B.
+- [x] Kill-master test under load with replicas (Week 5 gate): `bench/fault_kill_master.sh`,
+      `docs/thesis/evidence/week5_gate_2026-10-21.md`. It found the whole-cluster breaker opening for everyone: now one breaker per group of
+      256 hash slots (`slot_breakers.h`).
 - [ ] Added 20 ms latency (via `tc` or toxiproxy): p99 and breaker behaviour recorded.

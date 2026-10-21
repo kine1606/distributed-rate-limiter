@@ -216,6 +216,14 @@ About 16 h.
 Gate: kill a Redis master under load and observe the documented behaviour per plan; latency at a
 fixed rate measured open-loop. Cut first: SIGHUP reload.
 
+Gate status: met.
+Gate result (2026-10-21, `docs/thesis/evidence/week5_gate_2026-10-21.md`): with a master killed under load, a third of the customers (the
+dead master's slots) got their plan's policy for 4 to 5 s, Free `UNAVAILABLE` and Pay `UNVERIFIED`,
+leases serving for 2 s first, no call failed (3 runs). On the way the test found and fixed a
+cluster-wide breaker (now per slot group), scripts not following a failover (now re-routed once) and
+gRPC collapsing under open-loop overload (now 100 streams per connection). Open loop, leased rule:
+p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; queueing, not failing, past about 25,000/s.
+
 ## Week 6 (Nov 16 to 22): Correctness evidence and freeze
 
 About 16.5 h.
