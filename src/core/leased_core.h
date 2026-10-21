@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -39,6 +40,17 @@ class LeasedCore final : public RateLimiterCore {
   // lease cannot serve (a check bigger than a chunk, a full lease table) goes to the exact path
   // under request.rule; a denial from the lease itself answers kRateLimited.
   void CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done);
+
+  // Shutdown (Week 5): gives the unused tokens of every token-bucket lease back to Redis
+  // (lua/return_lease.lua) and waits up to `wait` for the answers, so a restart does not burn part
+  // of each bucket. Quota leases keep their units: at most one chunk (0.1% of the day) each, and
+  // giving units back to a day would need a script of its own. Call it once checks have stopped.
+  struct Returned {
+    std::uint64_t leases;  // leases that held tokens
+    std::uint64_t tokens;  // tokens sent back
+    std::uint64_t failed;  // returns that failed or did not answer in time (those tokens are lost)
+  };
+  Returned ReturnLeases(std::chrono::milliseconds wait);
 
   // Slow-path counters; a hit touches neither. Lease hit ratio = 1 - parked / checks served.
   struct Stats {

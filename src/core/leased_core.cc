@@ -1,6 +1,9 @@
 #include "core/leased_core.h"
 
 #include <algorithm>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -172,6 +175,36 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
     }
   }
   StartRefill(l, amount);  // no-op if another check already started one; it serves these too
+}
+
+LeasedCore::Returned LeasedCore::ReturnLeases(std::chrono::milliseconds wait) {
+  struct Pending {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::uint64_t left = 0, failed = 0;
+  };
+  auto pending = std::make_shared<Pending>();  // outlives a wait that times out
+  Returned out{0, 0, 0};
+  leases_.ForEach([&](Lease& l) {
+    if (l.rule.algorithm != Algorithm::kTokenBucket) return;
+    const std::int64_t tokens = l.tokens.exchange(0, std::memory_order_relaxed);
+    if (tokens <= 0) return;
+    ++out.leases;
+    out.tokens += static_cast<std::uint64_t>(tokens);
+    {
+      std::lock_guard lock(pending->mu);
+      ++pending->left;
+    }
+    redis_.Return(l.rule, l.key, static_cast<std::uint32_t>(tokens), [pending](const ScriptResult& r) {
+      std::lock_guard lock(pending->mu);
+      if (r.redis_error) ++pending->failed;
+      if (--pending->left == 0) pending->cv.notify_all();
+    });
+  });
+  std::unique_lock lock(pending->mu);
+  pending->cv.wait_for(lock, wait, [&] { return pending->left == 0; });
+  out.failed = pending->failed + pending->left;
+  return out;
 }
 
 }  // namespace ratelimiter

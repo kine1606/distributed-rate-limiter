@@ -59,6 +59,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //   config/rules.yaml) go through CompositeCore.
 //   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
 //        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
+//        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
@@ -203,7 +204,8 @@ int main(int argc, char** argv) {
     return 1;
   }
   spdlog::info("engine: {}, plan cache {} ms", engine, ttl ? ttl : "5000");
-  RateLimiterService service(core);
+  const char* max_in_flight = std::getenv("RL_MAX_IN_FLIGHT");
+  RateLimiterService service(core, max_in_flight ? std::stoll(max_in_flight) : 10'000);
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -223,13 +225,18 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  spdlog::info("shutting down, draining in-flight requests");
+  // Graceful shutdown (Week 5): health NOT_SERVING so load balancers stop sending, drain for up to
+  // 5 s, give unused leased tokens back, then stop Redis. Usage events flush as `usage` goes.
+  spdlog::info("shutting down, draining {} in-flight checks", service.InFlight());
   server->GetHealthCheckService()->SetServingStatus(false);
   server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
   server->Wait();
   if (leased != nullptr) {
     const auto s = leased->GetStats();
     spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
+    const auto r = leased->ReturnLeases(std::chrono::seconds(1));
+    spdlog::info("returned {} unused tokens of {} leases to Redis ({} returns failed)", r.tokens, r.leases,
+                 r.failed);
   }
   if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
   resilient.StopRetries();  // no retry may reach Redis after this

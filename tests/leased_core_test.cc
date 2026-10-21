@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -30,6 +31,17 @@ class ManualBackend final : public RedisBackend {
     ++total_;
   }
   void HGetAll(std::string, HashCallback done) override { done({}); }  // every customer is Free
+  void Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) override {
+    {
+      std::lock_guard lock(mu_);
+      returned_.push_back(rule.name + "/" + std::string(key) + "/" + std::to_string(tokens));
+    }
+    done({.allowed = true});
+  }
+  std::vector<std::string> Returned() {
+    std::lock_guard lock(mu_);
+    return returned_;
+  }
 
   // Answers the oldest pending call; returns what it had asked for.
   std::uint32_t Reply(ScriptResult r) {
@@ -59,6 +71,7 @@ class ManualBackend final : public RedisBackend {
  private:
   std::mutex mu_;
   std::deque<Call> pending_;
+  std::vector<std::string> returned_;
   int total_ = 0;
 };
 
@@ -300,6 +313,28 @@ TEST(LeasedCore, ChunkHalvesAfterTokensSatUnusedAndDoublesWhenTheLeaseRunsDry) {
   EXPECT_TRUE(waiting.result->allowed);
   ASSERT_EQ(changes.size(), 2u);
   EXPECT_EQ(changes[1], std::make_pair(50u, 100u));  // demand outran the chunk: doubled
+}
+
+// Week 5 shutdown: unused leased tokens go back to Redis, so a restart does not burn them.
+TEST(LeasedCore, ReturnLeasesGivesBackWhatEachLeaseStillHolds) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending a, b;
+  a.Start(core, "u1", "burst");
+  b.Start(core, "u2", "open");
+  redis.Reply(Granted());  // 10 tokens each, one taken
+  redis.Reply(Granted());
+  CheckNow(core, "u1", "burst");  // u1 holds 8, u2 holds 9
+
+  const auto r = core.ReturnLeases(std::chrono::seconds(1));
+  EXPECT_EQ(r.leases, 2u);
+  EXPECT_EQ(r.tokens, 17u);
+  EXPECT_EQ(r.failed, 0u);
+  auto returned = redis.Returned();
+  std::sort(returned.begin(), returned.end());
+  EXPECT_EQ(returned, (std::vector<std::string>{"burst/u1/8", "open/u2/9"}));
+  EXPECT_EQ(core.ReturnLeases(std::chrono::seconds(1)).tokens, 0u);  // nothing left to give twice
 }
 
 }  // namespace

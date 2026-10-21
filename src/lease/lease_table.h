@@ -76,6 +76,14 @@ class LeaseTable {
   // Allocates only when it creates.
   Lease* FindOrCreate(const Rule& rule, std::string_view key);
 
+  // Calls `f(lease)` for every lease made so far (shutdown). Safe while checks run: slots only fill.
+  template <typename F>
+  void ForEach(F&& f) {
+    for (std::size_t i = 0; i <= mask_; ++i) {
+      if (Lease* l = slots_[i].load(std::memory_order_acquire)) f(*l);
+    }
+  }
+
  private:
   static constexpr std::size_t kMaxProbe = 64;
   std::size_t mask_;
