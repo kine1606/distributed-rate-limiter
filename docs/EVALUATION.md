@@ -99,8 +99,8 @@ that the quota binds. Each cell: request ids allowed / Redis `used` / usage even
   - Five kills of every connection in 10 s: 2 to 18 policy answers per stream, no errors.
   - A master killed (fault cluster): a third of the customers for 4 to 5 s, no errors.
   - Found and fixed: the client's 50 ms timeout is an idle timeout, so a master answering every call
-    80 ms late was never timed out (p99 251 ms, no fallback). Each attempt now has a deadline, costing
-    3 to 5% on the exact path.
+    80 ms late was never timed out (p99 251 ms, no fallback). Each attempt now has a deadline, on a
+    lock-free queue; its cost in the whole server is within run-to-run noise.
 
 ## 10. Ablation
 

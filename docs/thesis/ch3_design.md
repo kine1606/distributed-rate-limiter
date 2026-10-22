@@ -713,9 +713,13 @@ Week 6 gave one master 80 ms of extra latency under load: its connection was nev
 no call timed out, and that master's customers waited about 250 ms for three slow round trips
 instead of getting their plan's policy. The resilient layer now answers every attempt as timed out
 at its deadline, whichever comes first of the reply and the deadline, and drops the late reply. The
-deadlines wait in one queue in send order, which a timer thread checks in batches. It costs 3 to 5%
-on the exact path, and no deadline was missed at saturation or under open-loop overload at 30,000
-checks per second (`docs/thesis/evidence/faults_2026-10-23.md`). With it, a master 80 ms slow, or
+deadlines wait in a lock-free queue in send order (Vyukov's multi-producer, single-consumer queue),
+which a timer thread empties and checks in batches. In the whole server its cost is within run-to-run
+noise, and no deadline was missed at saturation or under open-loop overload at 30,000 checks per
+second (`docs/thesis/evidence/faults_2026-10-23.md`). A first version guarded the queue with a mutex:
+in isolation that made each call 448 ns and serialised the threads, and the lock-free queue takes it to
+214 ns, with 11 times the throughput at 12 threads
+(`docs/thesis/evidence/verification_and_speedups_2026-10-23.md`). With it, a master 80 ms slow, or
 silent, gives exactly its third of the customers their policy, at a p99 under 4 ms, and recovers
 within a second.
 
@@ -814,7 +818,7 @@ scaling measurements of Week 7, is in Chapter 5 **[Pending: Week 8]**.
 
 | Input | Value | Source (`docs/thesis/evidence/`) |
 | --- | --- | --- |
-| One instance, leased rule, one check per call, 192 calls in flight | 75,652 checks/s, p99 5.79 ms | `ceiling_and_envoy_2026-10-19.md` |
+| One instance, leased rule, one check per call, 192 calls in flight | 89,743 checks/s, p99 4.28 ms (75,652 before the Week 6 tuning) | `verification_and_speedups_2026-10-23.md` |
 | One instance, leased rule, fixed arrival rate: the highest rate tried with p99 below 2 ms | 20,000 checks/s, p99 1.80 ms | `week5_gate_2026-10-21.md` |
 | One instance, leased rule, batches of 10 | 538,605 checks/s, p99 7.51 ms per call | `ceiling_and_envoy_2026-10-19.md` |
 | One instance, exact daily quota (one script per check), 192 in flight | 30,376 checks/s, p99 24.2 ms (one run) | `reliability_2026-10-21.md` |
@@ -856,10 +860,11 @@ plan of 171 bytes, a daily counter and a burst bucket), so 420 MB for 1,000,000 
 ### 3.8.3 Limiter instances
 
 For leased rules the gRPC call, not the limiter, sets the rate of one instance: the leased path ran
-at 95% of the rate of gRPC with no limiter at all (`throughput_2026-10-19.md`). The number of
+at 98% of the rate of gRPC with no limiter at all (89,743 against 91,154 checks/s,
+`verification_and_speedups_2026-10-23.md`). The number of
 instances then depends on the latency the operator accepts.
 
-- **Throughput:** 1,000,000 / 75,652 ≈ 14 instances, each near saturation with a p99 of about 6 ms.
+- **Throughput:** 1,000,000 / 89,743 ≈ 12 instances, each near saturation with a p99 of about 4 ms.
 - **The latency goal G6:** at most 20,000 checks per second per instance keeps the p99 below 2 ms,
   so 50 instances.
 - **Batched calls:** with ten checks per call, 1,000,000 / 538,605 ≈ 2 instances by throughput,
@@ -875,7 +880,7 @@ with today's customer check: its p99 was already 2.14 ms at 5,000 checks per sec
 
 | All checks are | Instances | Masters for the checks | What limits it |
 | --- | --- | --- | --- |
-| a leased rule | 14 (50 for p99 < 2 ms; 2 with batches of 10) | 1 | the gRPC call |
+| a leased rule | 12 (50 for p99 < 2 ms; 2 with batches of 10) | 1 | the gRPC call |
 | customer checks, enterprise plans | at most 50 | 9 | the burst script |
 | customer checks, Free and Pay plans | at most 50 | 17 | two scripts per check |
 

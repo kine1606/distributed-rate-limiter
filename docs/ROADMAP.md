@@ -137,6 +137,9 @@ server counts 10,005 to 10,014 waits and one refill per key per run, 10,000 of t
 first touch of each key during the warm-up), so the 0.3 ms gap is the server's CPU path and run-to-run noise (leased 1.81 to 4.12 ms,
 gRPC alone 1.78 to 2.06 ms over five runs), not Redis. The absolute 4x and the 2 ms p99 need
 separate machines (Week 8 bonus run).
+Update 2026-10-23: the p99 target is met, measured open loop (the Week 5 generator): 0.83 ms at
+10,000/s. The 4x stays out of reach on this laptop, where gRPC with no limiter now runs at 91,154/s
+(3.6x the baseline) and the leased rule at 89,743/s (3.5x), after the Week 6 tuning below.
 
 ## Week 4 (Nov 2 to 8): Business rules and leased quota for large plans
 
@@ -269,7 +272,7 @@ About 16.5 h.
       +80 ms on one master, a silent master, five connection kills, a killed master; each plan follows
       its policy, no call failed, recovery within 1 s (5 s for the killed master). Found and fixed: the
       client's timeout is an idle timeout, so a slow master was never timed out; each attempt now has
-      a 50 ms deadline (3 to 5% on the exact path). `docs/thesis/evidence/faults_2026-10-23.md`.
+      a 50 ms deadline, on a lock-free queue (cost within noise). `docs/thesis/evidence/faults_2026-10-23.md`.
 - [x] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
       Done 2026-10-23 (`tests/eval/noisy_neighbour.sh`): an over-quota flood costs Redis nothing (others'
       p99 4.5 to 14.4 ms, shared CPU); an over-burst flood within quota costs a Redis script per call
@@ -287,6 +290,17 @@ tests green in release, ASan and TSan, tagged `v1.0`. The fault tests found one 
 deadline per Redis call), fixed and measured before the tag; the noisy-neighbour test found one gap
 (a flood over burst costs a Redis call each), recorded as future work.
 
+After the freeze (2026-10-23, fixes and measured changes only;
+`docs/thesis/evidence/verification_and_speedups_2026-10-23.md`):
+- Coverage, measured for the first time (`scripts/coverage.sh`): 95.4% of lines. 11 tests added for
+  the edge cases it showed (full lease table, a 65th leased plan size, an overloaded batch, an open
+  breaker on returns and retries, a killed subscription, a full disk, `ShardedBackend`).
+- The deadline queue made lock-free (Vyukov MPSC): 448 to 214 ns a call, 11x the throughput at 12
+  threads; in the server, within noise.
+- abseil's mutex deadlock detection switched off (found by `perf`): leased rule +24.5% (72,097 to
+  89,743 checks/s), customer rule +14.2%.
+- jemalloc measured (no code change): customer rule +3.7%, leased rule unchanged.
+
 ## Week 7 (Nov 23 to 29): Benchmarks, ablation and measured tuning
 
 About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md).
@@ -298,6 +312,7 @@ About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md
 - [ ] Profile and fix the top one or two bottlenecks (4 h): only what the flamegraph shows, e.g.
       per-thread sub-leases for a hot key, protobuf arenas or pooled callbacks, gRPC thread count.
 - [ ] Build-level wins, each measured (2 h, Should): LTO, PGO, mimalloc or jemalloc via LD_PRELOAD.
+      jemalloc measured early (2026-10-23): customer rule +3.7%, leased rule unchanged. LTO and PGO to do.
 - [ ] (bonus) Redis Functions vs `EVALSHA`, same benchmark.
 - [ ] Thesis: Chapter 4.
 
