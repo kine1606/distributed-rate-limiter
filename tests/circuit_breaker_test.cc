@@ -305,6 +305,30 @@ TEST_F(ResilientBackendTest, ADeadSlotGroupDoesNotStopOtherGroups) {
   EXPECT_EQ(redis.Calls(), 7);  // it went out
 }
 
+TEST_F(ResilientBackendTest, AnOpenBreakerAnswersTokenReturnsAtOnce) {
+  redis.script = {{.redis_error = true}};
+  for (int i = 0; i < 6; ++i) EvalAndWait(bucket);
+  ASSERT_EQ(breaker.state(), State::kOpen);
+  std::promise<ScriptResult> p;
+  backend.Return(bucket, "k", 3, [&p](const ScriptResult& r) { p.set_value(r); });
+  EXPECT_TRUE(p.get_future().get().redis_error);
+  std::lock_guard lock(redis.mu);
+  EXPECT_EQ(redis.returns, 0);  // Redis was not asked
+}
+
+// The timeout itself opened the breaker: the scheduled retry finds it open and is not sent.
+TEST(ResilientRetry, ATimedOutPlanReadIsNotRetriedOnceItsBreakerOpened) {
+  ScriptedRedis redis;
+  redis.hashes = {HashResult{.redis_error = true, .timed_out = true}};
+  SlotBreakers breakers({.failure_threshold = 1, .open_for = milliseconds(60'000)});
+  ResilientBackend backend(redis, breakers, {.max_retries = 2, .base = std::chrono::microseconds(100)});
+  std::promise<HashResult> p;
+  backend.HGetAll("{cust:1}:plan", [&p](const HashResult& h) { p.set_value(h); });
+  EXPECT_TRUE(p.get_future().get().redis_error);
+  std::lock_guard lock(redis.mu);
+  EXPECT_EQ(redis.reads, 1);
+}
+
 // ---- Per-attempt deadline (Week 6) ----
 
 // Holds the callbacks of the first `hold` calls, as a slow or silent Redis would; later calls are
@@ -447,6 +471,66 @@ TEST(ResilientDeadline, StoppingAnswersAttemptsStillWaitingForTheirDeadline) {  
   EXPECT_TRUE(f.get().timed_out);
   redis.AnswerHeld({.allowed = true});
   EXPECT_EQ(a.Count(), 1);
+}
+
+// The deadline queue is lock-free (many threads add, the timer thread takes out). Eight threads send
+// attempts that Redis answers at once, answers late from another thread, or never answers: each must
+// be answered exactly once, by its reply or by its deadline. Run under TSan too.
+TEST(ResilientDeadline, ManyThreadsEveryAttemptAnsweredExactlyOnce) {
+  class MixedRedis final : public RedisBackend {
+   public:
+    using RedisBackend::Eval;
+    void Eval(const Rule&, std::string_view, std::uint32_t requested, std::string_view, ScriptCallback done) override {
+      if (requested % 3 == 0) {
+        done({.allowed = true});  // at once
+      } else if (requested % 3 == 1) {
+        std::lock_guard lock(mu);
+        late.push_back(std::move(done));  // later, from another thread
+      }  // else never: only the deadline answers
+    }
+    void HGetAll(std::string, HashCallback done) override { done({}); }
+    std::mutex mu;
+    std::vector<ScriptCallback> late;
+  } redis;
+  SlotBreakers breakers{{.failure_threshold = 1'000'000, .open_for = milliseconds(1)}};
+  ResilientBackend backend(redis, breakers, {.max_retries = 0, .deadline = milliseconds(5)});
+  constexpr int kThreads = 8, kPerThread = 3000;
+  std::vector<std::atomic<int>> answers(kThreads * kPerThread);
+  std::atomic<bool> sending{true};
+  std::thread replier([&] {  // answers the held calls while the senders run, and once more after
+    for (bool last = false; !last;) {
+      last = !sending.load();
+      std::vector<ScriptCallback> batch;
+      {
+        std::lock_guard lock(redis.mu);
+        batch.swap(redis.late);
+      }
+      for (auto& d : batch) d({.allowed = true});
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+  });
+  std::vector<std::thread> senders;
+  for (int t = 0; t < kThreads; ++t) {
+    senders.emplace_back([&, t] {
+      for (int i = 0; i < kPerThread; ++i) {
+        const int id = t * kPerThread + i;
+        backend.Eval(kQuota, "k" + std::to_string(id % 97), static_cast<std::uint32_t>(id),
+                     [&answers, id](const ScriptResult&) { answers[static_cast<std::size_t>(id)].fetch_add(1); });
+      }
+    });
+  }
+  for (auto& s : senders) s.join();
+  std::this_thread::sleep_for(milliseconds(50));  // past every deadline
+  sending = false;
+  replier.join();
+  int never = 0, twice = 0;
+  for (auto& a : answers) {
+    never += a.load() == 0;
+    twice += a.load() > 1;
+  }
+  EXPECT_EQ(never, 0);
+  EXPECT_EQ(twice, 0);
+  EXPECT_GT(backend.DeadlinesMissed(), 0u);
 }
 
 TEST(ResilientDeadline, WithoutADeadlineOnlyTheReplyAnswers) {

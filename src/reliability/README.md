@@ -102,9 +102,12 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
 - Deadline (Week 6): the client's socket timeout is an idle timeout per connection, re-armed by any
   reply, so a master answering every call 80 ms late under load was never timed out (p99 251 ms, no
   failure policy). `ResilientBackend` now answers an attempt as timed out at its deadline (the same
-  50 ms) and drops the late reply; deadlines wait in one queue in send order, which the timer thread
-  checks in batches every 5 ms or more. Cost: 3 to 5% on the exact path; no false timeout at
-  saturation or at 30,000/s open loop (`rl_redis_deadline_misses_total`).
+  50 ms) and drops the late reply. Deadlines wait in a lock-free queue in send order (Vyukov's
+  intrusive MPSC queue: adding one is an atomic exchange), which the timer thread empties and checks
+  in batches every 5 ms or more; each attempt is one allocation holding its own answer. A first
+  version with a mutex cost 448 ns a call and serialised threads (`bench/bench_resilient`); lock-free
+  it is 214 ns, 11 times the throughput at 12 threads, and within noise in the whole server. No false
+  timeout at saturation or at 30,000/s open loop (`rl_redis_deadline_misses_total`).
 
 ## Done when
 

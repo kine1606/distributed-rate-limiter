@@ -4,7 +4,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -68,12 +67,20 @@ class ResilientBackend final : public RedisBackend {
  private:
   struct ScriptCall;
   struct HashCall;
-  struct Pending;  // one attempt: answered by its reply or by its deadline, whichever comes first
+  // An attempt with a deadline: answered by its reply or by its deadline, whichever comes first.
+  // Attempts wait in a lock-free queue (Vyukov's intrusive multi-producer, single-consumer queue):
+  // adding one is an atomic exchange, and only the timer thread takes them out.
+  struct Pending;
+  template <typename Result, typename Answer>
+  struct Attempt;
 
-  // Registers an attempt's deadline: `expire` answers it as timed out unless the reply came first.
-  // nullptr without a deadline, or once stopped: then only the reply answers.
-  std::shared_ptr<Pending> Watch(std::function<void()> expire);
-  static bool First(const std::shared_ptr<Pending>& p);  // claims the answer; false if already given
+  // Sends one attempt: `send(reply)` calls the inner backend with `reply` as its callback. With a
+  // deadline the attempt is also queued, and the first of its reply and its deadline calls `answer`.
+  template <typename Result, typename Answer, typename SendFn>
+  void Watch(Answer answer, SendFn send);
+  void Push(Pending* p);    // any thread
+  Pending* Pop();           // the timer thread only (or after it stopped); nullptr if none is ready
+  bool QueueEmpty() const;  // likewise
 
   void Send(const std::shared_ptr<ScriptCall>& c);
   void Send(const std::shared_ptr<HashCall>& c);
@@ -88,14 +95,18 @@ class ResilientBackend final : public RedisBackend {
   const RetryOptions retry_;
   const StateObserver on_change_;
 
-  std::mutex mu_;  // retries, and one deque append per attempt when a deadline is set
+  // The deadline queue. One fixed deadline makes send order the due order, so the timer thread keeps
+  // what it took out in send order and checks it in batches (kSweep), not once per attempt.
+  const std::unique_ptr<Pending> stub_;  // the queue's placeholder node
+  std::atomic<Pending*> head_;           // the last attempt added
+  Pending* tail_;                        // the next to take out
+  std::atomic<bool> idle_{false};        // the timer sleeps until woken: whoever adds an attempt wakes it
+  std::atomic<std::uint64_t> deadlines_missed_{0};
+
+  std::mutex mu_;  // retries (they follow timeouts, so they are rare) and the timer's sleep
   std::condition_variable_any wake_;
   std::multimap<std::chrono::steady_clock::time_point, std::function<void(bool)>> due_;
-  // Deadlines in send order: one fixed deadline makes this order their due order, so the timer only
-  // looks at the front. It checks them in batches (kSweep), not once per attempt.
-  std::deque<std::pair<std::chrono::steady_clock::time_point, std::shared_ptr<Pending>>> deadlines_;
-  std::atomic<std::uint64_t> deadlines_missed_{0};
-  bool stopped_ = false;
+  std::atomic<bool> stopped_{false};
   std::jthread timer_;  // last: starts after the rest is set up
 };
 
