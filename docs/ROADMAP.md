@@ -253,6 +253,18 @@ About 16.5 h.
 Gate: all tests green; measured over-admission at or below the derived bound.
 Cut first: noisy neighbour, then connection-drop faults.
 
+Status (2026-10-22, paused at the usage limit; resume here):
+- Done: quota accuracy test, 20 of 20 runs exact (`docs/thesis/evidence/quota_accuracy_2026-10-22.md`,
+  EVALUATION test 1 filled). New rule field `lease_chunk_pct` (chunk cap, default 10%).
+- Running when paused: `tests/eval/burst_accuracy.sh` (RUNS=5) into `results/2026-10-22_burst_accuracy/`.
+  First round: idle-then-burst measured 34.7 / 189.1 / 381.4 tokens against the model's 34.4 / 188.8 /
+  381.4 and the worst case 40 / 200 / 400 (caps 1%, 5%, 10%); steady overload about 0. Next: evidence
+  file, figure (matplotlib; blue #2a78d6 measured, orange #eb6834 model, grey dashed N x C), EVALUATION
+  tests 4 and 12. If the run did not finish, rerun it.
+- Not run yet: `tests/eval/flood_cardinality.sh` (tests 5 and 6), written but untested.
+- Then: full suite plus ASan and TSan (the `lease_chunk_pct` change has only its unit tests run), tick the
+  Week 6 items, update Chapter 3's [Pending: Week 6] markers, rebuild the dashboard, commit. Unpushed.
+
 ## Week 7 (Nov 23 to 29): Benchmarks, ablation and measured tuning
 
 About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md).
