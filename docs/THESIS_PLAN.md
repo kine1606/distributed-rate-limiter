@@ -148,7 +148,7 @@ Cut first if late: leased quota (keep all quotas strict and present it as the fi
 - [x] **Health readiness and SIGHUP reload (2 h).** Readiness follows the breaker; a bad config file is rejected and the old rules stay live.
 - [x] **Prometheus metrics (2 h).** Outcomes per plan, latency per path (lease, strict, deny cache), Redis latency, lease hit ratio, batch size and flush reason, breaker state, queue depth.
 - [x] **Open-loop load generator (3 h).** Sends at a fixed arrival rate and measures latency from the time each call was scheduled, not when it was sent. A closed-loop tool slows down when the server stalls and hides the stall from p99 (coordinated omission). Check whether `ghz --rps` is enough first; write the small C++ client only if not. Record latency in log-scale buckets; report p50, p99, p999.
-- [ ] Thesis: Chapter 3 draft with the architecture diagram, accuracy-bound derivation and failure-mode table.
+- [x] Thesis: Chapter 3 draft with the architecture diagram, accuracy-bound derivation and failure-mode table.
 
 Gate: kill a Redis master during load and observe the documented behaviour per plan; latency at a fixed rate is measured open-loop.
 
@@ -303,7 +303,7 @@ a week, because Weeks 4 to 7 are the heaviest.
 - [ ] Oct 25: strict engine end to end; free customer stopped at exactly 200; baseline measured; Chapters 1 and 2 drafted
 - [ ] Nov 1: lease fast path with single-flight, adaptive chunks and adaptive batcher; seeded test harness passing
 - [x] Nov 8: overage policies, request ID, deny cache, usage events and leased quota working (done Oct 19)
-- [ ] Nov 15: reliability features, metrics and the open-loop load generator; Chapter 3 drafted
+- [x] Nov 15: reliability features, metrics and the open-loop load generator; Chapter 3 drafted (done Oct 22)
 - [ ] Nov 22: feature freeze; TSan and ASan clean; property-based, accuracy and fault tests pass; bound model agrees with measurement
 - [ ] Nov 29: benchmark matrix, ablation study and profile done; Chapter 4 drafted
 - [ ] Dec 6: scalability model, cost model and extrapolation; full thesis draft

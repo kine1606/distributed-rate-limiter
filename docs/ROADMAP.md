@@ -219,9 +219,10 @@ About 16 h.
       has the same blind spot). Server frozen 0.5 s at 10,000/s: open-loop p99 480.8 ms, closed-loop
       5.8 ms. Leased rule open loop (gate run): p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; past about
       25,000/s calls queue (p99 above 100 ms) instead of failing.
-- [ ] Thesis: Chapter 3 draft.
-      In progress: 3.1.3, 3.4, 3.5 and 3.7 (failure policies and failure modes, written 2026-10-21)
-      are drafted; 3.1, 3.2, 3.3, 3.6 and 3.8 to do.
+- [x] Thesis: Chapter 3 draft.
+      Done 2026-10-22: 3.1 to 3.8 drafted (`docs/thesis/ch3_design.md`), with the architecture
+      diagram, the bound's derivation, the failure-mode table and the capacity estimate. About
+      10,000 words, longer than the outline's 12 to 14 pages: trim in the Week 8 editing pass.
 
 Gate: kill a Redis master under load and observe the documented behaviour per plan; latency at a
 fixed rate measured open-loop. Cut first: SIGHUP reload.
