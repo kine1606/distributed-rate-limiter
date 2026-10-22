@@ -501,7 +501,8 @@ and grants tokens to leases on request, atomically.
    cost of a parked check, if larger). After it lands, the lease holds at most one chunk.
 5. **Large checks.** A check whose cost exceeds the chunk cap C skips the lease and is checked in
    Redis directly, on the same bucket.
-6. **Adaptive chunk.** The chunk starts at the cap C = max(1, ⌊limit / 10⌋) and changes once per full
+6. **Adaptive chunk.** The chunk starts at the cap C = max(1, ⌊limit × p / 100⌋), where p is the rule's
+   `lease_chunk_pct` (10 by default), and changes once per full
    refill: it doubles when checks found the lease dry while the refill was out, because demand
    outran one chunk within one round trip, and halves when the previous chunk lasted more than ten
    seconds, because its tokens sat unused where no other instance could use them. It never leaves

@@ -18,9 +18,13 @@ The tests check the two halves of the thesis claim separately: exact per-custome
 - **Script:** `tests/eval/quota_accuracy.sh`
 - **Hint:** run it 20 times, not 5. A race that shows up once in 20 runs is still a bug.
 
-| Run | Free allowed | Pay allowed | Duplicates counted |
-| --- | --- | --- | --- |
-| | | | |
+Result (2026-10-22, 20 runs, `docs/thesis/evidence/quota_accuracy_2026-10-22.md`): exact in every
+run. The Pay plan's grace of 10% makes its allowance 2,200; the plans' burst limits were raised so
+that the quota binds. Each cell: request ids allowed / Redis `used` / usage events.
+
+| Runs | Free allowed (200) | Pay allowed (2,200) | Sent twice at once | Duplicates counted |
+| --- | --- | --- | --- | --- |
+| 1 to 20, every run | 200 / 200 / 200 | 2,200 / 2,200 / 2,200 | 9,608 in all (26 to 54 Free, 423 to 480 Pay per run) | 0 |
 
 ## 2. Plan changes and reset
 

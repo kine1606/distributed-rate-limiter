@@ -79,7 +79,8 @@ struct ChunkPolicy {
 5. **Chunk sizing (done, `chunk_policy.h`).** Starts at the cap, not `min_chunk`: only a dry lease
    doubles a chunk, so a moderately busy key started low would stay near the minimum (one Redis call
    per 8 checks instead of per 25). Doubles when checks found the lease dry while its refill was out; halves when the last
-   chunk lasted more than 10 s; stays within [min(8, cap), cap]. Refills top the lease up to the
+   chunk lasted more than 10 s; stays within [min(8, cap), cap]. The cap is the rule's `lease_chunk_pct` of
+   the limit (default 10%; Week 6), the knob of the bound N × C. Refills top the lease up to the
    chunk instead of adding a chunk, and checks costlier than the cap go to Redis directly: both keep
    an instance at no more than one chunk, which the bound needs (DESIGN.md section 6).
 6. **Waiter bound and deadline.** If the waiter queue is full, answer `RESOURCE_EXHAUSTED`. If a

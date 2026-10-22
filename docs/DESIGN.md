@@ -288,7 +288,8 @@ instance has already taken from the shared Redis bucket of a (rule, key).
 - **Adaptive chunk:** each lease starts at the cap and changes once per full refill. It doubles when
   checks found the lease dry while the refill was out (demand outran the chunk within one round
   trip) and halves when the previous chunk lasted more than 10 s (its tokens sat unused, invisible
-  to other instances). It always stays within [min(8, C), C], with C = max(1, ⌊limit / 10⌋). Every
+  to other instances). It always stays within [min(8, C), C], with C = max(1, ⌊limit × p / 100⌋) for the rule's
+  `lease_chunk_pct` p (default 10). Every
   change can be logged (`RL_CHUNK_LOG=<file>`) for the chunk-versus-demand plot.
 - **Redis says no:** the lease denies locally until the retry time Redis returned.
 

@@ -54,6 +54,14 @@ TEST(RuleConfig, RejectsZeroLimit) {
   EXPECT_THROW(ratelimiter::LoadRules(p), std::runtime_error);
 }
 
+TEST(RuleConfig, LeaseChunkPctDefaultsToTenAndStaysWithinOneToHundred) {
+  const std::string tb = "rules:\n  b:\n    limit: 1000\n    refill_per_sec: 1\n";
+  EXPECT_EQ(ratelimiter::LoadRules(WriteTemp("rl_pct_default.yaml", tb)).at("b").lease_chunk_pct, 10u);
+  EXPECT_EQ(ratelimiter::LoadRules(WriteTemp("rl_pct_5.yaml", tb + "    lease_chunk_pct: 5\n")).at("b").lease_chunk_pct, 5u);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_pct_0.yaml", tb + "    lease_chunk_pct: 0\n")), std::runtime_error);
+  EXPECT_THROW(ratelimiter::LoadRules(WriteTemp("rl_pct_101.yaml", tb + "    lease_chunk_pct: 101\n")), std::runtime_error);
+}
+
 TEST(RuleConfig, RejectsUnknownAlgorithm) {
   auto p = WriteTemp("rl_bad_algo.yaml", "rules:\n  bad:\n    algorithm: leaky\n    limit: 5\n");
   EXPECT_THROW(ratelimiter::LoadRules(p), std::runtime_error);

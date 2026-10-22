@@ -33,7 +33,9 @@ rules:
 Algorithms: `token_bucket` (needs `refill_per_sec` unless `limit_from: plan.burst`), `fixed_window`
 and `sliding_window` (need `window_ms`), `quota` (needs `strict: true`; `limit` or
 `limit_from: plan.daily`). `limit_from` must fit the algorithm: `plan.daily` only with `quota`,
-`plan.burst` only with `token_bucket`. `Algorithm` values index the script and key-suffix tables in
+`plan.burst` only with `token_bucket`. A leased rule may set `lease_chunk_pct` (1 to 100, default 10): the
+largest share of the limit one instance holds, so the bound limit + N × C is chosen per rule (Week 6).
+`Algorithm` values index the script and key-suffix tables in
 `src/redis/redispp_backend.cc` and `src/redis/keys.h`, so new ones are appended.
 
 Not built from the original sketch: `refill_from` (`plan.burst` always brings `plan.refill`) and the

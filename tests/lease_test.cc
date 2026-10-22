@@ -86,6 +86,14 @@ TEST(ChunkPolicy, StaysBetweenTheMinimumAndTenPercentOfTheLimit) {
   EXPECT_EQ(ChunkMin(tiny), 1u);
 }
 
+// The cap is the knob of the accuracy bound N x C (Chapter 3, 3.5.3), so a rule may set it.
+TEST(ChunkPolicy, ARuleMaySetItsCapInPercentOfTheLimit) {
+  EXPECT_EQ(ChunkCap(Rule{.name = "r", .limit = 1000, .refill_per_sec = 1, .lease_chunk_pct = 1}), 10u);
+  EXPECT_EQ(ChunkCap(Rule{.name = "r", .limit = 1000, .refill_per_sec = 1, .lease_chunk_pct = 5}), 50u);
+  EXPECT_EQ(ChunkCap(Rule{.name = "r", .limit = 4'000'000'000u, .refill_per_sec = 1, .lease_chunk_pct = 100}),
+            4'000'000'000u);  // no overflow on the way
+}
+
 // Leased quota (Week 4): 0.1% of the daily limit, so 4 instances stay within 0.4% of a day.
 TEST(ChunkPolicy, ALeasedDailyQuotaTakesChunksOfOneTenthOfAPercent) {
   const Rule enterprise{.name = "q", .algorithm = Algorithm::kQuota, .limit = 1'000'000};
