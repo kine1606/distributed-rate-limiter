@@ -305,6 +305,162 @@ TEST_F(ResilientBackendTest, ADeadSlotGroupDoesNotStopOtherGroups) {
   EXPECT_EQ(redis.Calls(), 7);  // it went out
 }
 
+// ---- Per-attempt deadline (Week 6) ----
+
+// Holds the callbacks of the first `hold` calls, as a slow or silent Redis would; later calls are
+// answered at once with `reply`. The test answers held calls itself, late.
+class HoldingRedis final : public RedisBackend {
+ public:
+  explicit HoldingRedis(int hold) : hold_(hold) {}
+  using RedisBackend::Eval;
+  void Eval(const Rule&, std::string_view, std::uint32_t, std::string_view, ScriptCallback done) override { Take(std::move(done)); }
+  void Return(const Rule&, std::string_view, std::uint32_t, ScriptCallback done) override { Take(std::move(done)); }
+  void HGetAll(std::string, HashCallback done) override {
+    std::unique_lock lock(mu);
+    if (calls++ < hold_) {
+      held_hashes.push_back(std::move(done));
+      return;
+    }
+    lock.unlock();
+    done({});
+  }
+  void AnswerHeld(const ScriptResult& r) {  // the late replies
+    std::vector<ScriptCallback> held;
+    {
+      std::lock_guard lock(mu);
+      held.swap(held_scripts);
+    }
+    for (auto& cb : held) cb(r);
+  }
+
+  std::mutex mu;
+  int calls = 0;
+  ScriptResult reply{.allowed = true, .remaining = 7};
+  std::vector<ScriptCallback> held_scripts;
+  std::vector<HashCallback> held_hashes;
+
+ private:
+  void Take(ScriptCallback done) {
+    std::unique_lock lock(mu);
+    if (calls++ < hold_) {
+      held_scripts.push_back(std::move(done));
+      return;
+    }
+    lock.unlock();
+    done(reply);
+  }
+  const int hold_;
+};
+
+// Counts the answers one call gets and keeps the first.
+struct Answers {
+  std::mutex mu;
+  int count = 0;
+  std::promise<ScriptResult> first;
+  ScriptCallback Callback() {
+    return [this](const ScriptResult& r) {
+      std::lock_guard lock(mu);
+      if (count++ == 0) first.set_value(r);
+    };
+  }
+  int Count() {
+    std::lock_guard lock(mu);
+    return count;
+  }
+};
+
+const Rule kBucket{.name = "b", .limit = 10, .refill_per_sec = 1};
+const Rule kQuota{.name = "q", .algorithm = Algorithm::kQuota, .limit = 10};
+
+// The Week 6 fault test found it: hiredis's timeout is an idle timeout per connection, so a master
+// answering every call 80 ms late under load never tripped it. The deadline bounds each attempt.
+TEST(ResilientDeadline, AnAttemptRedisDoesNotAnswerIsTimedOutAtItsDeadlineAndItsLateReplyDropped) {
+  HoldingRedis redis(1);
+  SlotBreakers breakers{{.failure_threshold = 1, .open_for = milliseconds(60'000)}};
+  ResilientBackend backend(redis, breakers, {.max_retries = 0, .deadline = milliseconds(20)});
+  Answers a;
+  const auto start = std::chrono::steady_clock::now();
+  backend.Eval(kQuota, "k", 1, a.Callback());
+  auto f = a.first.get_future();
+  ASSERT_EQ(f.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  const ScriptResult r = f.get();
+  EXPECT_GE(std::chrono::steady_clock::now() - start, milliseconds(20));
+  EXPECT_TRUE(r.redis_error);
+  EXPECT_TRUE(r.timed_out);
+  EXPECT_EQ(breakers.ForEntity("k").state(), State::kOpen);  // counted as a failure
+  EXPECT_EQ(backend.DeadlinesMissed(), 1u);
+  redis.AnswerHeld({.allowed = true});  // the reply arrives after all
+  EXPECT_EQ(a.Count(), 1);              // dropped: the caller had its answer
+  EXPECT_EQ(breakers.ForEntity("k").state(), State::kOpen);  // and it does not count as a success
+}
+
+TEST(ResilientDeadline, AReplyBeforeTheDeadlineWinsAndTheDeadlineThenDoesNothing) {
+  HoldingRedis redis(0);
+  SlotBreakers breakers;
+  ResilientBackend backend(redis, breakers, {.max_retries = 0, .deadline = milliseconds(20)});
+  Answers a;
+  backend.Eval(kQuota, "k", 1, a.Callback());
+  EXPECT_EQ(a.first.get_future().get().remaining, 7u);
+  std::this_thread::sleep_for(milliseconds(60));  // well past the deadline
+  EXPECT_EQ(a.Count(), 1);
+  EXPECT_EQ(backend.DeadlinesMissed(), 0u);
+}
+
+TEST(ResilientDeadline, AnAttemptThatMissesItsDeadlineIsRetriedWhereSafe) {
+  HoldingRedis redis(1);  // the first attempt hangs, the retry is answered
+  SlotBreakers breakers;
+  ResilientBackend backend(redis, breakers, {.max_retries = 2, .base = std::chrono::microseconds(100),
+                                             .deadline = milliseconds(20)});
+  Answers a;
+  backend.Eval(kBucket, "k", 1, a.Callback());
+  const ScriptResult r = a.first.get_future().get();
+  EXPECT_FALSE(r.redis_error);
+  EXPECT_EQ(r.remaining, 7u);
+  EXPECT_EQ(redis.calls, 2);
+  EXPECT_EQ(backend.DeadlinesMissed(), 1u);
+  redis.AnswerHeld({.allowed = true, .remaining = 1});  // the first attempt's late reply
+  EXPECT_EQ(a.Count(), 1);
+}
+
+TEST(ResilientDeadline, APlanReadRedisDoesNotAnswerTimesOut) {
+  HoldingRedis redis(1);
+  SlotBreakers breakers;
+  ResilientBackend backend(redis, breakers, {.max_retries = 0, .deadline = milliseconds(20)});
+  std::promise<HashResult> p;
+  backend.HGetAll("{cust:1}:plan", [&p](const HashResult& h) { p.set_value(h); });
+  auto f = p.get_future();
+  ASSERT_EQ(f.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  const HashResult h = f.get();
+  EXPECT_TRUE(h.redis_error);
+  EXPECT_TRUE(h.timed_out);
+}
+
+TEST(ResilientDeadline, StoppingAnswersAttemptsStillWaitingForTheirDeadline) {  // at shutdown nobody waits
+  HoldingRedis redis(1);
+  SlotBreakers breakers;
+  ResilientBackend backend(redis, breakers, {.max_retries = 0, .deadline = std::chrono::seconds(30)});
+  Answers a;
+  backend.Eval(kQuota, "k", 1, a.Callback());
+  backend.StopRetries();
+  auto f = a.first.get_future();
+  ASSERT_EQ(f.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_TRUE(f.get().timed_out);
+  redis.AnswerHeld({.allowed = true});
+  EXPECT_EQ(a.Count(), 1);
+}
+
+TEST(ResilientDeadline, WithoutADeadlineOnlyTheReplyAnswers) {
+  HoldingRedis redis(1);
+  SlotBreakers breakers;
+  ResilientBackend backend(redis, breakers, {.max_retries = 0});
+  Answers a;
+  backend.Eval(kQuota, "k", 1, a.Callback());
+  std::this_thread::sleep_for(milliseconds(30));
+  EXPECT_EQ(a.Count(), 0);
+  redis.AnswerHeld({.allowed = true});
+  EXPECT_EQ(a.Count(), 1);
+}
+
 // Slots as Redis computes them (redis.io cluster specification and CLUSTER KEYSLOT).
 TEST(SlotBreakers, HashSlotFollowsRedis) {
   EXPECT_EQ(HashSlot("123456789"), 12739);  // CRC16/XMODEM check value 0x31C3

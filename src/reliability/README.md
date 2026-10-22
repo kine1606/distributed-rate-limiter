@@ -1,6 +1,6 @@
 # Reliability
 
-> Week 5 · Flow step A12 · Status: Week 5 done: `circuit_breaker.h` (lock-free, fake-clock tests), `resilient_backend.{h,cc}` (breaker gating, retries of timeouts with jitter); failure policy per plan in `src/core/composite_core.cc`. Measurements: `docs/thesis/evidence/reliability_2026-10-21.md`
+> Week 5 · Flow step A12 · Status: Week 5 done: `circuit_breaker.h` (lock-free, fake-clock tests), `resilient_backend.{h,cc}` (breaker gating, retries of timeouts with jitter); failure policy per plan in `src/core/composite_core.cc`. Measurements: `docs/thesis/evidence/reliability_2026-10-21.md`. Week 6: a deadline per attempt (`RetryOptions::deadline`), found missing by the fault test (`docs/thesis/evidence/faults_2026-10-23.md`)
 
 ## What this module does
 
@@ -86,9 +86,9 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
   reads, token-bucket and window scripts (a repeat takes one more token: stricter). Quota scripts
   are never retried: a repeat counts twice, or with a request id comes back `replayed` and the
   admitted call is never recorded for billing (found by the code review). Token returns neither.
-- The breaker counts consecutive failures of an unreachable or slow Redis across the cluster, so one
-  dead master among healthy ones does not open it; its calls fail by timeout (50 ms) or at once when
-  the connection is refused. An error reply (`MOVED`, a script error) is not a failure: Redis
+- There is one breaker per group of 256 hash slots (`slot_breakers.h`): one breaker for the whole
+  cluster opened for every customer when a master died (Week 5 gate). A dead master's calls fail by
+  their deadline (50 ms) or at once when the connection is refused. An error reply (`MOVED`, a script error) is not a failure: Redis
   answered. While open, only the probe can close it (a late success from before is ignored). It
   reports opening and closing, not every failed probe.
 - Code review of the Week 5 commits (the `code-review` skill, 10 findings): fixed quota retries,
@@ -99,6 +99,12 @@ inline CheckResult ApplyFailurePolicy(const Plan& p) {
 - Timeout: 10 ms raised false timeouts under load with one Redis client (the I/O thread also
   finishes gRPC calls), and one timeout drops a whole connection. Four clients
   (`src/redis/sharded_backend.h`) and 50 ms gave none; see `docs/thesis/evidence/reliability_2026-10-21.md`.
+- Deadline (Week 6): the client's socket timeout is an idle timeout per connection, re-armed by any
+  reply, so a master answering every call 80 ms late under load was never timed out (p99 251 ms, no
+  failure policy). `ResilientBackend` now answers an attempt as timed out at its deadline (the same
+  50 ms) and drops the late reply; deadlines wait in one queue in send order, which the timer thread
+  checks in batches every 5 ms or more. Cost: 3 to 5% on the exact path; no false timeout at
+  saturation or at 30,000/s open loop (`rl_redis_deadline_misses_total`).
 
 ## Done when
 

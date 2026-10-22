@@ -86,7 +86,7 @@ sw::redis::ConnectionOptions Options(const std::string& host, int port, std::chr
   o.host = host;
   o.port = port;
   o.connect_timeout = timeout;  // no longer than a call: a dead node must fail fast, not on connect
-  o.socket_timeout = timeout;   // also bounds each async command
+  o.socket_timeout = timeout;   // an idle timeout per connection, not per command: ResilientBackend adds the deadline
   return o;
 }
 

@@ -16,6 +16,17 @@ struct ResilientBackend::ScriptCall {
   int retries = 0;
 };
 
+struct ResilientBackend::Pending {
+  std::atomic<bool> answered{false};
+  std::function<void()> expire;
+};
+
+namespace {
+const ScriptResult kScriptTimedOut{.redis_error = true, .timed_out = true};
+const HashResult kHashTimedOut{.redis_error = true, .timed_out = true};
+constexpr auto kSweep = std::chrono::milliseconds(5);  // how often deadlines are checked, at most
+}  // namespace
+
 struct ResilientBackend::HashCall {
   std::string key;
   HashCallback done;
@@ -33,15 +44,39 @@ ResilientBackend::~ResilientBackend() { StopRetries(); }
 
 void ResilientBackend::StopRetries() {
   std::multimap<std::chrono::steady_clock::time_point, std::function<void(bool)>> left;
+  decltype(deadlines_) waiting;
   {
     std::lock_guard lock(mu_);
     if (stopped_) return;
     stopped_ = true;
     left.swap(due_);
+    waiting.swap(deadlines_);
   }
   timer_.request_stop();
   if (timer_.joinable()) timer_.join();
   for (auto& [when, retry] : left) retry(false);
+  for (auto& [when, p] : waiting) {
+    if (First(p)) p->expire();
+  }
+}
+
+std::shared_ptr<ResilientBackend::Pending> ResilientBackend::Watch(std::function<void()> expire) {
+  if (retry_.deadline.count() == 0) return nullptr;
+  auto p = std::make_shared<Pending>();
+  p->expire = std::move(expire);
+  bool first;
+  {
+    std::lock_guard lock(mu_);
+    if (stopped_) return nullptr;
+    first = deadlines_.empty();
+    deadlines_.emplace_back(std::chrono::steady_clock::now() + retry_.deadline, p);
+  }
+  if (first) wake_.notify_one();  // otherwise the timer is already waiting for an earlier deadline
+  return p;
+}
+
+bool ResilientBackend::First(const std::shared_ptr<Pending>& p) {
+  return p == nullptr || !p->answered.exchange(true, std::memory_order_acq_rel);
 }
 
 void ResilientBackend::Account(CircuitBreaker& b, bool failed) {
@@ -61,9 +96,13 @@ void ResilientBackend::Eval(const Rule& rule, std::string_view key, std::uint32_
   // A timed-out quota script may have counted the call; even with a request id, the retry would get
   // the stored answer marked replayed, and the admitted call would never be recorded for billing.
   if (rule.algorithm == Algorithm::kQuota || retry_.max_retries == 0) {
-    inner_.Eval(rule, key, requested, request_id, [this, &breaker, done = std::move(done)](const ScriptResult& r) {
+    auto answer = std::make_shared<ScriptCallback>([this, &breaker, done = std::move(done)](const ScriptResult& r) {
       Account(breaker, r);
       done(r);
+    });
+    auto pending = Watch([answer] { (*answer)(kScriptTimedOut); });
+    inner_.Eval(rule, key, requested, request_id, [pending = std::move(pending), answer](const ScriptResult& r) {
+      if (First(pending)) (*answer)(r);  // else the deadline answered: this reply is late
     });
     return;
   }
@@ -72,7 +111,7 @@ void ResilientBackend::Eval(const Rule& rule, std::string_view key, std::uint32_
 }
 
 void ResilientBackend::Send(const std::shared_ptr<ScriptCall>& c) {
-  inner_.Eval(c->rule, c->key, c->requested, c->request_id, [this, c](const ScriptResult& r) {
+  const auto answer = [this, c](const ScriptResult& r) {
     Account(*c->breaker, r);
     if (r.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
@@ -85,6 +124,10 @@ void ResilientBackend::Send(const std::shared_ptr<ScriptCall>& c) {
       return;
     }
     c->done(r);
+  };
+  auto pending = Watch([answer] { answer(kScriptTimedOut); });
+  inner_.Eval(c->rule, c->key, c->requested, c->request_id, [pending = std::move(pending), answer](const ScriptResult& r) {
+    if (First(pending)) answer(r);
   });
 }
 
@@ -94,9 +137,13 @@ void ResilientBackend::Return(const Rule& rule, std::string_view key, std::uint3
     done({.redis_error = true});
     return;
   }
-  inner_.Return(rule, key, tokens, [this, &breaker, done = std::move(done)](const ScriptResult& r) {
+  auto answer = std::make_shared<ScriptCallback>([this, &breaker, done = std::move(done)](const ScriptResult& r) {
     Account(breaker, r);
     done(r);
+  });
+  auto pending = Watch([answer] { (*answer)(kScriptTimedOut); });
+  inner_.Return(rule, key, tokens, [pending = std::move(pending), answer](const ScriptResult& r) {
+    if (First(pending)) (*answer)(r);
   });
 }
 
@@ -110,7 +157,7 @@ void ResilientBackend::HGetAll(std::string key, HashCallback done) {
 }
 
 void ResilientBackend::Send(const std::shared_ptr<HashCall>& c) {
-  inner_.HGetAll(c->key, [this, c](const HashResult& h) {
+  const auto answer = [this, c](const HashResult& h) {
     Account(*c->breaker, h.redis_error);  // plan reads are routed: redirects are followed, errors mean unreachable
     if (h.timed_out && c->retries < retry_.max_retries &&
         Schedule(c->retries++, [this, c](bool run) {
@@ -123,6 +170,10 @@ void ResilientBackend::Send(const std::shared_ptr<HashCall>& c) {
       return;
     }
     c->done(h);
+  };
+  auto pending = Watch([answer] { answer(kHashTimedOut); });
+  inner_.HGetAll(c->key, [pending = std::move(pending), answer](const HashResult& h) {
+    if (First(pending)) answer(h);
   });
 }
 
@@ -143,25 +194,49 @@ bool ResilientBackend::Schedule(int n, std::function<void(bool)> retry) {
 }
 
 void ResilientBackend::RunTimer(std::stop_token stop) {
+  using Clock = std::chrono::steady_clock;
   std::unique_lock lock(mu_);
   while (!stop.stop_requested()) {
-    if (due_.empty()) {
-      wake_.wait(lock, stop, [this] { return !due_.empty(); });
-      continue;
-    }
-    const auto next = due_.begin()->first;
-    if (std::chrono::steady_clock::now() < next) {
-      wake_.wait_until(lock, stop, next, [this, next] { return !due_.empty() && due_.begin()->first < next; });
-      continue;
-    }
+    const auto now = Clock::now();
     std::vector<std::function<void(bool)>> ready;
-    while (!due_.empty() && due_.begin()->first <= std::chrono::steady_clock::now()) {
+    while (!due_.empty() && due_.begin()->first <= now) {
       ready.push_back(std::move(due_.begin()->second));
       due_.erase(due_.begin());
     }
-    lock.unlock();  // a retry calls the inner backend, which may answer inline
-    for (auto& r : ready) r(true);
-    lock.lock();
+    std::vector<std::shared_ptr<Pending>> expired;
+    while (!deadlines_.empty() && deadlines_.front().first <= now) {
+      expired.push_back(std::move(deadlines_.front().second));
+      deadlines_.pop_front();
+    }
+    if (!ready.empty() || !expired.empty()) {
+      lock.unlock();  // both call back into the caller or the inner backend, which may answer inline
+      for (auto& r : ready) r(true);
+      for (auto& p : expired) {
+        if (First(p)) {
+          deadlines_missed_.fetch_add(1, std::memory_order_relaxed);
+          p->expire();
+        }
+      }
+      expired.clear();  // drops what the attempts held, outside the lock
+      lock.lock();
+      continue;
+    }
+    // Sleep until the next retry, or the next deadline but at least kSweep from now: a busy backend
+    // checks its deadlines in batches instead of waking this thread for every attempt.
+    auto next = Clock::time_point::max();
+    if (!due_.empty()) next = due_.begin()->first;
+    if (!deadlines_.empty()) next = std::min(next, std::max(deadlines_.front().first, now + kSweep));
+    // Wake early for a retry due sooner, or for the first deadline after none: a deadline added
+    // behind others is never due before the front.
+    const bool had_deadlines = !deadlines_.empty();
+    const auto sooner = [this, next, had_deadlines] {
+      return (!due_.empty() && due_.begin()->first < next) || (!had_deadlines && !deadlines_.empty());
+    };
+    if (next == Clock::time_point::max()) {
+      wake_.wait(lock, stop, sooner);
+    } else {
+      wake_.wait_until(lock, stop, next, sooner);
+    }
   }
 }
 

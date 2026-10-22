@@ -164,8 +164,10 @@ int main(int argc, char** argv) {
 
   // Everything above Redis goes through the breaker (src/reliability): 20 failures in a row stop
   // calls for 500 ms, then one probe; timed-out calls that cannot loosen a limit are retried twice.
+  // The timeout is also each attempt's deadline: the client's own is an idle timeout per connection,
+  // which a master answering every call late under load never trips.
   SlotBreakers breakers;
-  ResilientBackend resilient(*backend, breakers, {}, [](std::size_t open) {
+  ResilientBackend resilient(*backend, breakers, {.deadline = timeout}, [](std::size_t open) {
     static std::atomic<bool> any_open{false};  // log the start and the end of an outage, not each group
     if ((open > 0) == any_open.exchange(open > 0)) return;
     if (open > 0) {
@@ -289,6 +291,8 @@ int main(int argc, char** argv) {
         AppendSample(out, "rl_in_flight", "", static_cast<double>(service.InFlight()));
         AppendFamily(out, "rl_breaker_open_groups", "gauge", "Slot groups (of 64) whose Redis breaker is not closed");
         AppendSample(out, "rl_breaker_open_groups", "", static_cast<double>(breakers.Open()));
+        AppendFamily(out, "rl_redis_deadline_misses_total", "counter", "Redis calls answered as timed out at their deadline");
+        AppendSample(out, "rl_redis_deadline_misses_total", "", static_cast<double>(resilient.DeadlinesMissed()));
         if (engine == "leased") {
           const auto s = lease_stats();
           AppendFamily(out, "rl_lease_waits_total", "counter", "Checks that waited for a lease refill");
