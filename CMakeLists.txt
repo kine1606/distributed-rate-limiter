@@ -109,7 +109,8 @@ target_link_libraries(rl_engine PUBLIC rl_api Threads::Threads)
 # --- executables -----------------------------------------------------------------------
 add_executable(rate_limiter_server src/server/main.cc)
 target_include_directories(rate_limiter_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(rate_limiter_server PRIVATE rl_proto rl_api rl_config rl_redis rl_engine spdlog::spdlog Threads::Threads)
+target_link_libraries(rate_limiter_server PRIVATE rl_proto rl_api rl_config rl_redis rl_engine spdlog::spdlog
+                      absl::synchronization Threads::Threads)
 
 if(RL_BUILD_TESTS)
   enable_testing()

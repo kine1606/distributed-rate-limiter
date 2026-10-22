@@ -21,6 +21,7 @@
 
 #include <unistd.h>
 
+#include <absl/synchronization/mutex.h>
 #include <spdlog/spdlog.h>
 
 #include "config/rule_config.h"
@@ -87,6 +88,9 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
 //   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
+  // gRPC's mutexes are abseil's, and Ubuntu's abseil checks every lock for deadlock cycles: 2.7% of
+  // the server's CPU went to GraphCycles alone under load (perf, 2026-10-23). A server needs no such check.
+  absl::SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
   const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:7001";
