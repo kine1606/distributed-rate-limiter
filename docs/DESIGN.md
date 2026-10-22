@@ -361,6 +361,7 @@ daily quota of 200, where C would be 20), or when exactness is a product promise
 | Limiter stopped (SIGTERM) | signal | health `NOT_SERVING`, drain up to 5 s, unused leased tokens returned (`return_lease.lua`), usage flushed | none needed |
 | Limiter crash with leased tokens | | tokens lost (stricter, never looser) | none needed |
 | Missed plan-change message | | old plan until cache TTL | TTL expiry |
+| Bad rules file on reload (SIGHUP) | `LoadRules` fails | logged; the old rules stay live, no call is affected | fix the file, send SIGHUP again |
 
 ## 9. Capacity math for 1M checks/s (Week 2 estimate, Week 8 final)
 

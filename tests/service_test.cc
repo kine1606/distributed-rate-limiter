@@ -181,6 +181,29 @@ TEST_F(ServiceTest, OneUnknownRuleFailsTheWholeBatch) {
   EXPECT_EQ(core_->seen.size(), 3u);  // the others were checked; the RPC still fails as a whole
 }
 
+// A rule reload (SIGHUP) swaps the engine under load: a check already in the old engine is answered
+// by it, and every check after the swap goes to the new one.
+TEST_F(ServiceTest, AfterSetCoreNewChecksGoToTheNewCoreAndOldOnesFinish) {
+  core_->late = true;
+  auto in_old = std::async(std::launch::async, [this] {
+    v1::CheckResponse resp;
+    const grpc::Status s = Check(Req("old", "r", 1), &resp);
+    return std::make_pair(s.ok(), resp.remaining());
+  });
+  for (bool seen = false; !seen; std::this_thread::sleep_for(std::chrono::milliseconds(1))) {
+    std::lock_guard lock(core_->mu);
+    seen = !core_->seen.empty();
+  }
+  auto next = std::make_shared<FakeCore>();
+  next->answer = [](const CheckRequest&) { return CheckResult{.allowed = true, .remaining = 99}; };
+  service_.SetCore(next);
+  v1::CheckResponse resp;
+  ASSERT_TRUE(Check(Req("new"), &resp).ok());
+  EXPECT_EQ(resp.remaining(), 99u);
+  EXPECT_EQ(in_old.get(), std::make_pair(true, 1u));  // answered late, by the old engine
+  EXPECT_EQ(next->seen, std::vector<std::string>{"new/api_default/1"});  // a cost of 0 means 1
+}
+
 // ---- metrics (Week 5) ----
 
 TEST(ServiceMetrics, EveryAnswerIsCountedByRuleAndReason) {

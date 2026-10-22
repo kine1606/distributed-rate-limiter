@@ -47,8 +47,9 @@ namespace {
 
 using namespace ratelimiter;  // NOLINT
 
-std::atomic<bool> g_stop{false};
+std::atomic<bool> g_stop{false}, g_reload{false};
 extern "C" void HandleSignal(int) { g_stop.store(true, std::memory_order_relaxed); }
+extern "C" void HandleReload(int) { g_reload.store(true, std::memory_order_relaxed); }
 
 // A numeric setting from the environment: `fallback` when unset, nullopt (logged) when it is not a
 // whole number from `min` to `max`. A bad value must stop the start, not become a silent default.
@@ -84,6 +85,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
+//   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
   const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
@@ -110,6 +112,7 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
+  std::signal(SIGHUP, HandleReload);
 
   // N Redis clients, each with its own I/O thread, keys spread over them: one thread that also
   // finishes every gRPC call it answers held the exact path to 8,896 checks/s at 192 in flight; four
@@ -225,26 +228,53 @@ int main(int argc, char** argv) {
         },
         [&plans] { plans.InvalidateAll(); });
   }
-  StrictCore customer_strict(*backend, plans, rules);  // CompositeCore's burst and quota checks
-  std::shared_ptr<RateLimiterCore> core;
-  LeasedCore* leased = nullptr;  // for the shutdown statistics
-  if (engine == "leased") {
-    auto inner = std::make_shared<LeasedCore>(*backend, plans, rules, std::size_t{1} << 20, &SteadyNowNs,
-                                              std::move(chunk_log));
-    leased = inner.get();
-    core = std::make_shared<CompositeCore>(std::move(inner), customer_strict, plans, deny, std::move(rules),
-                                           &SteadyNowNs, std::move(on_decision), leased);  // leased quota too
-  } else if (engine == "strict") {
-    core = std::make_shared<CompositeCore>(std::make_shared<StrictCore>(*backend, plans, rules), customer_strict, plans,
-                                           deny, std::move(rules), &SteadyNowNs, std::move(on_decision));
-  } else if (engine == "allow_all") {
-    core = std::make_shared<AllowAllCore>();
-  } else {
+  // One engine per rule table: a reload builds a new one from the new file (see the main loop).
+  struct Engine {
+    std::unique_ptr<StrictCore> customer_strict;  // CompositeCore's burst and quota checks
+    std::shared_ptr<RateLimiterCore> core;
+    LeasedCore* leased = nullptr;  // for the statistics and the lease returns
+  };
+  if (engine != "leased" && engine != "strict" && engine != "allow_all") {
     spdlog::critical("unknown engine '{}' (leased | strict | allow_all)", engine);
     return 1;
   }
+  const auto make_engine = [&](RuleTable table) {
+    auto e = std::make_unique<Engine>();
+    if (engine == "allow_all") {
+      e->core = std::make_shared<AllowAllCore>();
+      return e;
+    }
+    e->customer_strict = std::make_unique<StrictCore>(*backend, plans, table);
+    std::shared_ptr<RateLimiterCore> inner;
+    if (engine == "leased") {
+      auto l = std::make_shared<LeasedCore>(*backend, plans, table, std::size_t{1} << 20, &SteadyNowNs, chunk_log);
+      e->leased = l.get();
+      inner = std::move(l);
+    } else {
+      inner = std::make_shared<StrictCore>(*backend, plans, table);
+    }
+    e->core = std::make_shared<CompositeCore>(std::move(inner), *e->customer_strict, plans, deny, std::move(table),
+                                              &SteadyNowNs, on_decision, e->leased);  // leased quota too
+    return e;
+  };
+  // Every engine made, current last. A replaced one is kept until exit, like the service keeps it: a
+  // check may still be inside it. Its lease statistics stay in the totals.
+  std::vector<std::unique_ptr<Engine>> engines;
+  std::mutex engines_mu;  // the reload adds, the metrics thread reads
+  engines.push_back(make_engine(std::move(rules)));
+  const auto lease_stats = [&] {
+    LeasedCore::Stats total{0, 0};
+    std::lock_guard lock(engines_mu);
+    for (const auto& e : engines) {
+      if (e->leased == nullptr) continue;
+      const auto s = e->leased->GetStats();
+      total.parked += s.parked;
+      total.refills += s.refills;
+    }
+    return total;
+  };
   spdlog::info("engine: {}, plan cache {} ms, at most {} checks in flight", engine, *plan_ttl_ms, *max_in_flight);
-  RateLimiterService service(core, *max_in_flight, metrics_on ? &check_metrics : nullptr);
+  RateLimiterService service(engines.back()->core, *max_in_flight, metrics_on ? &check_metrics : nullptr);
 
   // After everything it reads, so it stops first. A port in use (several servers on one machine)
   // leaves the server running without an endpoint.
@@ -259,8 +289,8 @@ int main(int argc, char** argv) {
         AppendSample(out, "rl_in_flight", "", static_cast<double>(service.InFlight()));
         AppendFamily(out, "rl_breaker_open_groups", "gauge", "Slot groups (of 64) whose Redis breaker is not closed");
         AppendSample(out, "rl_breaker_open_groups", "", static_cast<double>(breakers.Open()));
-        if (leased != nullptr) {
-          const auto s = leased->GetStats();
+        if (engine == "leased") {
+          const auto s = lease_stats();
           AppendFamily(out, "rl_lease_waits_total", "counter", "Checks that waited for a lease refill");
           AppendSample(out, "rl_lease_waits_total", "", static_cast<double>(s.parked));
           AppendFamily(out, "rl_lease_refills_total", "counter", "Lease refills sent to Redis");
@@ -304,6 +334,36 @@ int main(int argc, char** argv) {
   bool ready = true;
   while (!g_stop.load(std::memory_order_relaxed)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (g_reload.exchange(false, std::memory_order_relaxed)) {
+      // SIGHUP (src/config/README.md): parse the whole file first; one that does not load leaves the
+      // old rules live. Checks from the swap on use the new engine; checks already in the old one
+      // finish there. Once they are done (a few Redis timeouts at most), the old engine's unused
+      // leased tokens go back to Redis, as at shutdown. A check later still is no harm: tokens it
+      // leases stay unused, which is stricter, never looser.
+      RuleTable next;
+      try {
+        next = LoadRules(rules_path);
+      } catch (const std::exception& e) {
+        spdlog::error("reload: cannot load rules from {}: {}; the old rules stay live", rules_path, e.what());
+        continue;
+      }
+      const std::size_t n = next.size();
+      check_metrics.AddRules(next);
+      auto fresh = make_engine(std::move(next));
+      service.SetCore(fresh->core);
+      LeasedCore* const old = engines.back()->leased;
+      {
+        std::lock_guard lock(engines_mu);
+        engines.push_back(std::move(fresh));
+      }
+      spdlog::info("reload: {} rules from {} live", n, rules_path);
+      if (old != nullptr) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const auto r = old->ReturnLeases(std::chrono::seconds(1));
+        spdlog::info("reload: the old engine returned {} unused tokens of {} leases ({} returns failed)", r.tokens,
+                     r.leases, r.failed + r.refills_unfinished);
+      }
+    }
     if (const bool now = breakers.Open() < SlotBreakers::kGroups; now != ready) {
       ready = now;
       server->GetHealthCheckService()->SetServingStatus(ready);
@@ -317,8 +377,8 @@ int main(int argc, char** argv) {
   server->GetHealthCheckService()->SetServingStatus(false);
   server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
   server->Wait();
-  if (leased != nullptr) {
-    const auto s = leased->GetStats();
+  if (LeasedCore* const leased = engines.back()->leased) {
+    const auto s = lease_stats();
     spdlog::info("lease stats: {} checks waited for a refill, {} refills sent", s.parked, s.refills);
     const auto r = leased->ReturnLeases(std::chrono::seconds(1));
     spdlog::info("returned {} unused tokens of {} leases to Redis ({} returns failed, {} refills unfinished)",

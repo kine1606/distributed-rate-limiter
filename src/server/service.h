@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "metrics/check_metrics.h"
 #include "rate_limiter.grpc.pb.h"
@@ -41,7 +42,19 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   // `metrics`, if set, must outlive the service; nullptr records nothing (no clock reads).
   explicit RateLimiterService(std::shared_ptr<RateLimiterCore> core, std::int64_t max_in_flight = 10'000,
                               CheckMetrics* metrics = nullptr)
-      : core_(std::move(core)), max_in_flight_(max_in_flight), metrics_(metrics) {}
+      : core_(core.get()), max_in_flight_(max_in_flight), metrics_(metrics) {
+    cores_.push_back(std::move(core));
+  }
+
+  // Rule reload (src/config/README.md): checks from now on go to `core`, while a check already in
+  // the previous core finishes there. Every core is kept until the service is destroyed, so a check
+  // that read the old pointer never meets a freed one. Call it from one thread at a time.
+  // shortcut: a replaced core's memory stays until exit (main.cc: about 8 MB of lease table each);
+  // free it once no check can be inside it if reloads become frequent.
+  void SetCore(std::shared_ptr<RateLimiterCore> core) {
+    core_.store(core.get(), std::memory_order_release);
+    cores_.push_back(std::move(core));
+  }
 
   std::int64_t InFlight() const { return in_flight_.load(std::memory_order_relaxed); }
 
@@ -59,7 +72,7 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       return reactor;
     }
     const Started started = Start(req->rule());
-    core_->Check(ToDomain(*req), [this, reactor, resp, started](const CheckResult& r) {
+    core_.load(std::memory_order_acquire)->Check(ToDomain(*req), [this, reactor, resp, started](const CheckResult& r) {
       in_flight_.fetch_sub(1, std::memory_order_relaxed);
       Record(started, r);
       if (r.reason == Reason::kUnknownRule) {
@@ -105,10 +118,11 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     for (int i = 0; i < n; ++i) resp->add_responses();
 
     auto state = std::make_shared<BatchState>(reactor, static_cast<std::size_t>(n), in_flight_);
+    RateLimiterCore* const core = core_.load(std::memory_order_acquire);  // one core for the whole batch
     for (int i = 0; i < n; ++i) {
       v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
       const Started started = Start(req->requests(i).rule());
-      core_->Check(ToDomain(req->requests(i)), [this, state, slot, started](const CheckResult& r) {
+      core->Check(ToDomain(req->requests(i)), [this, state, slot, started](const CheckResult& r) {
         Record(started, r);
         if (r.reason == Reason::kUnknownRule) {
           state->unknown_rule.store(true, std::memory_order_relaxed);
@@ -153,7 +167,8 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     return false;
   }
 
-  std::shared_ptr<RateLimiterCore> core_;
+  std::atomic<RateLimiterCore*> core_;
+  std::vector<std::shared_ptr<RateLimiterCore>> cores_;  // every core set, current last
   const std::int64_t max_in_flight_;
   CheckMetrics* const metrics_;
   std::atomic<std::int64_t> in_flight_{0};

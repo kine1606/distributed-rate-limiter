@@ -145,7 +145,7 @@ Cut first if late: leased quota (keep all quotas strict and present it as the fi
 - [x] **Timeouts, circuit breaker, bounded retries with jitter (3 h).** 5 to 10 ms socket timeout; breaker opens after about 20 consecutive failures and sends one probe after 500 ms; retry only timeouts, at most twice. Unit-test the breaker with a fake clock.
 - [x] **Failure policy per plan (1.5 h).** After the lease runs out, paid plans fail open and mark the admission `unverified`; free plans fail closed with `UNAVAILABLE`.
 - [x] **Backpressure and graceful shutdown (2.5 h).** Bounded queues answer `RESOURCE_EXHAUSTED`; on SIGTERM set health to `NOT_SERVING`, drain, return unused leases with `return_lease.lua`, flush usage events.
-- [ ] **Health readiness and SIGHUP reload (2 h).** Readiness follows the breaker; a bad config file is rejected and the old rules stay live.
+- [x] **Health readiness and SIGHUP reload (2 h).** Readiness follows the breaker; a bad config file is rejected and the old rules stay live.
 - [x] **Prometheus metrics (2 h).** Outcomes per plan, latency per path (lease, strict, deny cache), Redis latency, lease hit ratio, batch size and flush reason, breaker state, queue depth.
 - [x] **Open-loop load generator (3 h).** Sends at a fixed arrival rate and measures latency from the time each call was scheduled, not when it was sent. A closed-loop tool slows down when the server stalls and hides the stall from p99 (coordinated omission). Check whether `ghz --rps` is enough first; write the small C++ client only if not. Record latency in log-scale buckets; report p50, p99, p999.
 - [ ] Thesis: Chapter 3 draft with the architecture diagram, accuracy-bound derivation and failure-mode table.

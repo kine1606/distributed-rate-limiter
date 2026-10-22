@@ -1,6 +1,6 @@
 # Rule config and hot reload
 
-> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: Week 2 schema done: `algorithm: quota` and `limit_from: plan.daily | plan.burst`, validated with clear errors. Week 4: `quota_mode: strict | auto` on quota rules (auto: plans of 100,000 a day or more are leased by `CompositeCore`)
+> Week 2 (schema update), Week 5 (SIGHUP reload) · Flow step A4 · Status: Week 2 schema done: `algorithm: quota` and `limit_from: plan.daily | plan.burst`, validated with clear errors. Week 4: `quota_mode: strict | auto` on quota rules (auto: plans of 100,000 a day or more are leased by `CompositeCore`). Week 5: SIGHUP reload done, by swapping the whole engine (below)
 
 ## What this module does
 
@@ -41,6 +41,22 @@ Not built from the original sketch: `refill_from` (`plan.burst` always brings `p
 
 ## SIGHUP reload (Week 5)
 
+As built (`src/server/main.cc`, `RateLimiterService::SetCore`): the signal handler sets a flag; the
+main loop, which reads it every 100 ms, parses the whole file with `LoadRules` (an error is logged
+and the old rules stay live), builds a new engine from the new table, and switches the service to
+it with one atomic pointer store. Checks from then on use the new engine; a check already in the old
+one finishes there. One second later the old engine returns its unused leased tokens, as at
+shutdown. Replaced engines are kept until exit, so no check meets a freed one. `CheckMetrics`
+keeps every rule's series and adds those of new rules. Measured under load:
+`docs/thesis/evidence/reload_2026-10-22.md` (no failed call during 9 reloads at 10,000 checks/s,
+p99 0.72 to 1.33 ms for a pass with three reloads in 24 s; no measurable cost per check).
+
+Not built from the sketch below: a `RuleStore` read on every check. The engines keep references into
+their rule table (each lease refers to its rule), so swapping the table under them would leave
+leases on old rules; a new engine per table keeps the table immutable for its whole life.
+
+The original sketch:
+
 ```cpp
 class RuleStore {
  public:
@@ -71,4 +87,4 @@ load per request, and reloads are rare. Measure it in the microbenchmark if you 
 ## Done when
 
 - [x] Week 2: new schema loaded and tested; invalid files produce a clear error.
-- [ ] Week 5: reload under load with zero failed requests.
+- [x] Week 5: reload under load with zero failed requests (`bench/reload_under_load.sh`).

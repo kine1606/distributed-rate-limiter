@@ -201,11 +201,14 @@ About 16 h.
 - [x] Bounded queues and `RESOURCE_EXHAUSTED`; graceful shutdown returns leases (2.5 h).
       Done: one in-flight bound in the service (`RL_MAX_IN_FLIGHT`, 10,000) bounds every queue behind
       it, no measurable cost; SIGTERM drains, returns leased tokens (72,194 from 1,000 leases in 7 ms).
-- [ ] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
+- [x] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
       Readiness done: gRPC health is `NOT_SERVING` while every slot group's breaker is open (this
       instance reaches no Redis master) and during shutdown; checked by stopping every node of the
       fault cluster under load (NOT_SERVING after about 1 s, SERVING again once they were back).
-      SIGHUP reload not started (the plan's first cut).
+      SIGHUP reload done: a new engine built from the new file replaces the old one with one
+      atomic pointer store; a file that does not load keeps the old rules. Under 10,000 checks/s
+      open loop, 9 reloads (6 applied, 3 rejected) failed no call; no measurable cost per check.
+      See `docs/thesis/evidence/reload_2026-10-22.md`.
 - [x] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
       Done: own text exposition (prometheus-cpp is not installed), striped lock-free counters,
       `/metrics` on `RL_METRICS_ADDR` (127.0.0.1:9100); Prometheus in `docker-compose.yml`. Overhead
@@ -214,7 +217,8 @@ About 16 h.
       coordinated omission). Try `ghz --rps` first. See [bench/loadgen/README.md](../bench/loadgen/README.md).
       Done: `bench/loadgen` with a `rate` argument (`ghz --rps` times calls from their send, so it
       has the same blind spot). Server frozen 0.5 s at 10,000/s: open-loop p99 480.8 ms, closed-loop
-      5.8 ms. Leased rule open loop: p99 1.02 ms at 10,000/s, 3.76 ms at 40,000/s; saturates by 50,000.
+      5.8 ms. Leased rule open loop (gate run): p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; past about
+      25,000/s calls queue (p99 above 100 ms) instead of failing.
 - [ ] Thesis: Chapter 3 draft.
       In progress: 3.1.3, 3.4, 3.5 and 3.7 (failure policies and failure modes, written 2026-10-21)
       are drafted; 3.1, 3.2, 3.3, 3.6 and 3.8 to do.

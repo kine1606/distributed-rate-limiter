@@ -61,6 +61,19 @@ TEST(Metrics, CheckMetricsKnowOnlyConfiguredRulesAndSkipZeroCounts) {
   EXPECT_NE(out.find("# TYPE rl_checks_total counter\n"), std::string::npos);
 }
 
+TEST(Metrics, AReloadAddsNewRulesAndKeepsTheCounts) {
+  CheckMetrics m(RuleTable{{"burst", Rule{.name = "burst"}}});
+  CheckMetrics::PerRule* const burst = m.Of("burst");
+  burst->by_reason[static_cast<std::size_t>(Reason::kAllowed)].Add(2);
+  m.AddRules(RuleTable{{"login", Rule{.name = "login"}}});  // burst removed, login added
+  ASSERT_NE(m.Of("login"), nullptr);
+  EXPECT_EQ(m.Of("burst"), burst);  // the same counters: a series never resets on a reload
+  std::string out;
+  m.Render(out);
+  EXPECT_NE(out.find("rl_checks_total{rule=\"burst\",reason=\"ok\"} 2\n"), std::string::npos) << out;
+  EXPECT_NE(out.find("rl_check_latency_seconds_count{rule=\"login\"} 0\n"), std::string::npos) << out;
+}
+
 // One HTTP/1.0 request over a socket; returns the whole answer.
 std::string Get(int port, const std::string& path) {
   const int fd = ::socket(AF_INET, SOCK_STREAM, 0);

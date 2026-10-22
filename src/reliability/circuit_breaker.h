@@ -18,8 +18,9 @@ struct BreakerOptions {
 // After `open_for`, exactly one call goes out as a probe (half-open); its success closes the
 // breaker, its failure opens it again for another `open_for`. Lock-free: atomics only.
 //
-// The count is of consecutive failures across the whole cluster, so one dead master among healthy
-// ones does not open it (their successes reset the count); its calls fail by timeout instead.
+// The count is of consecutive failures across everything one breaker covers. One for the whole
+// cluster opened for every customer when a master died, because the calls pending on its
+// connections fail together; ResilientBackend therefore uses one per slot group (SlotBreakers).
 class CircuitBreaker {
  public:
   enum class State : std::uint8_t { kClosed, kHalfOpen, kOpen };  // the metric's 0, 1, 2
