@@ -43,14 +43,14 @@ see.
 
 | Goal | Requirement | Verified by | Status |
 | --- | --- | --- | --- |
-| G1 | a quota is never over-admitted, whatever the concurrency | 400 concurrent calls on a Free quota of 200 through gRPC admit exactly 200; evaluation test 1 with several instances | met on one instance; test 1 **[Pending: Week 6]** |
+| G1 | a quota is never over-admitted, whatever the concurrency | 400 concurrent calls on a Free quota of 200 through gRPC admit exactly 200; evaluation test 1 with several instances | met: four instances, 20 of 20 runs exact (Free 200, Pay 2,200), 9,608 duplicate requests counted once |
 | G2 | a retry with the same request id within five minutes is not counted again | script and gRPC tests (3.4.3) | met |
 | G3 | a plan change applies on the next call and keeps the day's usage | mid-day upgrade test; 22 ms from the admin tool to two instances (3.4.4) | met |
 | G4 | one reset instant, 00:00 UTC by the Redis clock | day-rollover test of the quota script; evaluation test 2 | script tested; test 2 **[Pending: Week 6]** |
 | G5 | about 1,000,000 checks per second on a cluster | an estimate from per-instance measurements (3.8), never reported as a measurement | estimated in 3.8 |
 | G6 | p50 below 500 µs and p99 below 2 ms per check | latency at fixed arrival rates, measured at the client (an upper bound on the server-side figure) | met by leased rules at 10,000 checks/s per instance (p50 0.29 ms, p99 0.83 ms); at 20,000/s the p99 (1.80 ms) still meets it and the p50 (0.64 ms) does not; not met by the full customer check (p99 2.14 ms at 5,000/s) |
-| G7 | over-admission of a leased limit at most N × C in any window | proof (3.5.3); seeded harness over 100,000 seeds; measurement on the cluster | proved; measurement **[Pending: Week 6]** |
-| G8 | an over-quota flood is refused locally; an overloaded instance refuses at once | unit tests; microbenchmark of the deny cache (3.6.1); flood test | built and unit-tested; flood test **[Pending: Week 6]** |
+| G7 | over-admission of a leased limit at most N × C in any window | proof (3.5.3); seeded harness over 100,000 seeds; measurement on the cluster | proved and measured: at most 381.5 tokens against 400 at a 10% cap, a model within 0.3 tokens (3.5.4) |
+| G8 | an over-quota flood is refused locally; an overloaded instance refuses at once | unit tests; microbenchmark of the deny cache (3.6.1); flood test | met: a flood of 74,881 denials a second cost 2 Redis calls in 10 s; p99 of a denial 0.61 ms at 10,000/s |
 | G9 | documented behaviour per plan when Redis is slow or down | a master killed under load (3.7.3) | met |
 
 Two further requirements apply to the code rather than to the service. Nothing on the lease hot path
@@ -266,6 +266,7 @@ of these (3.3.4).
 | `limit` or `limit_from` | a number, or `plan.daily` / `plan.burst` | where the limit comes from: the file, or the customer's plan |
 | `refill_per_sec`, `window_ms` | numbers | a token bucket's refill rate; a window's length |
 | `strict` | `true` or `false` | one script per check, or served from a lease |
+| `lease_chunk_pct` | 1 to 100, default 10 | a leased rule's chunk cap C, in % of the limit: the knob of the bound N × C (3.5.3) |
 | `quota_mode` | `strict` or `auto` | `auto`: plans of 100,000 a day or more lease their quota (3.4.5) |
 | `failure_policy` | `fail_open` or `fail_closed` | when Redis cannot answer, for a rule not tied to a plan |
 | `burst`, `quota` | two rule names | a customer rule: the two rules it combines (3.4.1) |
@@ -534,7 +535,7 @@ from Redis earlier are spent later, but no token is ever created, so over a whol
 admit no more than Redis granted. The tuning rule follows directly: the cap is chosen from the
 over-admission one can accept. With four instances and the default 10% cap, a burst limit of 1,000
 may admit up to 400 extra checks in a window, and a cap of 1% would reduce that to 40 at the cost of
-ten times more refills.
+ten times more refills. Each rule sets its own cap (`lease_chunk_pct`, 3.3.1); 3.5.4 measures both.
 
 ### 3.5.4 Evidence: a seeded harness
 
@@ -558,9 +559,29 @@ The harness found two violations in the first version of the protocol:
    the exact bucket against a bound of 2. Routing such checks to Redis (step 5) fixed it.
 
 With both fixes, 100,000 seeds (165 million checks) keep the bound, and the worst window reaches
-exactly N × C: the bound is tight, not merely safe. The measured over-admission on the real cluster
-as a function of chunk size, and its comparison with a simulation, is evaluation test 4
-**[Pending: Week 6]**.
+exactly N × C: the bound is tight, not merely safe.
+
+The bound was then measured on the cluster (evaluation tests 4 and 12,
+`docs/thesis/evidence/burst_bound_2026-10-22.md`). Four instances served one hot key of a bucket of
+1,000 tokens refilled at 100 a second, at chunk caps of 1%, 5% and 10%, under two demands of 2,000
+calls a second. The first was a burst after an idle period, the worst case the proof allows: the
+leases are full and the bucket has refilled. The second was steady overload. The over-admission was
+taken from the allowed answers as the largest excess over any exact bucket in any window, and the same
+calls were replayed through a simulation of the protocol written independently of the engine.
+
+![Over-admission against the chunk cap](figures/burst_bound.png)
+
+*Figure 3.2: Over-admission against the chunk cap, measured (median of five runs) and predicted, with
+the worst case N × C.*
+
+After an idle period the burst admitted 34.7, 189.0 and 381.4 tokens more than any exact bucket
+could (medians of five runs), against bounds of 40, 200 and 400. Each instance held C − 1 tokens
+after its warm-up check, so about N × (C − 1) was expected, a little less because part of the
+bucket's refill lands within the window. Under steady overload the excess was at most zero, and the
+leases admitted slightly fewer calls than an exact bucket would have. The simulation predicted 34.4,
+188.8 and 381.4, and its admitted counts matched the measurement exactly in 29 of 30 runs. The cap is
+therefore a measured knob: on four instances, a cap of 1% bounds a burst to 35 extra tokens and 10% to
+381, at the price of about one Redis call per C checks.
 
 ### 3.5.5 Alternatives considered
 
@@ -606,8 +627,11 @@ that finds no denial runs at 2,089 million lookups per second in total, against 
 every lookup took the shard's mutex. A flood, every thread looking up one denied customer, contends
 on one shard's mutex and runs at 9.7 million lookups per second, more than 100 times the gRPC rate of
 one instance (82,565 calls per second with no limiter at all), so a flood is answered locally without
-becoming the bottleneck. Making entries readable without the lock is left until the flood test of
-Week 6 shows that the mutex matters **[Pending: Week 6]**.
+becoming the bottleneck. The flood test confirmed it on the server (evaluation test 5,
+`docs/thesis/evidence/flood_cardinality_2026-10-22.md`). One customer out of quota, retrying flat out,
+was denied 74,881 times a second, the instance's rate for any check, and cost Redis two calls in ten
+seconds, both of them plan re-reads. At a fixed 10,000 calls a second a denial took 0.24 ms at the
+median and 0.61 ms at p99. The lock stays.
 
 **Correctness.** A denial recorded at the moment of a lookup in the same shard can be missed once;
 that check then asks Redis, which denies too, so the cache can make an answer slower but never looser.
@@ -799,11 +823,13 @@ long a lost plan-change message goes unnoticed (3.4.4), so a lifetime of one min
 reads by twelve. A gateway that sends each customer to one instance, by consistent hashing for
 instance, would cut them to A / 5 and would also shrink the lease bound for that customer from N × C to
 C. Neither is built; the cost of a plan read on a master was not measured, and is assumed here to be
-no lower than a script's.
+no lower than a script's. One instance spread over 1,000,000 customers already shows the effect
+(evaluation test 6): 0.89 plan reads per check, and 26% less throughput than over 10,000 customers.
 
 **Memory.** Stored answers dominate Redis memory if every call carries an id: 54 GB across the cluster
 at 1,000,000 calls per second (3.6.2), about 3 GB on each of 17 masters. Plans, counters and buckets
-grow with the customers, not with the rate.
+grow with the customers, not with the rate: measured, about 420 bytes per customer active today (a
+plan of 171 bytes, a daily counter and a burst bucket), so 420 MB for 1,000,000 such customers.
 
 ### 3.8.3 Limiter instances
 

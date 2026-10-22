@@ -4,9 +4,10 @@
 #                fixed 10,000 calls a second: Redis calls for that customer (INFO commandstats of its
 #                master), deny-cache hits, and the latency of the denials
 #   cardinality  1,000,000 Free customers (plus the 1,000,000 Pay and 10 enterprise plans the seed tool
-#                writes): Redis memory per plan, then the customer rule and the leased api_default
-#                over all of them against 10,000 of them: throughput, latency, Redis memory per
-#                counter, limiter memory
+#                writes): Redis memory per plan (INFO before and after), then the customer rule and the
+#                leased api_default over all of them against 10,000 of them: throughput, latency,
+#                limiter memory, and MEMORY USAGE of each kind of key (key counts are no use: idle
+#                burst buckets expire within seconds)
 # FLUSHALL on the THROWAWAY dev cluster.
 #   tests/eval/flood_cardinality.sh     env: RUNS=3  REDIS_PORT=7001
 # Output: results/<date>_flood_cardinality/summary.txt, one JSON line per measurement.
@@ -25,6 +26,12 @@ masters() { redis-cli -p "$port" cluster nodes | awk '/master/ {split($2, a, "[:
 flush() { for m in $(masters); do redis-cli -p "$m" FLUSHALL >/dev/null; done; }
 memory() { local t=0 m; for m in $(masters); do t=$((t + $(redis-cli -p "$m" info memory | awk -F: '/^used_memory:/ {print $2}' | tr -d '\r'))); done; echo $t; }
 keys() { local t=0 m; for m in $(masters); do t=$((t + $(redis-cli -p "$m" dbsize))); done; echo $t; }
+usage() {  # median MEMORY USAGE, in bytes, of up to 30 keys per master matching $1
+  local m k
+  for m in $(masters); do
+    redis-cli -p "$m" --scan --pattern "$1" | head -30 | while read -r k; do redis-cli -p "$m" memory usage "$k"; done || true
+  done | sort -n | awk '{a[NR] = $1} END {print NR ? a[int((NR + 1) / 2)] : 0}'
+}
 calls() {  # script and plan-read calls answered by master port $1 so far
   redis-cli -p "$1" info commandstats | awk -F'[:=,]' '/^cmdstat_(evalsha|eval|hgetall):/ {n += $3} END {print n + 0}'
 }
@@ -67,10 +74,10 @@ for r in $(seq "$runs"); do
   for rule in customer api_default; do
     for n in 10000 1000000; do
       start "${rule}_${n}_r$r"
-      ma=$(memory) ka=$(keys)
       res=$(load "$rule" 20 12 16 "$n" 2 1 0 cust:)
-      mb=$(memory) kb=$(keys)
-      echo "{\"run\":$r,\"test\":\"cardinality\",\"rule\":\"$rule\",\"customers\":$n,\"new_keys\":$((kb - ka)),\"new_bytes\":$((mb - ma)),\"limiter_rss_kb\":$(rss_kb),\"plan_reads\":$(metric rl_plan_cache_reads_total),\"lease_refills\":$(metric rl_lease_refills_total),\"load\":$res}" \
+      if [ "$rule" = customer ]; then sizes="\"burst_tb\":$(usage '*:burst:tb'),\"daily_quota_q\":$(usage '*:daily_quota:q')"
+      else sizes="\"api_default_tb\":$(usage '*:api_default:tb')"; fi
+      echo "{\"run\":$r,\"test\":\"cardinality\",\"rule\":\"$rule\",\"customers\":$n,\"memory_usage\":{$sizes,\"plan\":$(usage '*:plan')},\"limiter_rss_kb\":$(rss_kb),\"plan_reads\":$(metric rl_plan_cache_reads_total),\"lease_refills\":$(metric rl_lease_refills_total),\"load\":$res}" \
         | tee -a "$sum" | cut -c1-200
       stop
     done

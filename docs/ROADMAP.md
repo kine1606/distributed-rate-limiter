@@ -239,13 +239,26 @@ p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; queueing, not failing, past about 
 
 About 16.5 h.
 
-- [ ] TSan and ASan clean (2 h). See [tests/README.md](../tests/README.md#sanitizers).
+- [x] TSan and ASan clean (2 h). See [tests/README.md](../tests/README.md#sanitizers).
+      Done 2026-10-22: 214 of 214 tests pass in release, ASan and TSan (the in-process gRPC service
+      tests skip under TSan, which needs an instrumented gRPC).
 - [ ] Property-based tests (3 h, Should): random histories of checks, retries, plan changes and
       rollovers against a simple reference model; seeded.
-- [ ] Quota accuracy test, 4 instances, 10% retries, 20 runs (2 h).
-- [ ] Bound model vs measurement (3 h): Python simulation predicts over-admission; burst accuracy
+- [x] Quota accuracy test, 4 instances, 10% retries, 20 runs (2 h).
+      Done 2026-10-22 (`tests/eval/quota_accuracy.sh`): 20 of 20 runs exact. Request ids allowed,
+      Redis `used` and usage events all 200 (Free) and 2,200 (Pay, with grace); 9,608 requests sent
+      twice at once, none counted twice. `docs/thesis/evidence/quota_accuracy_2026-10-22.md`.
+- [x] Bound model vs measurement (3 h): Python simulation predicts over-admission; burst accuracy
       runs at chunk caps 1%, 5%, 10%; plot predicted, measured and worst case.
-- [ ] Flood and cardinality (1M keys) tests (2 h).
+      Done 2026-10-22 (`tests/eval/burst_accuracy.sh`, `bound_model.py`; new rule field
+      `lease_chunk_pct`). Idle-then-burst: 34.7, 189.0, 381.4 tokens against N x C = 40, 200, 400;
+      the model predicts 34.4, 188.8, 381.4. Steady overload: about 0. Figure
+      `docs/thesis/figures/burst_bound.png`, `docs/thesis/evidence/burst_bound_2026-10-22.md`.
+- [x] Flood and cardinality (1M keys) tests (2 h).
+      Done 2026-10-22 (`tests/eval/flood_cardinality.sh`): a flood of 74,881 denials/s cost 2 Redis
+      calls in 10 s (deny cache). 1M customers: 171 B per plan, about 420 B per active customer;
+      customer rule −26% (plan cache misses), leased rule −35% (cold leases, 224 MB).
+      `docs/thesis/evidence/flood_cardinality_2026-10-22.md`.
 - [ ] Fault tests: kill master, 20 ms latency (toxiproxy), dropped connections (3 h).
 - [ ] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
 - [ ] Nov 22: feature freeze, tag `v1.0`. See [EVALUATION.md](EVALUATION.md).
@@ -253,17 +266,10 @@ About 16.5 h.
 Gate: all tests green; measured over-admission at or below the derived bound.
 Cut first: noisy neighbour, then connection-drop faults.
 
-Status (2026-10-22, paused at the usage limit; resume here):
-- Done: quota accuracy test, 20 of 20 runs exact (`docs/thesis/evidence/quota_accuracy_2026-10-22.md`,
-  EVALUATION test 1 filled). New rule field `lease_chunk_pct` (chunk cap, default 10%).
-- Running when paused: `tests/eval/burst_accuracy.sh` (RUNS=5) into `results/2026-10-22_burst_accuracy/`.
-  First round: idle-then-burst measured 34.7 / 189.1 / 381.4 tokens against the model's 34.4 / 188.8 /
-  381.4 and the worst case 40 / 200 / 400 (caps 1%, 5%, 10%); steady overload about 0. Next: evidence
-  file, figure (matplotlib; blue #2a78d6 measured, orange #eb6834 model, grey dashed N x C), EVALUATION
-  tests 4 and 12. If the run did not finish, rerun it.
-- Not run yet: `tests/eval/flood_cardinality.sh` (tests 5 and 6), written but untested.
-- Then: full suite plus ASan and TSan (the `lease_chunk_pct` change has only its unit tests run), tick the
-  Week 6 items, update Chapter 3's [Pending: Week 6] markers, rebuild the dashboard, commit. Unpushed.
+Gate status: met (2026-10-22). All 214 tests are green in release, ASan and TSan. The largest
+over-admission measured is 381.5 tokens against a bound of 400 (10% cap; 189.1 of 200 at 5% and 34.8
+of 40 at 1%). Still open in Week 6: property-based tests (Should), fault tests beyond killing a
+master, the noisy-neighbour test, and the v1.0 tag.
 
 ## Week 7 (Nov 23 to 29): Benchmarks, ablation and measured tuning
 

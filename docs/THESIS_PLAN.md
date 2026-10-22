@@ -156,11 +156,11 @@ Cut first if late: SIGHUP reload (a restart-based reload is acceptable for the t
 
 ### Week 6 (Nov 16 to 22): Correctness evidence and feature freeze (about 16.5 h)
 
-- [ ] **TSan and ASan clean across all tests (2 h).** Fix every report; never silence one with a sleep.
+- [x] **TSan and ASan clean across all tests (2 h).** Fix every report; never silence one with a sleep.
 - [ ] **Property-based tests against a reference model (3 h).** Random sequences of checks, retries, upgrades, downgrades and day rollovers, run through `CompositeCore` on the fake backend and through a trivially correct in-memory model; every answer must match. Seeded so a failure replays.
-- [ ] **Quota accuracy test (2 h).** Four instances, free and pay customers, 10% forced retries, repeated 20 times: exactly 200 and 2,000 admitted, zero duplicates in usage events.
-- [ ] **Bound model versus measurement (3 h).** A short Python simulation of N instances leasing chunks of size C under a given demand predicts over-admission. Run the burst accuracy test for chunk caps of 1%, 5% and 10% and plot measured against predicted and against the worst case N x C. Agreement is evidence the derivation is right; disagreement is a finding to explain.
-- [ ] **Flood and cardinality tests (2 h).** An over-quota client retrying flat out (count Redis calls saved by the deny cache); 1 million customer keys (throughput, latency, Redis memory per key).
+- [x] **Quota accuracy test (2 h).** Four instances, free and pay customers, 10% forced retries, repeated 20 times: exactly 200 and 2,000 admitted, zero duplicates in usage events.
+- [x] **Bound model versus measurement (3 h).** A short Python simulation of N instances leasing chunks of size C under a given demand predicts over-admission. Run the burst accuracy test for chunk caps of 1%, 5% and 10% and plot measured against predicted and against the worst case N x C. Agreement is evidence the derivation is right; disagreement is a finding to explain.
+- [x] **Flood and cardinality tests (2 h).** An over-quota client retrying flat out (count Redis calls saved by the deny cache); 1 million customer keys (throughput, latency, Redis memory per key).
 - [ ] **Fault tests (3 h).** Kill a master, add 20 ms latency with toxiproxy, drop connections; record allowed, denied and unverified counts and recovery time per plan.
 - [ ] **Noisy-neighbour test (1.5 h).** One tenant sends ten times its quota while others run normal load; report the others' p99 with and without the flood.
 - [ ] **Nov 22: feature freeze, tag `v1.0`.** After this only fixes and measured performance changes.

@@ -115,8 +115,9 @@ limit is still one script per check; leasing it per customer is future work (Sec
    tested through gRPC (Week 4).
 2. **A lease-based fast path with a derived and measured accuracy bound.** Cache-line-aligned leases
    in a lock-free table with single-flight refills, chunk sizes capped at a fraction of the limit,
-   and pipelined Redis refills. The bound N × C is derived in Chapter 3; its measurement against
-   chunk size is **[Pending: Week 6]**.
+   and pipelined Redis refills. The bound N × C is derived in Chapter 3 and measured there: on four
+   instances at chunk caps of 1%, 5% and 10% the worst case stays below it, as a model of the
+   protocol predicts to within 0.3 tokens (Week 6).
 3. **An evaluation that tests each half of the claim separately.** Exactness tests (concurrency,
    day rollover, plan changes, overage), then performance and robustness tests (strict against
    leased mode, scaling across instances, floods, key cardinality, Redis failures), with
