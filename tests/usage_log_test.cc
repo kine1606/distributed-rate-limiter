@@ -116,6 +116,14 @@ TEST(UsageLog, EveryEventIsWrittenOrCountedAsDropped) {
   EXPECT_EQ(Sum(Lines(path), "cust:1", "allowed") + dropped, std::uint64_t{kThreads} * kEach);
 }
 
+// A full disk must not go unnoticed: what the flush could not write is counted as dropped.
+TEST(UsageLog, EventsThatCannotBeWrittenAreCountedAsDropped) {
+  UsageLog log("/dev/full", "test", 1024, std::chrono::milliseconds(10));
+  for (int i = 0; i < 5; ++i) EXPECT_TRUE(log.Record("cust:1", Reason::kAllowed, 1));
+  for (int i = 0; i < 400 && log.Dropped() < 5; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  EXPECT_EQ(log.Dropped(), 5u);
+}
+
 TEST(UsageLog, UnopenableFileThrows) {
   EXPECT_THROW(UsageLog("/nonexistent-dir/usage.jsonl", "i"), std::runtime_error);
 }

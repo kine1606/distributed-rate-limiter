@@ -74,6 +74,24 @@ TEST(Metrics, AReloadAddsNewRulesAndKeepsTheCounts) {
   EXPECT_NE(out.find("rl_check_latency_seconds_count{rule=\"login\"} 0\n"), std::string::npos) << out;
 }
 
+TEST(Metrics, RedisMetricsRenderEveryCallKindAndEveryKindOfError) {
+  RedisMetrics m;
+  m.latency[3].Observe(2'000'000);  // a quota script of 2 ms
+  m.timeouts.Add();
+  m.reply_errors.Add(2);
+  m.reroutes.Add(3);
+  std::string out;
+  m.Render(out);
+  for (const auto call : RedisMetrics::kCall) {
+    EXPECT_NE(out.find("rl_redis_latency_seconds_count{call=\"" + std::string(call) + "\"}"), std::string::npos) << call;
+  }
+  EXPECT_NE(out.find("rl_redis_latency_seconds_count{call=\"quota\"} 1\n"), std::string::npos) << out;
+  EXPECT_NE(out.find("rl_redis_errors_total{kind=\"timeout\"} 1\n"), std::string::npos);
+  EXPECT_NE(out.find("rl_redis_errors_total{kind=\"reply\"} 2\n"), std::string::npos);
+  EXPECT_NE(out.find("rl_redis_errors_total{kind=\"other\"} 0\n"), std::string::npos);
+  EXPECT_NE(out.find("rl_redis_reroutes_total 3\n"), std::string::npos);
+}
+
 // One HTTP/1.0 request over a socket; returns the whole answer.
 std::string Get(int port, const std::string& path) {
   const int fd = ::socket(AF_INET, SOCK_STREAM, 0);

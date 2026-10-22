@@ -360,6 +360,22 @@ TEST_F(LeasedQuotaTest, ALargePlanTakesItsQuotaFromALease) {
   EXPECT_EQ(redis.calls.size(), 6u);        // burst is still checked per call
 }
 
+// Leases refer to their rule, so the table of leased-quota rules is fixed and never freed: 64 plan
+// sizes. A 65th size takes the exact path, which still answers, with the plan's own policy.
+TEST_F(LeasedQuotaTest, A65thDistinctPlanSizeTakesTheExactPath) {
+  for (int i = 0; i < 64; ++i) {
+    redis.plan.fields["daily"] = std::to_string(1'000'000 + 1000 * i);
+    EXPECT_TRUE(RunOn(auto_core).allowed);
+  }
+  EXPECT_EQ(QuotaCalls().size(), 64u);  // one lease refill per size
+  redis.plan.fields["daily"] = "2000000";
+  for (int i = 0; i < 3; ++i) EXPECT_TRUE(RunOn(auto_core).allowed);
+  const auto q = QuotaCalls();
+  ASSERT_EQ(q.size(), 64u + 3u);  // exact: one quota script per check
+  EXPECT_EQ(q.back().amount, 1u);
+  EXPECT_EQ(q.back().overage, Overage::kCap);
+}
+
 TEST_F(LeasedQuotaTest, PlansBelowTheThresholdAndTheStrictEngineStayExact) {
   redis.plan.fields["daily"] = std::to_string(kLeasedQuotaFrom - 1);
   for (int i = 0; i < 3; ++i) RunOn(auto_core);

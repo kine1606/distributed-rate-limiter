@@ -45,6 +45,13 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | `property_test.cc` | unit | 6 | done: random histories (checks, retries, plan changes, outages, clock jumps, UTC rollovers) through the real engine on a script-faithful fake Redis; every answer and usage event equals a reference model (4 configurations); leased quota within its bounds; `RL_PROPERTY_SEEDS`, `RL_PROPERTY_SEED` |
 | `tests/eval/*.sh` | evaluation | 6 | done for tests 1, 4, 5, 6, 9, 11 and 12 of `docs/EVALUATION.md`: `quota_accuracy.sh`, `burst_accuracy.sh` with `bound_model.py`, `flood_cardinality.sh`, `faults.sh`, `noisy_neighbour.sh` |
 
+## Coverage
+
+`scripts/coverage.sh` builds the `coverage` preset (`--coverage`), runs every test (the script and
+integration tests need the dev cluster and the test Redis) and writes `build/coverage/coverage.txt`:
+line and branch coverage of `src/` and `include/` per file, then each file's uncovered lines
+(`tools/coverage_report.py`). Results: `docs/thesis/evidence/verification_and_speedups_2026-10-23.md`.
+
 ## Sanitizers
 
 ```bash

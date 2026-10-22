@@ -316,6 +316,24 @@ TEST(LeasedCore, ChunkHalvesAfterTokensSatUnusedAndDoublesWhenTheLeaseRunsDry) {
 }
 
 // Week 5 shutdown: unused leased tokens go back to Redis, so a restart does not burn them.
+// A full lease table never refuses a check: keys it cannot hold take the exact path.
+TEST(LeasedCore, KeysAFullLeaseTableCannotHoldTakeTheExactPath) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules(), 64);  // 64 slots
+  std::vector<Pending> checks(100);
+  for (int i = 0; i < 100; ++i) checks[static_cast<std::size_t>(i)].Start(core, "k" + std::to_string(i), "burst");
+  ASSERT_EQ(redis.Pending(), 100u);
+  int chunks = 0, exact = 0;
+  while (redis.Pending() > 0) ++(redis.Reply(Granted()) == 10 ? chunks : exact);
+  EXPECT_EQ(chunks, 64);  // a lease refill of one chunk each
+  EXPECT_EQ(exact, 36);   // one script per check
+  for (const auto& c : checks) {
+    ASSERT_TRUE(c.result.has_value());
+    EXPECT_TRUE(c.result->allowed);
+  }
+}
+
 TEST(LeasedCore, ReturnLeasesGivesBackWhatEachLeaseStillHolds) {
   ManualBackend redis;
   PlanStore plans(redis);

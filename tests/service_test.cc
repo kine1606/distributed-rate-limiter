@@ -343,5 +343,15 @@ TEST_F(AdmissionTest, ABatchCountsEveryEntry) {
   EXPECT_EQ(service_.InFlight(), 0);  // the batch left all at once
 }
 
+TEST_F(AdmissionTest, ABatchThatDoesNotFitWhatIsLeftIsRefusedAtOnce) {
+  auto a = Hold();
+  ASSERT_TRUE(WaitHeld(1));
+  EXPECT_EQ(Call(2).error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);  // 1 + 2 > 2: retry later
+  EXPECT_EQ(core_->Held(), 1u);  // no entry of the batch reached the engine
+  EXPECT_EQ(service_.InFlight(), 1);
+  core_->Release();
+  EXPECT_TRUE(a.get().ok());
+}
+
 }  // namespace
 }  // namespace ratelimiter

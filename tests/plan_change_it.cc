@@ -4,12 +4,14 @@
 // redis-cli is missing (seed: RL_TEST_CLUSTER, see it_cluster.h).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -171,6 +173,38 @@ TEST_F(PlanChangeIT, SuspendAndRestoreReachEveryInstance) {
   const auto r = instances_[0]->Check(c);
   EXPECT_TRUE(r.allowed);
   EXPECT_EQ(r.remaining, 1997u);  // the two checks before the suspension still count
+}
+
+// Messages published while the subscription is down are lost, so a listener whose connection was
+// killed must come back by itself and call on_resync again (the instance then drops every cached plan),
+// and messages after that must arrive again.
+TEST(PlanListenerIT, AKilledSubscriptionComesBackAndResyncs) {
+  auto admin = ConnectAdmin();
+  const auto [host, port] = ClusterSeed();
+  if (!admin) GTEST_SKIP() << "Redis Cluster not reachable at " << host << ":" << port;
+  if (std::system("command -v redis-cli >/dev/null") != 0) GTEST_SKIP() << "needs redis-cli";
+  std::atomic<int> resyncs{0};
+  std::mutex mu;
+  std::vector<std::string> seen;
+  PlanListener listener(host, port,
+                        [&](std::string_view c) {
+                          std::lock_guard lock(mu);
+                          seen.emplace_back(c);
+                        },
+                        [&] { ++resyncs; });
+  const auto wait_for = [](auto done) {
+    for (int i = 0; i < 300 && !done(); ++i) std::this_thread::sleep_for(10ms);
+    return done();
+  };
+  ASSERT_TRUE(wait_for([&] { return resyncs.load() == 1; }));
+  const std::string kill = "redis-cli -h " + host + " -p " + std::to_string(port) + " CLIENT KILL TYPE pubsub >/dev/null";
+  ASSERT_EQ(std::system(kill.c_str()), 0);
+  ASSERT_TRUE(wait_for([&] { return resyncs.load() == 2; }));  // back, and told to resync
+  admin->publish(std::string(PlanListener::kChannel), "cust:resync");
+  EXPECT_TRUE(wait_for([&] {
+    std::lock_guard lock(mu);
+    return std::find(seen.begin(), seen.end(), "cust:resync") != seen.end();
+  }));
 }
 
 TEST_F(PlanChangeIT, RlctlRefusesAnUnknownPlanAndASecondCreate) {

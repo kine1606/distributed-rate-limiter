@@ -9,7 +9,10 @@
     { "name": "asan", "binaryDir": "${sourceDir}/build/asan", "generator": "Ninja",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "RL_SANITIZER": "address", "RL_NATIVE": "OFF" } },
     { "name": "tsan", "binaryDir": "${sourceDir}/build/tsan", "generator": "Ninja",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "RL_SANITIZER": "thread", "RL_NATIVE": "OFF" } }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "RL_SANITIZER": "thread", "RL_NATIVE": "OFF" } },
+    { "name": "coverage", "binaryDir": "${sourceDir}/build/coverage", "generator": "Ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "RL_BUILD_BENCH": "OFF",
+                          "CMAKE_CXX_FLAGS": "--coverage -fprofile-update=atomic", "CMAKE_EXE_LINKER_FLAGS": "--coverage" } }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
