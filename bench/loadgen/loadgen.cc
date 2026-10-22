@@ -161,6 +161,7 @@ struct OpenStats {
   std::atomic<std::uint64_t> sent{0}, ok{0}, allowed{0}, errors{0}, skipped{0};
   std::atomic<std::int64_t> outstanding{0};
   std::array<std::atomic<std::uint64_t>, kOutcomes> outcomes{};
+  std::array<std::atomic<std::uint64_t>, 17> error_codes{};  // failed calls by grpc::StatusCode
   std::vector<std::array<std::atomic<std::uint64_t>, kOutcomes>> per_second;  // by scheduled second
 };
 
@@ -178,6 +179,14 @@ std::string Outcomes(const OpenStats& st) {
   for (int i = 1; i < kOutcomes; ++i) {
     out += std::string(i > 1 ? "," : "") + "\"" + kOutcome[static_cast<std::size_t>(i)] +
            "\":" + std::to_string(st.outcomes[static_cast<std::size_t>(i)].load());
+  }
+  out += "},\"error_codes\":{";  // e.g. 4 DEADLINE_EXCEEDED, 8 RESOURCE_EXHAUSTED, 14 UNAVAILABLE
+  bool any = false;
+  for (std::size_t code = 0; code < st.error_codes.size(); ++code) {
+    if (const auto n = st.error_codes[code].load(); n > 0) {
+      out += std::string(any ? "," : "") + "\"" + std::to_string(code) + "\":" + std::to_string(n);
+      any = true;
+    }
   }
   out += "},\"timeline_fields\":[";
   for (int i = 1; i < kOutcomes; ++i) out += std::string(i > 1 ? "," : "") + "\"" + kOutcome[static_cast<std::size_t>(i)] + "\"";
@@ -237,6 +246,7 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
               st.allowed += c->resp.allowed();
             } else {
               ++st.errors;
+              ++st.error_codes[std::min<std::size_t>(static_cast<std::size_t>(s.error_code()), 16)];
             }
           }
           --st.outstanding;

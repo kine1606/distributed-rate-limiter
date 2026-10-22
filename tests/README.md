@@ -42,7 +42,8 @@ a ctest label. Script and integration tests skip, not fail, when Redis is unreac
 | `circuit_breaker_test.cc` | unit + TSan | 5 | done: breaker states on a fake clock, one probe, retries of timeouts only where safe, open breaker answers without Redis, stopping answers waiting retries |
 | `overage_test.cc` | script | 4 | built inside `lua_scripts_test.cc` and `grpc_quota_it.cc` instead |
 | `breaker_test.cc` | unit | 5 | built as `circuit_breaker_test.cc` |
-| `tests/eval/*.sh` | evaluation | 6 | The nine tests in `docs/EVALUATION.md` |
+| `property_test.cc` | unit | 6 | done: random histories (checks, retries, plan changes, outages, clock jumps, UTC rollovers) through the real engine on a script-faithful fake Redis; every answer and usage event equals a reference model (4 configurations); leased quota within its bounds; `RL_PROPERTY_SEEDS`, `RL_PROPERTY_SEED` |
+| `tests/eval/*.sh` | evaluation | 6 | done for tests 1, 4, 5, 6, 9, 11 and 12 of `docs/EVALUATION.md`: `quota_accuracy.sh`, `burst_accuracy.sh` with `bound_model.py`, `flood_cardinality.sh`, `faults.sh`, `noisy_neighbour.sh` |
 
 ## Sanitizers
 

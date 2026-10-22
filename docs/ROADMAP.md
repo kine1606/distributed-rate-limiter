@@ -241,9 +241,14 @@ About 16.5 h.
 
 - [x] TSan and ASan clean (2 h). See [tests/README.md](../tests/README.md#sanitizers).
       Done 2026-10-22: 214 of 214 tests pass in release, ASan and TSan (the in-process gRPC service
-      tests skip under TSan, which needs an instrumented gRPC).
-- [ ] Property-based tests (3 h, Should): random histories of checks, retries, plan changes and
+      tests skip under TSan, which needs an instrumented gRPC). 2026-10-23, at the freeze: 224 of 224.
+- [x] Property-based tests (3 h, Should): random histories of checks, retries, plan changes and
       rollovers against a simple reference model; seeded.
+      Done 2026-10-23 (`tests/property_test.cc`): the real engine on a script-faithful fake Redis
+      against a reference model of Chapter 3's rules, in 4 configurations; leased quota against its
+      bounds. 20,000 seeds each: 22.6 M checks equal the model, 80,490 leased days within bounds; ten
+      bugs planted in the engine all caught (`tests/eval/planted_bugs.py`).
+      `docs/thesis/evidence/property_tests_2026-10-23.md`.
 - [x] Quota accuracy test, 4 instances, 10% retries, 20 runs (2 h).
       Done 2026-10-22 (`tests/eval/quota_accuracy.sh`): 20 of 20 runs exact. Request ids allowed,
       Redis `used` and usage events all 200 (Free) and 2,200 (Pay, with grace); 9,608 requests sent
@@ -259,17 +264,28 @@ About 16.5 h.
       calls in 10 s (deny cache). 1M customers: 171 B per plan, about 420 B per active customer;
       customer rule −26% (plan cache misses), leased rule −35% (cold leases, 224 MB).
       `docs/thesis/evidence/flood_cardinality_2026-10-22.md`.
-- [ ] Fault tests: kill master, 20 ms latency (toxiproxy), dropped connections (3 h).
-- [ ] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
-- [ ] Nov 22: feature freeze, tag `v1.0`. See [EVALUATION.md](EVALUATION.md).
+- [x] Fault tests: kill master, 20 ms latency (toxiproxy), dropped connections (3 h).
+      Done 2026-10-23 (`tests/eval/faults.sh` with `tc netem`, `bench/fault_kill_master.sh`): +20 ms,
+      +80 ms on one master, a silent master, five connection kills, a killed master; each plan follows
+      its policy, no call failed, recovery within 1 s (5 s for the killed master). Found and fixed: the
+      client's timeout is an idle timeout, so a slow master was never timed out; each attempt now has
+      a 50 ms deadline (3 to 5% on the exact path). `docs/thesis/evidence/faults_2026-10-23.md`.
+- [x] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
+      Done 2026-10-23 (`tests/eval/noisy_neighbour.sh`): an over-quota flood costs Redis nothing (others'
+      p99 4.5 to 14.4 ms, shared CPU); an over-burst flood within quota costs a Redis script per call
+      (others' p99 31 ms). Local burst denial is future work. `docs/thesis/evidence/noisy_neighbour_2026-10-23.md`.
+- [x] Nov 22: feature freeze, tag `v1.0`. See [EVALUATION.md](EVALUATION.md).
+      Done 2026-10-23: `v1.0` tags the commit that closes Week 6. From here, only fixes and measured
+      performance changes.
 
 Gate: all tests green; measured over-admission at or below the derived bound.
 Cut first: noisy neighbour, then connection-drop faults.
 
-Gate status: met (2026-10-22). All 214 tests are green in release, ASan and TSan. The largest
-over-admission measured is 381.5 tokens against a bound of 400 (10% cap; 189.1 of 200 at 5% and 34.8
-of 40 at 1%). Still open in Week 6: property-based tests (Should), fault tests beyond killing a
-master, the noisy-neighbour test, and the v1.0 tag.
+Gate status: met. 2026-10-22: the largest over-admission measured is 381.5 tokens against a bound of
+400 (10% cap; 189.1 of 200 at 5% and 34.8 of 40 at 1%). 2026-10-23: every Week 6 item done, all 224
+tests green in release, ASan and TSan, tagged `v1.0`. The fault tests found one design fault (no
+deadline per Redis call), fixed and measured before the tag; the noisy-neighbour test found one gap
+(a flood over burst costs a Redis call each), recorded as future work.
 
 ## Week 7 (Nov 23 to 29): Benchmarks, ablation and measured tuning
 

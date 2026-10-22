@@ -90,6 +90,17 @@ that the quota binds. Each cell: request ids allowed / Redis `used` / usage even
 - **Setup:** kill a Redis master; add 20 ms latency; drop connections.
 - **Result:** behaviour per plan's failure policy (allowed, denied, unverified counts), breaker
   state over time, recovery time.
+- **Measured (2026-10-23, 3 runs each, `docs/thesis/evidence/faults_2026-10-23.md`):**
+  - +20 ms on every master: nothing failed; customer checks went from p50 1.45 to 42.5 ms (two round
+    trips), leased checks from 0.61 to 0.64 ms.
+  - +80 ms on one master, or one master silent: exactly its third of the customers got their policy
+    (Free `UNAVAILABLE`, Pay `UNVERIFIED`) at p99 under 4 ms; leases served until they ran dry;
+    recovery within 1 s.
+  - Five kills of every connection in 10 s: 2 to 18 policy answers per stream, no errors.
+  - A master killed (fault cluster): a third of the customers for 4 to 5 s, no errors.
+  - Found and fixed: the client's 50 ms timeout is an idle timeout, so a master answering every call
+    80 ms late was never timed out (p99 251 ms, no fallback). Each attempt now has a deadline, costing
+    3 to 5% on the exact path.
 
 ## 10. Ablation
 
@@ -101,6 +112,10 @@ that the quota binds. Each cell: request ids allowed / Redis `used` / usage even
 
 - **Setup:** one tenant sends ten times its quota while the others run normal load.
 - **Result:** the other tenants' p99 with and without the flood.
+- **Measured (2026-10-23, 3 runs, `docs/thesis/evidence/noisy_neighbour_2026-10-23.md`):** others at
+  5,000/s, one tenant at 20,000/s. Over quota: the others' p99 went from 4.5 to 14.4 ms (shared CPU),
+  with no extra Redis call. Over burst within quota: 31.4 ms, because each call runs the burst script
+  (Redis 3,319 to 25,233 calls/s on that master). Every answer to the others was correct.
 
 ## 12. Bound model check
 

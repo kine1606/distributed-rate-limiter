@@ -633,6 +633,15 @@ was denied 74,881 times a second, the instance's rate for any check, and cost Re
 seconds, both of them plan re-reads. At a fixed 10,000 calls a second a denial took 0.24 ms at the
 median and 0.61 ms at p99. The lock stays.
 
+The cache holds quota denials only. A tenant within its daily quota but far over its burst limit
+gets `RATE_LIMITED` from the burst script, one Redis call per attempt. In the noisy-neighbour test
+(evaluation test 11, `docs/thesis/evidence/noisy_neighbour_2026-10-23.md`), one such tenant at 20,000
+calls a second raised its master's load from 3,319 to 25,233 calls a second, and the other tenants'
+p99 from 4.5 to 31 ms; their answers stayed right. The same flood over quota cost Redis nothing.
+Leased rules already deny locally until the retry time Redis returned (3.5.2, step 7), and the same
+local denial for the customer's burst check is the fix. It is future work, because the retry time
+depends on the cost that was denied.
+
 **Correctness.** A denial recorded at the moment of a lookup in the same shard can be missed once;
 that check then asks Redis, which denies too, so the cache can make an answer slower but never looser.
 Instances do not share denials: each learns one from its own `QUOTA_EXHAUSTED` answer, so N instances
@@ -697,6 +706,18 @@ pending on it. Four clients with the keys spread over them took the exact path f
 checks per second at 192 calls in flight; with four clients, 50 ms was the smallest timeout that
 raised no false alarm. A tighter timeout needs the I/O thread freed of finishing calls, which is
 future work.
+
+The timeout is a deadline on each attempt, which the client library alone did not provide. Its
+timeout is an idle timeout per connection, re-armed by any reply that arrives. The fault test of
+Week 6 gave one master 80 ms of extra latency under load: its connection was never idle for 50 ms,
+no call timed out, and that master's customers waited about 250 ms for three slow round trips
+instead of getting their plan's policy. The resilient layer now answers every attempt as timed out
+at its deadline, whichever comes first of the reply and the deadline, and drops the late reply. The
+deadlines wait in one queue in send order, which a timer thread checks in batches. It costs 3 to 5%
+on the exact path, and no deadline was missed at saturation or under open-loop overload at 30,000
+checks per second (`docs/thesis/evidence/faults_2026-10-23.md`). With it, a master 80 ms slow, or
+silent, gives exactly its third of the customers their policy, at a p99 under 4 ms, and recovers
+within a second.
 
 **Retries.** A call that timed out may still have run, so only calls whose repetition cannot make a
 limit looser are sent again: plan reads, and token-bucket scripts, where a repeat at worst takes one
@@ -767,7 +788,8 @@ stricter, never looser, and needs no recovery.
 | Failure | Detected by | Behaviour | Recovery |
 | --- | --- | --- | --- |
 | Redis master down | refused calls, 50 ms timeouts, slot-group breakers | leases serve; then the plan decides for that master's slots only | replica promoted; next call re-routed; breaker probes close |
-| Redis slow | timeouts | safe calls retried twice with jitter; then as master down | automatic |
+| Redis slow or silent | a 50 ms deadline per attempt | safe calls retried twice with jitter; then as master down | breaker probes, within 1 s |
+| Connections dropped | connection errors | calls in flight at that moment follow the policy | reconnect at once |
 | No master reachable from an instance | every breaker open | health `NOT_SERVING`; answers from leases and plan policies | first successful probe |
 | Missed plan-change message | | old plan until the five-second cache lifetime ends | automatic |
 | Limiter overloaded | in-flight count, calls per connection | `RESOURCE_EXHAUSTED`, or queueing on the connection | the client backs off |
