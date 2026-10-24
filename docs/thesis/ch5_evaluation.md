@@ -1,7 +1,7 @@
 # Chapter 5. Evaluation
 
-> Draft, started Week 7 (2026-10-24) from the Week 6 evidence. Target 12 to 14 pages. The benchmark
-> matrix and the ablation are marked **[Pending: Week 7]**; the final extrapolation **[Pending: Week 8]**.
+> Draft, Week 7 (2026-10-24). Target 12 to 14 pages. The extrapolation is marked
+> **[Pending: Week 8]**.
 
 This chapter tests the two halves of the thesis claim separately, as Chapter 1 set out. First
 correctness: quotas are exact under concurrency, retries, plan changes and failures (5.2 to 5.4).
@@ -296,7 +296,9 @@ the allocation and all the locks. Allocation is spread thin:
 - This project's code allocates about 3% on the customer path and nothing on the lease path beyond
   gRPC's own.
 
-So the remaining speed-up lies in fewer gRPC calls per check (`CheckBatch`), not in the engine.
+So the remaining speed-up lies in fewer gRPC calls per check, not in the engine. Measured:
+`CheckBatch` with 10 checks per call reached 400,187 checks/s on one instance, 5.5 times single calls
+on the same workload (`matrix_2026-10-24.md`).
 
 **The one large finding came from the same method, the day before:** abseil's mutex deadlock
 detection, running in gRPC's own threads. Switching it off gave:
@@ -312,6 +314,8 @@ detection, running in gRPC's own threads. Switching it off gave:
   214 ns.
 - LTO, a larger glibc thread cache and jemalloc changed throughput within noise, so none is adopted.
 - PGO was not tried: like LTO it rebuilds only the project's code, 4 to 6% of the CPU.
+- Redis Functions (`FCALL`) ran the same script at the same rate as `EVALSHA`, without and with
+  pipelining (62,461 against 62,469 calls/s unpipelined).
 
 ## 5.11 Extrapolation to 1,000,000 checks per second
 

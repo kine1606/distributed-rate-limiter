@@ -46,7 +46,7 @@ see.
 | G1 | a quota is never over-admitted, whatever the concurrency | 400 concurrent calls on a Free quota of 200 through gRPC admit exactly 200; evaluation test 1 with several instances | met: four instances, 20 of 20 runs exact (Free 200, Pay 2,200), 9,608 duplicate requests counted once |
 | G2 | a retry with the same request id within five minutes is not counted again | script and gRPC tests (3.4.3) | met |
 | G3 | a plan change applies on the next call and keeps the day's usage | mid-day upgrade test; 22 ms from the admin tool to two instances (3.4.4) | met |
-| G4 | one reset instant, 00:00 UTC by the Redis clock | day-rollover test of the quota script; evaluation test 2 | script tested; test 2 **[Pending: Week 6]** |
+| G4 | one reset instant, 00:00 UTC by the Redis clock | day-rollover test of the quota script; evaluation test 2 | met: yesterday's full counter resets once although two instances meet it at the same moment (`YesterdaysFullCounterResetsOnceForEveryInstance`); 34,425 rollovers in the property tests |
 | G5 | about 1,000,000 checks per second on a cluster | an estimate from per-instance measurements (3.8), never reported as a measurement | estimated in 3.8 |
 | G6 | p50 below 500 µs and p99 below 2 ms per check | latency at fixed arrival rates, measured at the client (an upper bound on the server-side figure) | met by leased rules up to 20,000 checks/s per instance (p50 0.43 ms, p99 1.45 ms; final build, `open_loop_2026-10-24.md`); at 40,000/s p99 3.30 ms. The full customer check meets the p99 at 5,000/s (1.88 ms) but not the p50 (0.94 ms): it needs two Redis round trips |
 | G7 | over-admission of a leased limit at most N × C in any window | proof (3.5.3); seeded harness over 100,000 seeds; measurement on the cluster | proved and measured: at most 381.5 tokens against 400 at a 10% cap, a model within 0.3 tokens (3.5.4) |
@@ -468,8 +468,9 @@ customer of 100,000 a day (C = 100) with 20% more demand than the bound allows. 
 not deduplicate request ids: a retry inside the plan counts again and uses up one more unit of the
 plan, though the retry itself is never billed as overage.
 
-The accuracy of leased quota under faults and over a day boundary is evaluation test 4
-**[Pending: Week 6]**.
+The accuracy of leased quota under faults and over a day boundary was tested by the property tests:
+over 80,490 simulated days with outages and rollovers, Redis never granted beyond the plan, and N
+instances admitted what Redis granted minus at most N × C held in leases (5.2).
 
 ## 3.5 Lease protocol and the accuracy bound
 
@@ -589,8 +590,11 @@ therefore a measured knob: on four instances, a cap of 1% bounds a burst to 35 e
   burst limit by the throughput argument of 3.5.1, kept for the daily quota where exactness is the
   product.
 - **Adding a full chunk at the watermark.** Simpler, and up to 30% fewer refills than the top-up, but
-  it breaks the invariant (3.5.4). The top-up costs refills of 0.7 to 1.0 × C instead of exactly C;
-  how many more refills that means under load is measured in Week 7 **[Pending]**.
+  it breaks the invariant (3.5.4). The top-up costs refills of 0.7 to 1.0 × C instead of exactly C,
+  at most 43% more of them. Measured under load (one instance, 192 in flight, 3 runs), the mean
+  top-up was 0.87 of the chunk over Zipf keys on 10,000 keys, so 14.3 to 14.7% more refills. Over
+  1,000,000 keys it was 0.994, so 0.6% more, because nearly every refill fills an empty lease
+  (`rl_lease_topup_tokens_total`).
 - **`fetch_sub` instead of a compare-and-swap loop.** Measured 2.5 to 2.7 times faster on one shared
   lease under contention, but a failed take must be undone, and while it is undone another thread
   can be denied although tokens exist. The compare-and-swap never lets the count go negative.
@@ -897,7 +901,8 @@ Each assumption is a way the estimate can be wrong; Chapter 5 checks those it ca
   should help, but no server was measured.
 - **Instances scale linearly.** They share nothing but Redis, which makes it plausible. Four instances
   on the laptop reached 116,515 checks per second, which only shows that the laptop ran out of cores,
-  not how instances scale; Week 7 measures one to four instances **[Pending: Week 7]**.
+  not how instances scale. The Week 7 matrix confirms it: one to four instances on the same laptop
+  share its CPUs and add no capacity, and none of the engines degrades with more instances (5.6).
 - **A master absorbs 120,000 script calls per second.** This was measured with the token-bucket
   script. The quota script does more work (deduplication, overage) and was not measured on its own.
 - **Keys spread evenly over the masters.** One customer's keys all live on one master, so a single

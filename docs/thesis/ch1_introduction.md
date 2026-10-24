@@ -123,7 +123,7 @@ limit is still one script per check; leasing it per customer is future work (Sec
    leased mode, scaling across instances, floods, key cardinality, Redis failures), with
    reproducible scripts and raw results. A first strict baseline exists (Week 2: a median of 25,301
    checks per second for one instance on one laptop at high concurrency, 10,024 at p99 10.5 ms);
-   the full matrix is **[Pending: Weeks 6 to 8]**.
+   the full matrix of Week 7 is in Chapter 5 (5.6).
 
 ## 1.6 Structure of the thesis
 
