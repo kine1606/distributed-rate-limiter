@@ -39,7 +39,7 @@ see.
 
 ### 3.1.2 Non-functional requirements
 
-*Table 3.2: Non-functional requirements, from the goals of Section 1.3, and their status after Week 5.*
+*Table 3.2: Non-functional requirements, from the goals of Section 1.3, and their final status (Chapter 5).*
 
 | Goal | Requirement | Verified by | Status |
 | --- | --- | --- | --- |
