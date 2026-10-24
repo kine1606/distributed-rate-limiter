@@ -185,7 +185,7 @@ time; `open_loop_2026-10-24.md`):
 | Rule | 10,000/s | 20,000/s | 30,000/s | 40,000/s |
 | --- | --- | --- | --- | --- |
 | leased `api_default`, p99 | 0.58 ms | 1.45 ms | 2.54 ms | 3.30 ms |
-| customer check (Pay), p99 | 2.54 ms | 7.85 ms | | |
+| customer check (Pay), p99 | 2.54 ms | 7.84 ms | | |
 
 At the Week 5 gate a leased check queued beyond 20,000 offered (p99 156 ms at 30,000). The knee is now
 beyond 40,000, consistent with the throughput gained since (5.10). A leased check stays under 1 ms at
