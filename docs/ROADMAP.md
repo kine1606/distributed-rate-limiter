@@ -362,11 +362,16 @@ Gate: full thesis draft by Dec 6. Cut first: AWS run, then prices in the cost mo
 ## Week 9 (Dec 7 to 15): Review and delivery
 
 - [ ] Dec 7: full draft to advisor; apply feedback.
-- [ ] Chapter 6, proofreading, references, figures, faculty format.
-- [ ] Reproducibility check on a clean clone: one command rebuilds, tests and regenerates every table.
+- [ ] Chapter 6, proofreading, references, figures, faculty format. Chapter 6 drafted ahead, 2026-10-24
+      (`docs/thesis/ch6_conclusion.md`); proofreading, references and the faculty format remain.
+- [x] Reproducibility check on a clean clone: one command rebuilds, tests and regenerates every table.
+      Done 2026-10-24: `scripts/reproduce.sh` on a fresh clone builds, passes 240 tests and runs every table
+      tool (`--rerun` reruns the benchmarks first). It found 26 scripts committed without the executable bit
+      (NTFS under WSL), now fixed.
 - [ ] Slides, two-minute demo, backup video; (bonus) Spring Boot demo gateway.
       See [examples/gateway-springboot/README.md](../examples/gateway-springboot/README.md).
-- [ ] Mock defense with the 20 questions in `docs/thesis/Thesis_Defense_Brief.docx`.
+- [ ] Mock defense with the 20 questions in `docs/thesis/Thesis_Defense_Brief.docx`. Prepared 2026-10-24:
+      `docs/thesis/defense_numbers.md` updates the brief's numbers and links each question to its evidence.
 - [ ] Dec 15: submit.
 
 ## If you fall behind
