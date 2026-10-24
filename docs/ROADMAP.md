@@ -340,12 +340,22 @@ Cut first: build-level wins, then Redis Functions.
 
 ## Week 8 (Nov 30 to Dec 6): Models, final numbers and the evaluation chapter
 
-- [ ] Universal Scalability Law fit over instances and threads (2 h); project instances for 1M/s.
-- [ ] Little's law cross-check of in-flight = throughput × latency (0.5 h).
-- [ ] Capacity and cost model with cited, dated prices (2 h, Should).
-- [ ] Extrapolation to 1M checks/s with every assumption written out (1 h).
+- [x] Universal Scalability Law fit over instances and threads (2 h); project instances for 1M/s.
+      Done 2026-10-24 (`bench/concurrency_sweep.sh`, `tools/usl_fit.py`,
+      `docs/thesis/evidence/scaling_2026-10-24.md`): over concurrency on one instance the USL does not fit
+      (λ a third of X(1) by least squares; up to 49% off on relative error), because the cost per call falls
+      with concurrency. Throughput never falls up to 384 in flight (κ about 0). Instances cannot be swept on
+      one laptop; the projection is `tools/extrapolate.py`.
+- [x] Little's law cross-check of in-flight = throughput × latency (0.5 h). Done 2026-10-24: N / X lies
+      between p50 and p99 in all 30 cells of the sweep.
+- [x] Capacity and cost model with cited, dated prices (2 h, Should). Done 2026-10-24 (`tools/extrapolate.py`,
+      AWS on-demand list prices retrieved 2026-10-24): about $13,670 a month for leased rules at p99 < 2 ms,
+      $18,466 for customer checks, at 1M checks/s (estimates).
+- [x] Extrapolation to 1M checks/s with every assumption written out (1 h). Done 2026-10-24 (Chapter 5
+      section 5.11, `docs/DESIGN.md` section 9).
 - [ ] (bonus) One AWS run on separate machines, budget alarm first.
-- [ ] Thesis: Chapter 5 (8 h); `DESIGN.md` and `README.md` finished.
+- [x] Thesis: Chapter 5 (8 h); `DESIGN.md` and `README.md` finished. Draft complete 2026-10-24 (every section
+      filled, every table from a script); `DESIGN.md` section 11 written; README status current.
 
 Gate: full thesis draft by Dec 6. Cut first: AWS run, then prices in the cost model.
 

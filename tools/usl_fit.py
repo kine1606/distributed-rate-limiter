@@ -35,7 +35,7 @@ def fit(points):
     pred = usl(n, lam, sigma, kappa)
     r2 = 1 - ((x - pred) ** 2).sum() / ((x - x.mean()) ** 2).sum()
     peak = math.sqrt((1 - sigma) / kappa) if kappa > 0 else math.inf
-    return lam, sigma, kappa, r2, peak
+    return lam, sigma, kappa, r2, peak, float(np.median(np.abs(pred / x - 1)))
 
 
 def load(path):
@@ -48,15 +48,18 @@ def load(path):
 
 
 def report(rows):
-    out = ["| Engine | lambda (checks/s at N = 1) | sigma | kappa | R² | Peak N* | X(N*) | Max measured |",
-           "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    out = ["| Engine | lambda (fit) | X(1) measured | sigma | kappa | R² | median abs. rel. error | Peak N* | "
+           "Ceiling (fit) | Max measured |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     fits = {}
     for e, rs in rows.items():
-        lam, sigma, kappa, r2, peak = fits[e] = fit([(n, r["checks_per_s"]) for n, r in rs])
-        best = max(st.median(r["checks_per_s"] for m, r in rs if m == n) for n in {n for n, _ in rs})
-        xpeak = usl(peak, lam, sigma, kappa) if math.isfinite(peak) else lam / sigma if sigma else math.inf
-        out.append(f"| {LABELS.get(e, e)} | {lam:,.0f} | {sigma:.4f} | {kappa:.2e} | {r2:.3f} | {peak:,.0f} | "
-                   f"{xpeak:,.0f} | {best:,.0f} |")
+        lam, sigma, kappa, r2, peak, rel = fits[e] = fit([(n, r["checks_per_s"]) for n, r in rs])
+        med = {n: st.median(r["checks_per_s"] for m, r in rs if m == n) for n in {n for n, _ in rs}}
+        nmax = max(med)
+        no_peak = not math.isfinite(peak) or peak > 10 * nmax  # kappa about 0: no retrograde region in range
+        ceiling = lam / sigma if no_peak else usl(peak, lam, sigma, kappa)
+        out.append(f"| {LABELS.get(e, e)} | {lam:,.0f} | {med[min(med)]:,.0f} | {sigma:.4f} | {kappa:.1e} | {r2:.3f} | "
+                   f"{100 * rel:.0f}% | {'none (kappa about 0)' if no_peak else f'{peak:,.0f}'} | {ceiling:,.0f} | "
+                   f"{med[nmax]:,.0f} |")
     out += ["", "Little's law, N / X against the measured latency (medians of the runs):", "",
             "| Engine | N | X (checks/s) | N / X (ms) | p50 (ms) | p99 (ms) | p50 <= N/X <= p99 |",
             "| --- | --- | --- | --- | --- | --- | --- |"]
@@ -95,20 +98,27 @@ def plot(rows, fits, out):
             continue
         rs = rows[e]
         ax.plot([n for n, _ in rs], [r["checks_per_s"] / 1000 for _, r in rs], MARKERS[e], color=COLORS[e],
-                markersize=6, markeredgecolor=surface, markeredgewidth=1, label=f"{LABELS[e]}, measured")
-        lam, sigma, kappa, _, _ = fits[e]
+                markersize=6, markeredgecolor=surface, markeredgewidth=1)
+        lam, sigma, kappa = fits[e][:3]
         y = usl(curve, lam, sigma, kappa) / 1000
-        ax.plot(curve, y, color=COLORS[e], linewidth=2, label=f"{LABELS[e]}, USL fit")
-        ax.annotate(LABELS[e], (curve[-1], y[-1]), xytext=(6, 0), textcoords="offset points", va="center",
+        ax.plot(curve, y, color=COLORS[e], linewidth=2, marker=MARKERS[e], markevery=[], label=LABELS[e])
+        nudge = {"allow_all": 8, "leased": -8}.get(e, 0)  # the two top curves end together
+        ax.annotate(LABELS[e], (curve[-1], y[-1]), xytext=(6, nudge), textcoords="offset points", va="center",
                     color=text, fontsize=9)
     ax.set_xscale("log", base=2)
-    ax.set_xticks([1, 2, 4, 8, 16, 32, 64, 128, 256])
-    ax.set_xticklabels(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
+    ticks = [1, 2, 4, 8, 16, 32, 64, 128, 384]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(t) for t in ticks])
     ax.set_xlim(0.8, nmax * 2.6)
     ax.set_ylim(0, None)
     ax.set_xlabel("Calls in flight, N (closed loop, one instance)")
     ax.set_ylabel("Throughput (thousand checks/s)")
-    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    from matplotlib.lines import Line2D
+
+    handles = [Line2D([], [], color=COLORS[e], marker=MARKERS[e], linewidth=2, markersize=6, label=LABELS[e])
+               for e in ("allow_all", "leased", "strict") if e in rows]
+    ax.legend(handles=handles, frameon=False, fontsize=8, loc="upper left",
+              title="points: runs; lines: USL fit", title_fontsize=8)
     fig.tight_layout()
     fig.savefig(out, dpi=200, facecolor=surface)
 
@@ -117,8 +127,8 @@ def self_check():
     rng = np.random.default_rng(1)
     pts = [(n, usl(n, 5000, 0.03, 2e-4) * (1 + rng.normal(0, 0.01))) for n in (1, 2, 4, 8, 16, 32, 64, 128, 256)
            for _ in range(3)]
-    lam, sigma, kappa, r2, peak = fit(pts)
-    assert abs(lam / 5000 - 1) < 0.05 and abs(sigma - 0.03) < 0.01 and abs(kappa / 2e-4 - 1) < 0.2 and r2 > 0.99, \
+    lam, sigma, kappa, r2, peak, rel = fit(pts)
+    assert abs(lam / 5000 - 1) < 0.05 and abs(sigma - 0.03) < 0.01 and abs(kappa / 2e-4 - 1) < 0.2 and r2 > 0.99 and rel < 0.02, \
         (lam, sigma, kappa, r2)
     assert abs(peak - math.sqrt(0.97 / 2e-4)) / peak < 0.15
     rows = {"leased": [(n, {"checks_per_s": x, "p50_ms": 1000 * n / x * 0.95, "p99_ms": 1000 * n / x * 3})

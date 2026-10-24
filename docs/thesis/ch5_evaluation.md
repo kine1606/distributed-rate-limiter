@@ -204,6 +204,27 @@ the stall itself was not observed. Eleven repeats crossing the quota, eight with
 with no deadline misses. The load generator now counts `UNVERIFIED` answers, so the matrix records
 any such run.
 
+**One instance under rising concurrency** (`bench/concurrency_sweep.sh`, `scaling_2026-10-24.md`;
+Figure 5.3). Closed loop from 1 to 384 calls in flight, 3 runs each:
+- **Throughput never fell as concurrency rose.** Every median is above the one before.
+- **The leased engine follows gRPC alone at every point** (104,581 against 105,626 checks/s at 384).
+- **The strict engine levels off near 62,500**, each check waiting for a Redis round trip.
+
+![Throughput against concurrency, with USL fits](figures/usl.png)
+
+*Figure 5.3: Throughput of one instance against calls in flight, with Universal Scalability Law fits.*
+
+**The Universal Scalability Law does not describe this curve.**
+- **Least squares** fits the plateau (R² 0.98, κ about 0, so no retrograde region) but puts the rate
+  at one call in flight at a third of the measured one.
+- **A fit on relative error** misses the plateau by up to 49%.
+- **The likely reason:** the USL assumes a constant cost per request, while here the cost per call
+  falls as calls pile up, since gRPC and the Redis client send more calls per write and per wake-up.
+
+So the fit gives no projection beyond what the plateau already shows. Little's law holds in all 30
+cells: calls in flight ÷ throughput, the mean latency, lies between the measured p50 and p99. So the
+load generator's latencies account for the whole time a call is out.
+
 ## 5.7 Faults (evaluation test 9)
 
 `tests/eval/faults.sh` and `bench/fault_kill_master.sh` (`faults_2026-10-23.md`). Each fault is
