@@ -1,6 +1,6 @@
 # Lease fast path and deny cache
 
-> Week 3 (leases), Week 4 (deny cache, leased quota) · Flow steps A5, A7, A8 · Status: Week 4: the same leases serve large plans' daily quotas (chunks of 0.1%, `CompositeCore`; four instances admitted exactly 100,000 of 100,000, `tests/leased_quota_it.cc`); a deny lookup in a shard with no denial takes no lock. `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean); single-flight, early refill, top-up refills and local deny in `src/core/leased_core.cc`; adaptive chunk in `chunk_policy.h`; bound checked by the seeded harness `tests/lease_harness_test.cc`. interned 64-bit lease id (integer compare on lookup) and microbenchmarks in `bench/bench_lease.cc`. deny cache in `deny_cache.h` (Week 4: sharded, entries end at the Redis reset and are dropped when the plan changes). Not yet: waiter bound, eviction
+> Week 3 (leases), Week 4 (deny cache, leased quota) · Flow steps A5, A7, A8 · Status: Week 4: the same leases serve large plans' daily quotas (chunks of 0.1%, `CompositeCore`; four instances admitted exactly 100,000 of 100,000, `tests/leased_quota_it.cc`); a deny lookup in a shard with no denial takes no lock. Week 5: `LeasedCore::ReturnLeases` gives unused token-bucket tokens back at shutdown. `lease_table.{h,cc}` done (lock-free `TryTake` and table, TSan clean); single-flight, early refill, top-up refills and local deny in `src/core/leased_core.cc`; adaptive chunk in `chunk_policy.h`; bound checked by the seeded harness `tests/lease_harness_test.cc`. interned 64-bit lease id (integer compare on lookup) and microbenchmarks in `bench/bench_lease.cc`. deny cache in `deny_cache.h` (Week 4: sharded, entries end at the Redis reset and are dropped when the plan changes). Not yet: waiter bound, eviction
 
 ## What this module does
 
@@ -79,7 +79,8 @@ struct ChunkPolicy {
 5. **Chunk sizing (done, `chunk_policy.h`).** Starts at the cap, not `min_chunk`: only a dry lease
    doubles a chunk, so a moderately busy key started low would stay near the minimum (one Redis call
    per 8 checks instead of per 25). Doubles when checks found the lease dry while its refill was out; halves when the last
-   chunk lasted more than 10 s; stays within [min(8, cap), cap]. Refills top the lease up to the
+   chunk lasted more than 10 s; stays within [min(8, cap), cap]. The cap is the rule's `lease_chunk_pct` of
+   the limit (default 10%; Week 6), the knob of the bound N × C. Refills top the lease up to the
    chunk instead of adding a chunk, and checks costlier than the cap go to Redis directly: both keep
    an instance at no more than one chunk, which the bound needs (DESIGN.md section 6).
 6. **Waiter bound and deadline.** If the waiter queue is full, answer `RESOURCE_EXHAUSTED`. If a

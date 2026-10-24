@@ -128,3 +128,6 @@ graphify-out/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Python bytecode (tests/eval imports tools/usage_report.py)
+__pycache__/

@@ -1,6 +1,6 @@
 # Benchmarks
 
-> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`. Week 4: `bench_customer.cc` (plan cache hit, deny lookup, usage event; locks versus lock-free, `results/2026-10-18_customer_microbench/NOTES.md`) and the plan cache on the strict baseline (`results/2026-10-18_plancache/NOTES.md`). `ceiling_compare.sh`: how far one laptop gets (single checks, 4 instances, batches) and `envoyproxy/ratelimit` on the same laptop and load (`docs/thesis/evidence/ceiling_and_envoy_2026-10-19.md`)
+> Week 2 (baseline), Week 3 (microbenchmarks), Weeks 7 and 8 (full matrix) · Status: Week 2 baseline done (`results/2026-10-17_baseline_NOTES.md`); Week 3 lease microbenchmarks done (`bench_lease.cc`); Week 3 gate (`week3_gate.sh`) and batcher comparison (`batcher_compare.sh`) with the C++ `loadgen`. Week 4: `bench_customer.cc` (plan cache hit, deny lookup, usage event; locks versus lock-free, `results/2026-10-18_customer_microbench/NOTES.md`) and the plan cache on the strict baseline (`results/2026-10-18_plancache/NOTES.md`). Week 5: `open_loop.sh` (latency at fixed rates, open loop) and `fault_kill_master.sh` (a master killed under load, per-plan timeline; `docs/thesis/evidence/week5_gate_2026-10-21.md`). `ceiling_compare.sh`: how far one laptop gets (single checks, 4 instances, batches) and `envoyproxy/ratelimit` on the same laptop and load (`docs/thesis/evidence/ceiling_and_envoy_2026-10-19.md`)
 
 ## What this module does
 
@@ -66,9 +66,17 @@ file describes, rather than comparing against an older run.
 | Key distribution | uniform over 1M keys, Zipf (a few hot keys), one hot key |
 | Client concurrency | up to the plateau |
 
-Hint: one script, `bench/run_matrix.sh`, should run the whole matrix and write one file per cell
-into `results/`. If you can rerun the entire evaluation with one command, your advisor can too, and
-that is part of the definition of done in the plan.
+Built (Week 7): `bench/run_matrix.sh` runs the whole matrix with one command and writes one JSON line
+per run to `results/<date>_matrix/summary.txt`; `tools/matrix_tables.py <summary>` prints the
+Chapter 5 tables from it (median, min to max). The composite engine is the `customer` rule; chunk
+caps use `lease_chunk_pct`; Zipf keys are `bench/loadgen`'s last argument (`zipf`, exponent 0.99,
+checked against the expected number of distinct keys). Servers and load generators are pinned to
+separate cores (`SERVER_CPUS`, `CLIENT_CPUS`); `ONLY=<engine>` runs one engine.
+
+`bench/ablation.sh` switches one mechanism off at a time (lease, early refill, adaptive chunk,
+alignment, batcher, deny cache, plan cache) on the workload where it should matter, alternating
+with the full system, and prints the table. The switches: `RL_ABLATE=early_refill,adaptive_chunk,deny_cache`
+(never in production), `RL_PLAN_TTL_MS=0`, `RL_BATCHER`, and a build with `-DRL_LEASE_ALIGN=8`.
 
 ## Profiling
 

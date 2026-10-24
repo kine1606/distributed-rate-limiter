@@ -1,6 +1,10 @@
 #include "core/leased_core.h"
 
 #include <algorithm>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,10 +30,11 @@ CheckResult Denied(const Rule& rule, std::int64_t wait_ns) {
 }  // namespace
 
 LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity,
-                       Clock clock, ChunkObserver on_chunk_change)
+                       Clock clock, ChunkObserver on_chunk_change, LeaseTuning tuning)
     : redis_(redis),
       now_(clock),
       on_chunk_change_(std::move(on_chunk_change)),
+      tuning_(tuning),
       rules_(std::move(rules)),
       strict_(redis, plans, rules_),
       leases_(lease_capacity) {}
@@ -66,7 +71,7 @@ void LeasedCore::CheckLease(const Rule& rule, const CheckRequest& request, Check
   if (const std::int64_t left = TryTake(*lease, request.cost); left >= 0) {
     // Refill before the lease runs dry, so under steady load nobody waits for Redis.
     const std::uint32_t chunk = lease->chunk.load(std::memory_order_relaxed);
-    if (left < std::int64_t{chunk} * 3 / 10 &&
+    if (tuning_.early_refill && left < std::int64_t{chunk} * 3 / 10 &&
         now_() >= lease->deny_until_ns.load(std::memory_order_relaxed)) {
       StartRefill(*lease, chunk);
     }
@@ -105,7 +110,10 @@ void LeasedCore::StartRefill(Lease& l, std::uint32_t target) {
   // counts exactly that. Adding a full chunk at the 30% watermark let an instance hold 1.3 x C, and
   // the seeded harness caught a window over N x C (tests/lease_harness_test.cc).
   const std::int64_t have = std::max<std::int64_t>(0, l.tokens.load(std::memory_order_relaxed));
-  Refill(l, static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have)), 0);
+  const auto amount = static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have));
+  topup_requested_.fetch_add(amount, std::memory_order_relaxed);
+  topup_target_.fetch_add(target, std::memory_order_relaxed);
+  Refill(l, amount, 0);
 }
 
 void LeasedCore::Refill(Lease& l, std::uint32_t amount, std::uint32_t partial_retry_ms) {
@@ -136,7 +144,7 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
       const std::int64_t now = now_();
       const bool idle = l.last_refill_ns != 0 && now - l.last_refill_ns > kChunkIdleNs;
       chunk_from = l.chunk.load(std::memory_order_relaxed);
-      chunk_to = NextChunk(chunk_from, !l.waiters.empty(), idle, l.rule);
+      chunk_to = tuning_.adaptive_chunk ? NextChunk(chunk_from, !l.waiters.empty(), idle, l.rule) : chunk_from;
       l.chunk.store(chunk_to, std::memory_order_relaxed);  // still the refill owner: no other writer
       l.last_refill_ns = now;
     }
@@ -172,6 +180,49 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
     }
   }
   StartRefill(l, amount);  // no-op if another check already started one; it serves these too
+}
+
+LeasedCore::Returned LeasedCore::ReturnLeases(std::chrono::milliseconds wait) {
+  struct Pending {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::uint64_t left = 0, failed = 0;
+  };
+  auto pending = std::make_shared<Pending>();  // outlives a wait that times out
+  Returned out{0, 0, 0, 0};
+  const auto deadline = std::chrono::steady_clock::now() + wait;
+  std::vector<Lease*> refilling;  // checks have stopped, so no new refill starts
+  leases_.ForEach([&](Lease& l) {
+    if (l.rule.algorithm == Algorithm::kTokenBucket && l.refill_in_flight.load(std::memory_order_acquire)) {
+      refilling.push_back(&l);
+    }
+  });
+  while (!refilling.empty() && std::chrono::steady_clock::now() < deadline) {
+    std::erase_if(refilling, [](Lease* l) { return !l->refill_in_flight.load(std::memory_order_acquire); });
+    if (!refilling.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  out.refills_unfinished = refilling.size();
+  leases_.ForEach([&](Lease& l) {
+    if (l.rule.algorithm != Algorithm::kTokenBucket) return;
+    const std::int64_t tokens = l.tokens.exchange(0, std::memory_order_relaxed);
+    if (tokens <= 0) return;
+    ++out.leases;
+    out.tokens += static_cast<std::uint64_t>(tokens);
+    {
+      std::lock_guard lock(pending->mu);
+      ++pending->left;
+    }
+    redis_.Return(l.rule, l.key, static_cast<std::uint32_t>(tokens), [pending](const ScriptResult& r) {
+      std::lock_guard lock(pending->mu);
+      if (r.redis_error) ++pending->failed;
+      if (--pending->left == 0) pending->cv.notify_all();
+    });
+  });
+  std::unique_lock lock(pending->mu);
+  pending->cv.wait_until(lock, std::max(deadline, std::chrono::steady_clock::now() + wait / 2),
+                         [&] { return pending->left == 0; });
+  out.failed = pending->failed + pending->left;
+  return out;
 }
 
 }  // namespace ratelimiter

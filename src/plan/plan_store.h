@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "metrics/metrics.h"
 #include "plan/plan.h"
 #include "ratelimiter/clock.h"
 #include "redis/redis_backend.h"
@@ -36,13 +37,17 @@ class PlanStore {
       : redis_(redis), ttl_ns_(std::chrono::nanoseconds(ttl).count()), now_(clock), id_(NextId()) {}
 
   // `done` gets the plan (Free if the customer has none), or nullptr if Redis could not be asked.
-  // It runs inline on a cache hit, else on a Redis I/O thread.
+  // It runs inline on a cache hit, else on a Redis I/O thread. With a TTL, a read that fails
+  // answers with the last plan read for the customer, however old (stale if error): during an
+  // outage the customer keeps their plan's failure policy instead of becoming unknown.
   void Get(std::string_view customer, Callback done);
 
   // The next Get reads Redis again. A read already in flight is discarded and sent again, since it
   // may have read the hash before the change was written.
   void Invalidate(std::string_view customer);
   void InvalidateAll();  // after the plan-change subscription was lost: messages may be missing
+
+  std::uint64_t Reads() const { return reads_.Value(); }  // plan reads sent to Redis (the misses)
 
   std::size_t Size() {  // cached plans and reads in flight
     std::size_t n = 0;
@@ -57,6 +62,7 @@ class PlanStore {
   struct Entry {
     Plan plan;
     std::int64_t expires_ns{0};
+    bool has_plan{false};            // `plan` was read at least once
     bool loading{false};
     bool stale{false};               // invalidated while loading
     std::vector<Callback> waiters;   // while loading
@@ -75,6 +81,12 @@ class PlanStore {
     return next.fetch_add(1, std::memory_order_relaxed);
   }
   void Read(std::string_view customer, Callback done);  // no cache
+  // The next Get reads Redis. The plan itself stays, as the fallback if that read fails: an
+  // InvalidateAll after the subscription came back may happen while a master is still down.
+  static void Expire(Entry& e) {
+    if (e.loading) e.stale = true;
+    e.expires_ns = 0;
+  }
   void Load(const std::string& customer);
   void OnLoad(const std::string& customer, const HashResult& h);
 
@@ -83,6 +95,7 @@ class PlanStore {
   const Clock now_;
   const std::uint64_t id_;  // tells this store's plans apart in the per-thread copies
   std::atomic<std::uint64_t> generation_{0};  // bumped after every invalidation
+  Counter reads_;
   std::array<Shard, kShards> shards_;
 };
 

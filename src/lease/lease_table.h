@@ -21,9 +21,13 @@ struct Waiter {
   CheckCallback done;
 };
 
+#ifndef RL_LEASE_ALIGN
+#define RL_LEASE_ALIGN 64  // the Week 7 ablation builds with 8 (bench/ablation.sh)
+#endif
+
 // One (rule, key)'s local tokens: units this instance already took from Redis and may hand out
 // without asking again. alignas(64): hot leases used from different cores never share a cache line.
-struct alignas(64) Lease {
+struct alignas(RL_LEASE_ALIGN) Lease {
   Lease(const Rule& r, std::string_view k, std::uint64_t key_id = 0) : chunk(ChunkCap(r)), id(key_id), rule(r), key(k) {}
 
   // Touched by every check of this key: atomics only.
@@ -75,6 +79,14 @@ class LeaseTable {
   // The lease of (rule, key), created empty on first sight; nullptr if the table has no room.
   // Allocates only when it creates.
   Lease* FindOrCreate(const Rule& rule, std::string_view key);
+
+  // Calls `f(lease)` for every lease made so far (shutdown). Safe while checks run: slots only fill.
+  template <typename F>
+  void ForEach(F&& f) {
+    for (std::size_t i = 0; i <= mask_; ++i) {
+      if (Lease* l = slots_[i].load(std::memory_order_acquire)) f(*l);
+    }
+  }
 
  private:
   static constexpr std::size_t kMaxProbe = 64;

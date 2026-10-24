@@ -137,6 +137,13 @@ server counts 10,005 to 10,014 waits and one refill per key per run, 10,000 of t
 first touch of each key during the warm-up), so the 0.3 ms gap is the server's CPU path and run-to-run noise (leased 1.81 to 4.12 ms,
 gRPC alone 1.78 to 2.06 ms over five runs), not Redis. The absolute 4x and the 2 ms p99 need
 separate machines (Week 8 bonus run).
+Update 2026-10-23: the p99 target is met, measured open loop (the Week 5 generator): 0.83 ms at
+10,000/s. The 4x stays out of reach on this laptop, where gRPC with no limiter now runs at 91,154/s
+(3.6x the baseline) and the leased rule at 89,743/s (3.5x), after the Week 6 tuning below.
+Update 2026-10-24 (final build, `docs/thesis/evidence/matrix_2026-10-24.md`, `open_loop_2026-10-24.md`): p99 at
+10,000/s is 0.58 ms open loop. The 4x on one instance with single checks is still out of reach: gRPC with no
+limiter is the ceiling. Two instances reach 103,430/s on one hot key, and CheckBatch of 10 reaches 400,187
+checks/s on one instance; neither is the gate's single-check, one-instance comparison.
 
 ## Week 4 (Nov 2 to 8): Business rules and leased quota for large plans
 
@@ -190,73 +197,181 @@ stays within limit + N × C (four instances, 100,000 a day: exactly 100,000 admi
 
 About 16 h.
 
-- [ ] Timeouts (5 to 10 ms), circuit breaker, retries only on timeouts with jitter (3 h).
+- [x] Timeouts (5 to 10 ms), circuit breaker, retries only on timeouts with jitter (3 h).
+      Done (`src/reliability/`): breaker (20 in a row, one probe after 500 ms), retries of timeouts
+      that cannot loosen a limit. 10 ms raised false timeouts under load, so the default is 50 ms,
+      with four Redis clients (exact path 8,896 to 36,283 checks/s). See `docs/thesis/evidence/reliability_2026-10-21.md`.
       See [src/reliability/README.md](../src/reliability/README.md).
-- [ ] Failure policy per plan after leases run out; fail-open admissions marked `unverified` (1.5 h).
-- [ ] Bounded queues and `RESOURCE_EXHAUSTED`; graceful shutdown returns leases (2.5 h).
-- [ ] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
-- [ ] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
-- [ ] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids
+- [x] Failure policy per plan after leases run out; fail-open admissions marked `unverified` (1.5 h).
+      Done: the plan's `failure` field decides for customer checks; stale-if-error plans. Master
+      stopped 3.3 s: Pay 59 of 59 `UNVERIFIED`, Free 59 of 59 `UNAVAILABLE`.
+- [x] Bounded queues and `RESOURCE_EXHAUSTED`; graceful shutdown returns leases (2.5 h).
+      Done: one in-flight bound in the service (`RL_MAX_IN_FLIGHT`, 10,000) bounds every queue behind
+      it, no measurable cost; SIGTERM drains, returns leased tokens (72,194 from 1,000 leases in 7 ms).
+- [x] Health readiness follows the breaker; SIGHUP reload (2 h, Should).
+      Readiness done: gRPC health is `NOT_SERVING` while every slot group's breaker is open (this
+      instance reaches no Redis master) and during shutdown; checked by stopping every node of the
+      fault cluster under load (NOT_SERVING after about 1 s, SERVING again once they were back).
+      SIGHUP reload done: a new engine built from the new file replaces the old one with one
+      atomic pointer store; a file that does not load keeps the old rules. Under 10,000 checks/s
+      open loop, 9 reloads (6 applied, 3 rejected) failed no call; no measurable cost per check.
+      See `docs/thesis/evidence/reload_2026-10-22.md`.
+- [x] Prometheus metrics (2 h). See [src/metrics/README.md](../src/metrics/README.md).
+      Done: own text exposition (prometheus-cpp is not installed), striped lock-free counters,
+      `/metrics` on `RL_METRICS_ADDR` (127.0.0.1:9100); Prometheus in `docker-compose.yml`. Overhead
+      not measurable: leased 77,377 checks/s on, 75,394 off (medians of 3).
+- [x] Open-loop load generator (3 h): fixed arrival rate, latency from scheduled send time (avoids
       coordinated omission). Try `ghz --rps` first. See [bench/loadgen/README.md](../bench/loadgen/README.md).
-- [ ] Thesis: Chapter 3 draft.
+      Done: `bench/loadgen` with a `rate` argument (`ghz --rps` times calls from their send, so it
+      has the same blind spot). Server frozen 0.5 s at 10,000/s: open-loop p99 480.8 ms, closed-loop
+      5.8 ms. Leased rule open loop (gate run): p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; past about
+      25,000/s calls queue (p99 above 100 ms) instead of failing.
+- [x] Thesis: Chapter 3 draft.
+      Done 2026-10-22: 3.1 to 3.8 drafted (`docs/thesis/ch3_design.md`), with the architecture
+      diagram, the bound's derivation, the failure-mode table and the capacity estimate. About
+      10,000 words, longer than the outline's 12 to 14 pages: trim in the Week 8 editing pass.
 
 Gate: kill a Redis master under load and observe the documented behaviour per plan; latency at a
 fixed rate measured open-loop. Cut first: SIGHUP reload.
+
+Gate status: met.
+Gate result (2026-10-21, `docs/thesis/evidence/week5_gate_2026-10-21.md`): with a master killed under load, a third of the customers (the
+dead master's slots) got their plan's policy for 4 to 5 s, Free `UNAVAILABLE` and Pay `UNVERIFIED`,
+leases serving for 2 s first, no call failed (3 runs). On the way the test found and fixed a
+cluster-wide breaker (now per slot group), scripts not following a failover (now re-routed once) and
+gRPC collapsing under open-loop overload (now 100 streams per connection). Open loop, leased rule:
+p99 0.83 ms at 10,000/s, 1.80 ms at 20,000/s; queueing, not failing, past about 25,000/s.
 
 ## Week 6 (Nov 16 to 22): Correctness evidence and freeze
 
 About 16.5 h.
 
-- [ ] TSan and ASan clean (2 h). See [tests/README.md](../tests/README.md#sanitizers).
-- [ ] Property-based tests (3 h, Should): random histories of checks, retries, plan changes and
+- [x] TSan and ASan clean (2 h). See [tests/README.md](../tests/README.md#sanitizers).
+      Done 2026-10-22: 214 of 214 tests pass in release, ASan and TSan (the in-process gRPC service
+      tests skip under TSan, which needs an instrumented gRPC). 2026-10-23, at the freeze: 224 of 224.
+- [x] Property-based tests (3 h, Should): random histories of checks, retries, plan changes and
       rollovers against a simple reference model; seeded.
-- [ ] Quota accuracy test, 4 instances, 10% retries, 20 runs (2 h).
-- [ ] Bound model vs measurement (3 h): Python simulation predicts over-admission; burst accuracy
+      Done 2026-10-23 (`tests/property_test.cc`): the real engine on a script-faithful fake Redis
+      against a reference model of Chapter 3's rules, in 4 configurations; leased quota against its
+      bounds. 20,000 seeds each: 22.6 M checks equal the model, 80,490 leased days within bounds; ten
+      bugs planted in the engine all caught (`tests/eval/planted_bugs.py`).
+      `docs/thesis/evidence/property_tests_2026-10-23.md`.
+- [x] Quota accuracy test, 4 instances, 10% retries, 20 runs (2 h).
+      Done 2026-10-22 (`tests/eval/quota_accuracy.sh`): 20 of 20 runs exact. Request ids allowed,
+      Redis `used` and usage events all 200 (Free) and 2,200 (Pay, with grace); 9,608 requests sent
+      twice at once, none counted twice. `docs/thesis/evidence/quota_accuracy_2026-10-22.md`.
+- [x] Bound model vs measurement (3 h): Python simulation predicts over-admission; burst accuracy
       runs at chunk caps 1%, 5%, 10%; plot predicted, measured and worst case.
-- [ ] Flood and cardinality (1M keys) tests (2 h).
-- [ ] Fault tests: kill master, 20 ms latency (toxiproxy), dropped connections (3 h).
-- [ ] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
-- [ ] Nov 22: feature freeze, tag `v1.0`. See [EVALUATION.md](EVALUATION.md).
+      Done 2026-10-22 (`tests/eval/burst_accuracy.sh`, `bound_model.py`; new rule field
+      `lease_chunk_pct`). Idle-then-burst: 34.7, 189.0, 381.4 tokens against N x C = 40, 200, 400;
+      the model predicts 34.4, 188.8, 381.4. Steady overload: about 0. Figure
+      `docs/thesis/figures/burst_bound.png`, `docs/thesis/evidence/burst_bound_2026-10-22.md`.
+- [x] Flood and cardinality (1M keys) tests (2 h).
+      Done 2026-10-22 (`tests/eval/flood_cardinality.sh`): a flood of 74,881 denials/s cost 2 Redis
+      calls in 10 s (deny cache). 1M customers: 171 B per plan, about 420 B per active customer;
+      customer rule −26% (plan cache misses), leased rule −35% (cold leases, 224 MB).
+      `docs/thesis/evidence/flood_cardinality_2026-10-22.md`.
+- [x] Fault tests: kill master, 20 ms latency (toxiproxy), dropped connections (3 h).
+      Done 2026-10-23 (`tests/eval/faults.sh` with `tc netem`, `bench/fault_kill_master.sh`): +20 ms,
+      +80 ms on one master, a silent master, five connection kills, a killed master; each plan follows
+      its policy, no call failed, recovery within 1 s (5 s for the killed master). Found and fixed: the
+      client's timeout is an idle timeout, so a slow master was never timed out; each attempt now has
+      a 50 ms deadline, on a lock-free queue (cost within noise). `docs/thesis/evidence/faults_2026-10-23.md`.
+- [x] Noisy-neighbour test (1.5 h, Should): other tenants' p99 with and without one flooding tenant.
+      Done 2026-10-23 (`tests/eval/noisy_neighbour.sh`): an over-quota flood costs Redis nothing (others'
+      p99 4.5 to 14.4 ms, shared CPU); an over-burst flood within quota costs a Redis script per call
+      (others' p99 31 ms). Local burst denial is future work. `docs/thesis/evidence/noisy_neighbour_2026-10-23.md`.
+- [x] Nov 22: feature freeze, tag `v1.0`. See [EVALUATION.md](EVALUATION.md).
+      Done 2026-10-23: `v1.0` tags the commit that closes Week 6. From here, only fixes and measured
+      performance changes.
 
 Gate: all tests green; measured over-admission at or below the derived bound.
 Cut first: noisy neighbour, then connection-drop faults.
+
+Gate status: met. 2026-10-22: the largest over-admission measured is 381.5 tokens against a bound of
+400 (10% cap; 189.1 of 200 at 5% and 34.8 of 40 at 1%). 2026-10-23: every Week 6 item done, all 224
+tests green in release, ASan and TSan, tagged `v1.0`. The fault tests found one design fault (no
+deadline per Redis call), fixed and measured before the tag; the noisy-neighbour test found one gap
+(a flood over burst costs a Redis call each), recorded as future work.
+
+After the freeze (2026-10-23, fixes and measured changes only;
+`docs/thesis/evidence/verification_and_speedups_2026-10-23.md`):
+- Coverage, measured for the first time (`scripts/coverage.sh`): 95.4% of lines. 11 tests added for
+  the edge cases it showed (full lease table, a 65th leased plan size, an overloaded batch, an open
+  breaker on returns and retries, a killed subscription, a full disk, `ShardedBackend`).
+- The deadline queue made lock-free (Vyukov MPSC): 448 to 214 ns a call, 11x the throughput at 12
+  threads; in the server, within noise.
+- abseil's mutex deadlock detection switched off (found by `perf`): leased rule +24.5% (72,097 to
+  89,743 checks/s), customer rule +14.2%.
+- jemalloc measured (no code change): customer rule +3.7%, leased rule unchanged.
 
 ## Week 7 (Nov 23 to 29): Benchmarks, ablation and measured tuning
 
 About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md).
 
-- [ ] Benchmark matrix (5 h): engines × 1/2/4 instances × chunk caps × uniform/Zipf/hot keys,
+- [x] Benchmark matrix (5 h): engines × 1/2/4 instances × chunk caps × uniform/Zipf/hot keys,
       open-loop, 5 runs, median with min and max, cores pinned with `taskset`.
-- [ ] Ablation study (3 h): switch off lease, batcher, early refill, adaptive chunk, deny cache,
+      Throughput half done 2026-10-24 (`bench/run_matrix.sh`, closed loop at the plateau, 240 runs,
+      `docs/thesis/evidence/matrix_2026-10-24.md`): leases equal strict on uniform keys over 1M, +55-66%
+      on Zipf, ×4.5-5.2 on one hot key. Open-loop latency on the final build
+      (`docs/thesis/evidence/open_loop_2026-10-24.md`): leased p99 3.30 ms at 40,000/s, where Week 5 queued
+      (137 ms).
+- [x] Ablation study (3 h): switch off lease, batcher, early refill, adaptive chunk, deny cache,
       plan cache, alignment one at a time; throughput and p99 delta table.
-- [ ] Profile and fix the top one or two bottlenecks (4 h): only what the flamegraph shows, e.g.
+      Done 2026-10-24 (`docs/thesis/evidence/ablation_2026-10-24.md`): without it, lease −29.7%, deny cache
+      −64.6%, plan cache −19.1%; early refill, adaptive chunk, alignment and batcher within noise.
+- [x] Profile and fix the top one or two bottlenecks (4 h): only what the flamegraph shows, e.g.
       per-thread sub-leases for a hot key, protobuf arenas or pooled callbacks, gRPC thread count.
-- [ ] Build-level wins, each measured (2 h, Should): LTO, PGO, mimalloc or jemalloc via LD_PRELOAD.
-- [ ] (bonus) Redis Functions vs `EVALSHA`, same benchmark.
-- [ ] Thesis: Chapter 4.
+      Done 2026-10-24 (`bench/profile.sh`, `docs/thesis/evidence/profile_2026-10-24.md`, flamegraphs in
+      `docs/thesis/figures/`): the limiter's own code is 4-6% of CPU, gRPC 40-53%, allocation 16-20% (gRPC's
+      arena first; the project's own about 3%). The one fix it pointed to, abseil deadlock detection, went in
+      2026-10-23 (+24.5% leased); nothing left in the project's code would beat the noise.
+- [x] Build-level wins, each measured (2 h, Should): LTO, PGO, mimalloc or jemalloc via LD_PRELOAD.
+      jemalloc measured early (2026-10-23): customer rule +3.7%, leased rule unchanged. 2026-10-24
+      (`bench/ab_compare.sh`): LTO and glibc tcache 64 within noise, not adopted. PGO not tried: it rebuilds
+      only the project's code (4-6% of CPU). mimalloc not installed.
+- [x] (bonus) Redis Functions vs `EVALSHA`, same benchmark. Done 2026-10-24 (`bench/redis_functions.sh`):
+      the same script at the same rate, 62,461 against 62,469 calls/s unpipelined, 142,613 against 142,572
+      pipelined (`docs/thesis/evidence/matrix_2026-10-24.md`). Not adopted.
+- [x] Thesis: Chapter 4 (draft 2026-10-24, `docs/thesis/ch4_implementation.md`).
 
 Gate: matrix, ablation table and flamegraph in `results/`; every Chapter 5 table generated by a script.
 Cut first: build-level wins, then Redis Functions.
 
 ## Week 8 (Nov 30 to Dec 6): Models, final numbers and the evaluation chapter
 
-- [ ] Universal Scalability Law fit over instances and threads (2 h); project instances for 1M/s.
-- [ ] Little's law cross-check of in-flight = throughput × latency (0.5 h).
-- [ ] Capacity and cost model with cited, dated prices (2 h, Should).
-- [ ] Extrapolation to 1M checks/s with every assumption written out (1 h).
+- [x] Universal Scalability Law fit over instances and threads (2 h); project instances for 1M/s.
+      Done 2026-10-24 (`bench/concurrency_sweep.sh`, `tools/usl_fit.py`,
+      `docs/thesis/evidence/scaling_2026-10-24.md`): over concurrency on one instance the USL does not fit
+      (λ a third of X(1) by least squares; up to 49% off on relative error), because the cost per call falls
+      with concurrency. Throughput never falls up to 384 in flight (κ about 0). Instances cannot be swept on
+      one laptop; the projection is `tools/extrapolate.py`.
+- [x] Little's law cross-check of in-flight = throughput × latency (0.5 h). Done 2026-10-24: N / X lies
+      between p50 and p99 in all 30 cells of the sweep.
+- [x] Capacity and cost model with cited, dated prices (2 h, Should). Done 2026-10-24 (`tools/extrapolate.py`,
+      AWS on-demand list prices retrieved 2026-10-24): about $13,670 a month for leased rules at p99 < 2 ms,
+      $18,466 for customer checks, at 1M checks/s (estimates).
+- [x] Extrapolation to 1M checks/s with every assumption written out (1 h). Done 2026-10-24 (Chapter 5
+      section 5.11, `docs/DESIGN.md` section 9).
 - [ ] (bonus) One AWS run on separate machines, budget alarm first.
-- [ ] Thesis: Chapter 5 (8 h); `DESIGN.md` and `README.md` finished.
+- [x] Thesis: Chapter 5 (8 h); `DESIGN.md` and `README.md` finished. Draft complete 2026-10-24 (every section
+      filled, every table from a script); `DESIGN.md` section 11 written; README status current.
 
 Gate: full thesis draft by Dec 6. Cut first: AWS run, then prices in the cost model.
 
 ## Week 9 (Dec 7 to 15): Review and delivery
 
 - [ ] Dec 7: full draft to advisor; apply feedback.
-- [ ] Chapter 6, proofreading, references, figures, faculty format.
-- [ ] Reproducibility check on a clean clone: one command rebuilds, tests and regenerates every table.
+- [ ] Chapter 6, proofreading, references, figures, faculty format. Chapter 6 drafted ahead, 2026-10-24
+      (`docs/thesis/ch6_conclusion.md`); proofreading, references and the faculty format remain.
+- [x] Reproducibility check on a clean clone: one command rebuilds, tests and regenerates every table.
+      Done 2026-10-24: `scripts/reproduce.sh` on a fresh clone builds, passes 240 tests and runs every table
+      tool (`--rerun` reruns the benchmarks first). It found 26 scripts committed without the executable bit
+      (NTFS under WSL), now fixed.
 - [ ] Slides, two-minute demo, backup video; (bonus) Spring Boot demo gateway.
       See [examples/gateway-springboot/README.md](../examples/gateway-springboot/README.md).
-- [ ] Mock defense with the 20 questions in `docs/thesis/Thesis_Defense_Brief.docx`.
+- [ ] Mock defense with the 20 questions in `docs/thesis/Thesis_Defense_Brief.docx`. Prepared 2026-10-24:
+      `docs/thesis/defense_numbers.md` updates the brief's numbers and links each question to its evidence.
 - [ ] Dec 15: submit.
 
 ## If you fall behind

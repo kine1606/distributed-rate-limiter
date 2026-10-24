@@ -1,5 +1,6 @@
 # Local test environment: 3-master Redis Cluster + 3 limiter instances (each seeds from redis-1).
 # Usage (from repo root): docker compose -f docker/docker-compose.yml up --build
+# Metrics: each limiter serves /metrics on port 9100 inside the network; Prometheus on localhost:9090.
 name: ratelimiter
 
 x-redis-node: &redis-node
@@ -15,6 +16,8 @@ x-limiter: &limiter
     dockerfile: docker/Dockerfile
   volumes:
     - ../config:/etc/ratelimiter:ro
+  environment:
+    RL_METRICS_ADDR: 0.0.0.0:9100  # for the prometheus service below
   depends_on:
     redis-cluster-init: {condition: service_completed_successfully}
   networks: [rl]
@@ -45,6 +48,14 @@ services:
   limiter-3:
     <<: *limiter
     ports: ["50053:50051"]
+
+  prometheus:  # http://localhost:9090, e.g. sum by (reason) (rate(rl_checks_total[1m]))
+    image: prom/prometheus:v2.53.2
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    depends_on: [limiter-1, limiter-2, limiter-3]
+    networks: [rl]
 
 networks:
   rl: {}

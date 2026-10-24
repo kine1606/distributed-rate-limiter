@@ -90,17 +90,54 @@ def gate_and_engines():
                      "status": "met", "note": "checks answered without waiting for Redis, Week 2 load"})
     gate.append({"check": "500 concurrent misses cause one refill", "value": 1, "unit": "refills", "target": 1,
                  "status": "met", "note": "single-flight refill, unit test"})
-    if ghz:
+    matrix, open_loop = matrix_medians(), open_loop_p99("api_default_10000")
+    ghz_note = f"the Week 2 ghz command gave {st.median(ghz):,.0f}/s, client-bound" if ghz else ""
+    if matrix:  # the final build, pinned, the faster load generator (bench/run_matrix.sh)
+        lease1 = max(v for k, v in matrix.items() if k[0] == "leased" and k[1] == 1)
+        lease2 = max(v for k, v in matrix.items() if k[0] == "leased" and k[1] == 2)
+        gate.append({"check": "Lease at 4x the strict baseline, one instance", "value": round(lease1), "unit": "checks/s",
+                     "target": 4 * baseline, "status": "met" if lease1 >= 4 * baseline else "not met",
+                     "note": f"one instance is capped by gRPC itself, which runs at {matrix[('allow_all', 1, 'uniform', None)]:,.0f}"
+                             f"/s with no limiter (91,154 at best), below the target; the value is one hot key, within "
+                             f"noise of that ceiling; two instances reach {lease2:,.0f}; CheckBatch of 10 reaches "
+                             f"400,187 checks/s (docs/thesis/evidence/matrix_2026-10-24.md); {ghz_note}"})
+    elif ghz:
         v = st.median(ghz)
         gate.append({"check": "Lease at 4x the strict baseline (Week 2 ghz command)", "value": v, "unit": "checks/s",
                      "target": 4 * baseline, "status": "met" if v >= 4 * baseline else "not met",
                      "note": "ghz itself is the limit here; see the engines chart for the faster load generator"})
-    if p99["leased"]:
+    ghz_p99 = (f"ghz --rps gave {st.median(p99['leased']):.2f} ms, but ghz with no limiter gives "
+               f"{st.median(p99['allow_all']):.2f} ms") if p99["leased"] else ""
+    if open_loop is not None:  # latency from each call's scheduled time (bench/open_loop.sh)
+        gate.append({"check": "p99 at 10,000 checks/s offered, open loop", "value": open_loop, "unit": "ms",
+                     "target": 2.0, "status": "met" if open_loop < 2.0 else "not met",
+                     "note": f"final build, bench/open_loop.sh; {ghz_p99}"})
+    elif p99["leased"]:
         v = st.median(p99["leased"])
         gate.append({"check": "p99 at 10,000 checks/s offered", "value": v, "unit": "ms", "target": 2.0,
                      "status": "met" if v < 2.0 else "not met",
                      "note": f"gRPC with no limiter measures {st.median(p99['allow_all']):.2f} ms on the same laptop"})
     return {"source": str(summary.parent.relative_to(ROOT)), "rows": gate}, engines
+
+
+def matrix_medians():
+    """{(engine, instances, dist, chunk_pct): median checks/s} from the latest benchmark matrix."""
+    f = latest("results/*_matrix/summary.txt")
+    if not f:
+        return {}
+    cells = {}
+    for line in f.read_text().splitlines():
+        if line.startswith("{"):
+            d = json.loads(line)
+            cells.setdefault((d["engine"], d["instances"], d["dist"], d.get("chunk_pct")), []).append(d["checks_per_s"])
+    return {k: st.median(v) for k, v in cells.items()}
+
+
+def open_loop_p99(cell):
+    f = latest("results/*_open_loop/summary.txt")
+    runs = [json.loads(l)["result"]["p99_ms"] for l in f.read_text().splitlines()
+            if l.startswith("{") and json.loads(l)["cell"] == cell] if f else []
+    return round(st.median(runs), 2) if runs else None
 
 
 def ramp():

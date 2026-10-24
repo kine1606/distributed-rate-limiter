@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -17,6 +18,12 @@ namespace ratelimiter {
 // Called after a lease's chunk size changed, from the refill path (never on a hit).
 using ChunkObserver = std::function<void(const Lease& lease, std::uint32_t from, std::uint32_t to)>;
 
+// Mechanisms the Week 7 ablation switches off one at a time (bench/ablation.sh); both on in production.
+struct LeaseTuning {
+  bool early_refill = true;    // refill at 30% of the chunk, before the lease runs dry
+  bool adaptive_chunk = true;  // the chunk follows demand; off: always the cap
+};
+
 // The main engine. Non-strict rules are served from a local lease: a check that finds tokens is one
 // CAS (no Redis, no lock, no allocation). Redis is asked only to refill a lease, one chunk at a time
 // and never twice at once for the same key. Strict rules, plan rules, unknown rules, and keys the
@@ -30,7 +37,7 @@ class LeasedCore final : public RateLimiterCore {
   // refill callbacks touch the leases.
   LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules,
              std::size_t lease_capacity = std::size_t{1} << 20, Clock clock = &SteadyNowNs,
-             ChunkObserver on_chunk_change = {});
+             ChunkObserver on_chunk_change = {}, LeaseTuning tuning = {});
 
   void Check(const CheckRequest& request, CheckCallback done) override;
 
@@ -40,13 +47,30 @@ class LeasedCore final : public RateLimiterCore {
   // under request.rule; a denial from the lease itself answers kRateLimited.
   void CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done);
 
+  // Shutdown (Week 5): gives the unused tokens of every token-bucket lease back to Redis
+  // (lua/return_lease.lua) and waits for the answers (1.5 x `wait` at most in all), so a restart does not burn part
+  // of each bucket. Refills still in flight are waited for first (within the same `wait`), so the
+  // tokens they bring are returned too. Quota leases keep their units: at most one chunk (0.1% of the day) each, and
+  // giving units back to a day would need a script of its own. Call it once checks have stopped.
+  struct Returned {
+    std::uint64_t leases;  // leases that held tokens
+    std::uint64_t tokens;  // tokens sent back
+    std::uint64_t failed;  // returns that failed or did not answer in time (those tokens are lost)
+    std::uint64_t refills_unfinished;  // refills still out when the wait ended: their tokens are lost
+  };
+  Returned ReturnLeases(std::chrono::milliseconds wait);
+
   // Slow-path counters; a hit touches neither. Lease hit ratio = 1 - parked / checks served.
   struct Stats {
     std::uint64_t parked;   // checks that waited for a refill
     std::uint64_t refills;  // refill calls sent to Redis
+    // Top-ups: tokens asked for, and the lease sizes they topped up to; requested / target is the
+    // mean fill, so a full chunk per refill would need fill x refills of them.
+    std::uint64_t topup_requested = 0, topup_target = 0;
   };
   Stats GetStats() const {
-    return {parked_.load(std::memory_order_relaxed), refills_.load(std::memory_order_relaxed)};
+    return {parked_.load(std::memory_order_relaxed), refills_.load(std::memory_order_relaxed),
+            topup_requested_.load(std::memory_order_relaxed), topup_target_.load(std::memory_order_relaxed)};
   }
 
  private:
@@ -56,9 +80,10 @@ class LeasedCore final : public RateLimiterCore {
   void OnRefill(Lease& l, std::uint32_t requested, std::uint32_t partial_retry_ms, const ScriptResult& s);
 
   RedisBackend& redis_;
-  std::atomic<std::uint64_t> parked_{0}, refills_{0};
+  std::atomic<std::uint64_t> parked_{0}, refills_{0}, topup_requested_{0}, topup_target_{0};
   const Clock now_;
   const ChunkObserver on_chunk_change_;
+  const LeaseTuning tuning_;
   const RuleTable rules_;
   StrictCore strict_;
   LeaseTable leases_;

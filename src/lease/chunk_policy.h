@@ -9,10 +9,12 @@
 
 namespace ratelimiter {
 
-// One instance never holds more than 10% of a bucket, or 0.1% of a leased daily quota: the cap is
-// what the accuracy bound limit + N x C counts with.
+// One instance never holds more than the rule's lease_chunk_pct of a bucket (10% by default), or 0.1%
+// of a leased daily quota: the cap is what the accuracy bound limit + N x C counts with.
 inline std::uint32_t ChunkCap(const Rule& r) {
-  return std::max<std::uint32_t>(1, r.algorithm == Algorithm::kQuota ? r.limit / 1000 : r.limit / 10);
+  const std::uint64_t cap = r.algorithm == Algorithm::kQuota ? r.limit / 1000
+                                                             : std::uint64_t{r.limit} * r.lease_chunk_pct / 100;
+  return std::max<std::uint32_t>(1, static_cast<std::uint32_t>(cap));
 }
 
 // quota_mode: auto leases a customer's daily quota from this limit up; smaller plans stay exact,

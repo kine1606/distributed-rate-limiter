@@ -12,6 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "ratelimiter/clock.h"
 #include "redis/keys.h"
 
 namespace ratelimiter {
@@ -80,12 +81,12 @@ ScriptResult Parse(Algorithm algorithm, const Reply& v) {
   return r;
 }
 
-sw::redis::ConnectionOptions Options(const std::string& host, int port) {
+sw::redis::ConnectionOptions Options(const std::string& host, int port, std::chrono::milliseconds timeout) {
   sw::redis::ConnectionOptions o;
   o.host = host;
   o.port = port;
-  o.connect_timeout = std::chrono::milliseconds(200);
-  o.socket_timeout = std::chrono::milliseconds(200);  // also bounds each async command
+  o.connect_timeout = timeout;  // no longer than a call: a dead node must fail fast, not on connect
+  o.socket_timeout = timeout;   // an idle timeout per connection, not per command: ResilientBackend adds the deadline
   return o;
 }
 
@@ -116,12 +117,15 @@ struct RedisPPBackend::Call {
   std::vector<std::string> keys;  // the first routes the call; all share its hash tag
   std::vector<std::string> args;
   Algorithm algorithm;  // shapes the reply
-  std::size_t script;   // index into scripts_
+  std::size_t script;   // index into scripts_ (and RedisMetrics::kCall)
   ScriptCallback done;
+  std::int64_t start_ns = 0;  // first send, for the latency metric
+  bool rerouted = false;      // sent again after a failover once already
 };
 
-RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir)
-    : scripts_(LoadScripts(lua_dir)), cluster_(Options(host, port), PoolOptions()) {
+RedisPPBackend::RedisPPBackend(const std::string& host, int port, const std::string& lua_dir,
+                               std::chrono::milliseconds timeout, RedisMetrics* metrics)
+    : scripts_(LoadScripts(lua_dir)), metrics_(metrics), cluster_(Options(host, port, timeout), PoolOptions()) {
   // The slot map loads in the background. A routed call waits for it, so the first scripts, which
   // go straight to a key's node, are not sent to the seed node by mistake.
   auto ready = cluster_.exists("{rl}:startup");
@@ -152,6 +156,7 @@ void RedisPPBackend::Return(const Rule& rule, std::string_view key, std::uint32_
 
 void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
   const Script& script = scripts_[c->script];
+  if (metrics_ != nullptr && c->start_ns == 0) c->start_ns = SteadyNowNs();
   auto on_reply = [this, c, with_source](sw::redis::Future<Reply>&& f) {
     ScriptResult r;
     try {
@@ -162,9 +167,14 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
         Send(c, true);
         return;
       }
-      Fail(*c, e.what());
+      if (dynamic_cast<const sw::redis::RedirectionError*>(&e) != nullptr && Reroute(c, with_source, false)) return;
+      Fail(*c, e.what(), false, true);
       return;
-    } catch (const std::exception& e) {  // timeout, connection lost, CLUSTERDOWN
+    } catch (const sw::redis::TimeoutError& e) {
+      Fail(*c, e.what(), true);
+      return;
+    } catch (const std::exception& e) {  // connection lost or refused: the node may have failed over
+      if (Reroute(c, with_source, true)) return;
       Fail(*c, e.what());
       return;
     }
@@ -173,12 +183,12 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
       return;
     }
     Health(true, {});
+    if (metrics_ != nullptr) metrics_->latency[c->script].Observe(SteadyNowNs() - c->start_ns);
     c->done(r);
   };
   try {
-    // shortcut: AsyncRedisCluster has no callback EVALSHA, so scripts go straight to the node that
-    // owns the key's slot and do not follow MOVED: after a failover they fail until the slot map
-    // refreshes (every 10 s). Retry through a routed command when the failover tests need it (Week 5).
+    // AsyncRedisCluster has no routed callback EVALSHA, so a script goes straight to the node the
+    // slot map names for its key. After a failover that node is gone or answers MOVED: Reroute.
     auto node = cluster_.redis(c->keys.front(), false);
     if (with_source) {
       node.eval<Reply>(script.source, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
@@ -187,8 +197,30 @@ void RedisPPBackend::Send(const std::shared_ptr<Call>& c, bool with_source) {
       node.evalsha<Reply>(script.sha, c->keys.begin(), c->keys.end(), c->args.begin(), c->args.end(),
                           std::move(on_reply));
     }
-  } catch (const std::exception& e) {  // no usable connection to that node: answer now
-    Fail(*c, e.what());
+  } catch (const std::exception& e) {  // no usable connection to that node
+    if (!Reroute(c, with_source, false)) Fail(*c, e.what());  // never sent
+  }
+}
+
+// Once per call: a routed command for the key makes redis-plus-plus follow the redirect or the
+// failed node and refresh its slot map, and the script is then sent again, to the node now named.
+// A redirect or a call never sent did not run; a lost connection may have run it, so a quota
+// script is not sent again then (it could count twice, as for ResilientBackend's retries).
+bool RedisPPBackend::Reroute(const std::shared_ptr<Call>& c, bool with_source, bool may_have_run) {
+  if (c->rerouted || (may_have_run && c->algorithm == Algorithm::kQuota)) return false;
+  c->rerouted = true;
+  if (metrics_ != nullptr) metrics_->reroutes.Add();
+  try {
+    cluster_.command<long long>("EXISTS", c->keys.front(), [this, c, with_source](sw::redis::Future<long long>&& f) {
+      try {
+        f.get();
+      } catch (const std::exception&) {  // only the refreshed map matters; the resend reports errors
+      }
+      Send(c, with_source);
+    });
+    return true;
+  } catch (const std::exception&) {
+    return false;
   }
 }
 
@@ -196,15 +228,19 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
   using Fields = std::unordered_map<std::string, std::string>;
   // Shared so `done` survives a call that throws after taking the lambda.
   auto shared_done = std::make_shared<HashCallback>(std::move(done));
+  const std::int64_t start = metrics_ != nullptr ? SteadyNowNs() : 0;
   try {
-    cluster_.hgetall<Fields>(key, [this, shared_done](sw::redis::Future<Fields>&& f) {
+    cluster_.hgetall<Fields>(key, [this, shared_done, start](sw::redis::Future<Fields>&& f) {
       HashResult r;
       try {
         r.fields = f.get();
         Health(true, {});
+        if (metrics_ != nullptr) metrics_->latency[5].Observe(SteadyNowNs() - start);  // kCall: hgetall
       } catch (const std::exception& e) {
         Health(false, e.what());
         r.redis_error = true;
+        r.timed_out = dynamic_cast<const sw::redis::TimeoutError*>(&e) != nullptr;
+        if (metrics_ != nullptr) (r.timed_out ? metrics_->timeouts : metrics_->other_errors).Add();
       }
       (*shared_done)(r);
     });
@@ -216,10 +252,13 @@ void RedisPPBackend::HGetAll(std::string key, HashCallback done) {
   }
 }
 
-void RedisPPBackend::Fail(Call& c, std::string_view why) {
+void RedisPPBackend::Fail(Call& c, std::string_view why, bool timed_out, bool reply_error) {
   Health(false, why);
   ScriptResult r;
   r.redis_error = true;
+  r.timed_out = timed_out;
+  r.reply_error = reply_error;
+  if (metrics_ != nullptr) (timed_out ? metrics_->timeouts : reply_error ? metrics_->reply_errors : metrics_->other_errors).Add();
   c.done(r);
 }
 

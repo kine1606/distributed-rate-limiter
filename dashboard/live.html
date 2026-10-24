@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Limiter Live View</title>
+<!-- Served by tools/live_dashboard.py, which relays the limiter's /metrics; scripts/live_demo.sh drives it. -->
+<style>
+  :root {
+    --surface: #fcfcfb; --page: #f4f3f0; --text: #0b0b0b; --text-2: #52514e; --grid: #e4e3df;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --s1: #2a78d6; --s2: #eb6834;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --page: #111110; --text: #f0efec; --text-2: #c3c2b7; --grid: #34332f;
+      --s1: #3987e5; --s2: #d95926; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: var(--text-2); margin: 0 0 14px; }
+  .phase { background: var(--surface); border-left: 4px solid var(--s1); padding: 10px 14px; margin-bottom: 14px;
+           border-radius: 6px; font-weight: 600; min-height: 42px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--surface); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--text-2); font-size: 12px; }
+  .tile .v { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .card { background: var(--surface); border-radius: 8px; padding: 12px; margin-bottom: 14px; position: relative; }
+  .card h2 { font-size: 14px; margin: 0 0 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-2); font-size: 12px; margin-bottom: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  canvas { width: 100%; height: 240px; display: block; }
+  .tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--grid);
+         border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); display: none;
+         font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .err { color: var(--critical); font-weight: 600; }
+  footer { color: var(--text-2); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Rate limiter, live</h1>
+  <p class="sub">What the limiter decides each second, read from its metrics every second. The last two minutes.</p>
+  <div class="phase" id="phase">Waiting for traffic…</div>
+  <div class="tiles">
+    <div class="tile"><div class="k">Checks per second</div><div class="v" id="t-rate">–</div></div>
+    <div class="tile"><div class="k">✓ Allowed</div><div class="v" id="t-allowed">–</div></div>
+    <div class="tile"><div class="k">Answered without Redis (deny cache) /s</div><div class="v" id="t-deny">–</div></div>
+    <div class="tile"><div class="k">p99 latency in the limiter</div><div class="v" id="t-p99">–</div></div>
+  </div>
+  <div class="card">
+    <h2>Checks per second, by decision</h2>
+    <div class="legend" id="legend-out"></div>
+    <canvas id="c-out"></canvas>
+    <div class="tip" id="tip-out"></div>
+  </div>
+  <div class="card">
+    <h2>Latency of a check inside the limiter (ms, log scale, estimated from histogram buckets)</h2>
+    <div class="legend" id="legend-lat"></div>
+    <canvas id="c-lat"></canvas>
+    <div class="tip" id="tip-lat"></div>
+  </div>
+  <footer id="foot">Source: <code>/metrics</code>, relayed by tools/live_dashboard.py.</footer>
+</main>
+<script>
+"use strict";
+const WINDOW = 120;  // seconds kept on screen
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+// Each decision of the limiter (proto Reason) and the status it shows as; text always names it.
+const OUTCOMES = [
+  {key: "allowed", label: "✓ allowed", color: "--good", reasons: ["ok", "overage"]},
+  {key: "burst", label: "⏱ rate limited (burst)", color: "--warning", reasons: ["rate_limited"]},
+  {key: "quota", label: "⛔ quota exhausted or suspended", color: "--serious", reasons: ["quota_exhausted", "suspended"]},
+  {key: "redis", label: "⚠ Redis unreachable: plan's policy", color: "--critical", reasons: ["unavailable", "unverified"]},
+];
+const LAT = [{key: "p50", label: "p50", color: "--s1"}, {key: "p99", label: "p99", color: "--s2"}];
+const hist = [];        // {t, allowed, burst, quota, redis, p50, p99, deny, phase}
+let prev = null;
+
+function parse(text) {  // Prometheus text format -> [{name, labels, value}]
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line || line[0] === "#") continue;
+    const m = line.match(/^([a-zA-Z_:][\w:]*)(?:\{([^}]*)\})?\s+(\S+)/);
+    if (!m) continue;
+    const labels = {};
+    for (const kv of (m[2] || "").matchAll(/(\w+)="((?:[^"\\]|\\.)*)"/g)) labels[kv[1]] = kv[2];
+    out.push({name: m[1], labels, value: Number(m[3])});
+  }
+  return out;
+}
+
+function snapshot(samples) {  // counters summed over rules
+  const s = {reasons: {}, buckets: {}, deny: 0, t: performance.now() / 1000};
+  for (const x of samples) {
+    if (x.name === "rl_checks_total") s.reasons[x.labels.reason] = (s.reasons[x.labels.reason] || 0) + x.value;
+    else if (x.name === "rl_check_latency_seconds_bucket") s.buckets[x.labels.le] = (s.buckets[x.labels.le] || 0) + x.value;
+    else if (x.name === "rl_deny_cache_hits_total") s.deny += x.value;
+  }
+  return s;
+}
+
+function quantile(buckets, q) {  // from per-interval bucket deltas, linear within a bucket; ms
+  const les = Object.keys(buckets).filter((k) => k !== "+Inf").sort((a, b) => Number(a) - Number(b));
+  const total = buckets["+Inf"] || 0;
+  if (total <= 0) return null;
+  let lo = 0, below = 0;
+  for (const key of les) {  // the label's own spelling ("5e-05" and "0.00005" are one bound)
+    const le = Number(key), cum = buckets[key];
+    if (cum >= q * total) return 1000 * (lo + (le - lo) * ((q * total - below) / Math.max(1, cum - below)));
+    lo = le; below = cum;
+  }
+  return 1000 * lo;
+}
+
+function step(s, phase) {
+  if (prev) {
+    const dt = Math.max(0.2, s.t - prev.t);
+    const d = (k) => Math.max(0, (s.reasons[k] || 0) - (prev.reasons[k] || 0)) / dt;
+    const row = {t: Date.now(), deny: Math.max(0, s.deny - prev.deny) / dt, phase};
+    for (const o of OUTCOMES) row[o.key] = o.reasons.reduce((a, r) => a + d(r), 0);
+    const db = {};
+    for (const le in s.buckets) db[le] = Math.max(0, s.buckets[le] - (prev.buckets[le] || 0));
+    row.p50 = quantile(db, 0.5);
+    row.p99 = quantile(db, 0.99);
+    hist.push(row);
+    while (hist.length > WINDOW) hist.shift();
+  }
+  prev = s;
+}
+
+const fmt = (x) => x == null ? "–" : x >= 1000 ? Math.round(x).toLocaleString("en-US") : x >= 10 ? x.toFixed(0)
+  : x >= 1 || x === 0 ? x.toFixed(1) : String(+x.toPrecision(1));
+
+function setup(canvas) {
+  const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+  const g = canvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {g, w: r.width, h: r.height};
+}
+
+function niceMax(v) { const p = Math.pow(10, Math.floor(Math.log10(v || 1))); return Math.ceil((v || 1) / p) * p; }
+
+function axes(g, w, h, ticks, frac, unit) {  // frac(v): 0 at the bottom, 1 at the top
+  const L = 54, B = 22, T = 8;
+  g.font = "11px system-ui"; g.fillStyle = css("--text-2"); g.strokeStyle = css("--grid"); g.lineWidth = 1;
+  for (const v of ticks) {
+    const y = T + (h - B - T) * (1 - frac(v));
+    g.beginPath(); g.moveTo(L, y); g.lineTo(w - 8, y); g.stroke();
+    g.textAlign = "right"; g.textBaseline = "middle"; g.fillText(fmt(v) + unit, L - 6, y);
+  }
+  g.textAlign = "center"; g.textBaseline = "top";
+  for (const s of [120, 90, 60, 30, 0]) g.fillText(s === 0 ? "now" : `−${s} s`, L + (w - 8 - L) * (1 - s / WINDOW), h - B + 6);
+  return {L, R: w - 8, T, Bot: h - B, x: (i) => L + (w - 8 - L) * ((i + WINDOW - hist.length) / (WINDOW - 1))};
+}
+
+function phaseMarks(g, a) {  // a vertical line where the demo's phase changed, with its first words
+  g.save(); g.setLineDash([3, 3]); g.strokeStyle = css("--text-2"); g.fillStyle = css("--text-2"); g.font = "11px system-ui";
+  for (let i = 1; i < hist.length; i++) {
+    if (hist[i].phase && hist[i].phase !== hist[i - 1].phase) {
+      const x = a.x(i);
+      g.beginPath(); g.moveTo(x, a.T); g.lineTo(x, a.Bot); g.stroke();
+      g.textAlign = "left"; g.textBaseline = "top"; g.fillText(hist[i].phase.split(":")[0], x + 3, a.T);
+    }
+  }
+  g.restore();
+}
+
+function drawOutcomes(hover) {
+  const c = document.getElementById("c-out"), {g, w, h} = setup(c);
+  const max = niceMax(Math.max(10, ...hist.map((r) => OUTCOMES.reduce((a, o) => a + r[o.key], 0))));
+  const a = axes(g, w, h, [0, 1, 2, 3, 4].map((i) => max * i / 4), (v) => v / max, "");
+  const y = (v) => a.Bot - (a.Bot - a.T) * (v / max);
+  const base = hist.map(() => 0);
+  for (const o of OUTCOMES) {  // stacked bands, a 2px surface line between them
+    const top = hist.map((r, i) => base[i] + r[o.key]);
+    if (hist.length > 1 && top.some((v, i) => v > base[i])) {
+      g.beginPath();
+      hist.forEach((_, i) => i ? g.lineTo(a.x(i), y(top[i])) : g.moveTo(a.x(i), y(top[i])));
+      for (let i = hist.length - 1; i >= 0; i--) g.lineTo(a.x(i), y(base[i]));
+      g.closePath(); g.fillStyle = css(o.color); g.fill();
+      g.beginPath(); hist.forEach((_, i) => i ? g.lineTo(a.x(i), y(top[i])) : g.moveTo(a.x(i), y(top[i])));
+      g.strokeStyle = css("--surface"); g.lineWidth = 2; g.stroke();
+    }
+    top.forEach((v, i) => base[i] = v);
+  }
+  phaseMarks(g, a);
+  crosshair(g, a, hover, "tip-out", (r) => [`<b>${new Date(r.t).toLocaleTimeString()}</b>`,
+    ...OUTCOMES.map((o) => `${o.label}: ${fmt(r[o.key])}/s`), `deny cache: ${fmt(r.deny)}/s`]);
+}
+
+function drawLatency(hover) {
+  const c = document.getElementById("c-lat"), {g, w, h} = setup(c);
+  // log scale: a stall's tail (hundreds of ms) and a normal p50 (a fraction of a ms) on one chart
+  const top = Math.max(1, ...hist.flatMap((r) => [r.p50 || 0, r.p99 || 0]));
+  const lo = 0.01, hi = Math.pow(10, Math.ceil(Math.log10(top)));
+  const frac = (v) => (Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo));
+  const ticks = []; for (let v = lo; v <= hi * 1.001; v *= 10) ticks.push(v);
+  const a = axes(g, w, h, ticks, frac, " ms");
+  const y = (v) => a.Bot - (a.Bot - a.T) * frac(v);
+  for (const s of LAT) {
+    g.beginPath(); let on = false;
+    hist.forEach((r, i) => { if (r[s.key] == null) { on = false; return; }
+      on ? g.lineTo(a.x(i), y(r[s.key])) : g.moveTo(a.x(i), y(r[s.key])); on = true; });
+    g.strokeStyle = css(s.color); g.lineWidth = 2; g.stroke();
+  }
+  phaseMarks(g, a);
+  crosshair(g, a, hover, "tip-lat", (r) => [`<b>${new Date(r.t).toLocaleTimeString()}</b>`,
+    `p50: ${r.p50 == null ? "–" : r.p50.toFixed(2)} ms`, `p99: ${r.p99 == null ? "–" : r.p99.toFixed(2)} ms`]);
+}
+
+function crosshair(g, a, hover, tipId, lines) {
+  const tip = document.getElementById(tipId);
+  if (!hover || !hist.length || hover.x < a.L || hover.x > a.R) { tip.style.display = "none"; return; }
+  let best = 0;
+  hist.forEach((_, i) => { if (Math.abs(a.x(i) - hover.x) < Math.abs(a.x(best) - hover.x)) best = i; });
+  const x = a.x(best);
+  g.strokeStyle = css("--text-2"); g.lineWidth = 1; g.beginPath(); g.moveTo(x, a.T); g.lineTo(x, a.Bot); g.stroke();
+  tip.innerHTML = lines(hist[best]).join("<br>");
+  tip.style.display = "block";
+  tip.style.left = Math.min(x + 16, a.R - tip.offsetWidth + 12) + "px";
+  tip.style.top = "40px";
+}
+
+const hovers = {"c-out": null, "c-lat": null};
+for (const id of Object.keys(hovers)) {
+  const c = document.getElementById(id);
+  c.addEventListener("mousemove", (e) => { const r = c.getBoundingClientRect(); hovers[id] = {x: e.clientX - r.left}; draw(); });
+  c.addEventListener("mouseleave", () => { hovers[id] = null; draw(); });
+}
+
+function draw() {
+  drawOutcomes(hovers["c-out"]);
+  drawLatency(hovers["c-lat"]);
+  const r = hist[hist.length - 1];
+  if (!r) return;
+  const total = OUTCOMES.reduce((a, o) => a + r[o.key], 0);
+  document.getElementById("t-rate").textContent = fmt(total);
+  document.getElementById("t-allowed").textContent = total ? `${(100 * r.allowed / total).toFixed(1)}%` : "–";
+  document.getElementById("t-deny").textContent = fmt(r.deny);
+  document.getElementById("t-p99").textContent = r.p99 == null ? "–" : `${r.p99.toFixed(2)} ms`;
+}
+
+document.getElementById("legend-out").innerHTML = OUTCOMES.map((o) =>
+  `<span><i style="background:var(${o.color})"></i>${o.label}</span>`).join("");
+document.getElementById("legend-lat").innerHTML = LAT.map((s) =>
+  `<span><i style="background:var(${s.color})"></i>${s.label}</span>`).join("");
+
+async function tick() {
+  const foot = document.getElementById("foot");
+  try {
+    const [m, p] = await Promise.all([fetch("/metrics", {cache: "no-store"}), fetch("/phase", {cache: "no-store"})]);
+    if (!m.ok) throw new Error(await m.text());
+    const phase = p.ok ? (await p.text()).trim() : "";
+    step(snapshot(parse(await m.text())), phase);
+    if (phase) document.getElementById("phase").textContent = phase;
+    foot.textContent = "Source: /metrics, relayed by tools/live_dashboard.py; updated every second.";
+    foot.className = "";
+  } catch (e) {
+    foot.textContent = `Cannot read the limiter's metrics: ${e.message}. Is rate_limiter_server running with RL_METRICS_ADDR?`;
+    foot.className = "err";
+  }
+  draw();
+}
+if (typeof window !== "undefined" && !window.LIVE_TEST) { tick(); setInterval(tick, 1000); window.addEventListener("resize", draw); }
+</script>
+</body>
+</html>

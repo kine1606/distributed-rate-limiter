@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -30,6 +31,17 @@ class ManualBackend final : public RedisBackend {
     ++total_;
   }
   void HGetAll(std::string, HashCallback done) override { done({}); }  // every customer is Free
+  void Return(const Rule& rule, std::string_view key, std::uint32_t tokens, ScriptCallback done) override {
+    {
+      std::lock_guard lock(mu_);
+      returned_.push_back(rule.name + "/" + std::string(key) + "/" + std::to_string(tokens));
+    }
+    done({.allowed = true});
+  }
+  std::vector<std::string> Returned() {
+    std::lock_guard lock(mu_);
+    return returned_;
+  }
 
   // Answers the oldest pending call; returns what it had asked for.
   std::uint32_t Reply(ScriptResult r) {
@@ -59,6 +71,7 @@ class ManualBackend final : public RedisBackend {
  private:
   std::mutex mu_;
   std::deque<Call> pending_;
+  std::vector<std::string> returned_;
   int total_ = 0;
 };
 
@@ -300,6 +313,112 @@ TEST(LeasedCore, ChunkHalvesAfterTokensSatUnusedAndDoublesWhenTheLeaseRunsDry) {
   EXPECT_TRUE(waiting.result->allowed);
   ASSERT_EQ(changes.size(), 2u);
   EXPECT_EQ(changes[1], std::make_pair(50u, 100u));  // demand outran the chunk: doubled
+}
+
+// Week 5 shutdown: unused leased tokens go back to Redis, so a restart does not burn them.
+// A full lease table never refuses a check: keys it cannot hold take the exact path.
+TEST(LeasedCore, KeysAFullLeaseTableCannotHoldTakeTheExactPath) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules(), 64);  // 64 slots
+  std::vector<Pending> checks(100);
+  for (int i = 0; i < 100; ++i) checks[static_cast<std::size_t>(i)].Start(core, "k" + std::to_string(i), "burst");
+  ASSERT_EQ(redis.Pending(), 100u);
+  int chunks = 0, exact = 0;
+  while (redis.Pending() > 0) ++(redis.Reply(Granted()) == 10 ? chunks : exact);
+  EXPECT_EQ(chunks, 64);  // a lease refill of one chunk each
+  EXPECT_EQ(exact, 36);   // one script per check
+  for (const auto& c : checks) {
+    ASSERT_TRUE(c.result.has_value());
+    EXPECT_TRUE(c.result->allowed);
+  }
+}
+
+// The ablation switches (Week 7): each mechanism off on its own, everything else unchanged.
+TEST(LeasedCore, WithoutEarlyRefillTheLeaseRunsDryBeforeAskingAgain) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules(), 1024, &SteadyNowNs, {}, {.early_refill = false});
+  Pending first;
+  first.Start(core, "u1", "burst");
+  redis.Reply(Granted());                                     // 10 tokens, one taken
+  for (int i = 0; i < 9; ++i) EXPECT_TRUE(CheckNow(core, "u1", "burst").allowed);  // to 0: no refill
+  EXPECT_EQ(redis.Total(), 1);
+  Pending dry;
+  dry.Start(core, "u1", "burst");
+  EXPECT_FALSE(dry.result.has_value());  // waits for the refill an early one would have avoided
+  EXPECT_EQ(redis.Total(), 2);
+  redis.Reply(Granted());
+}
+
+TEST(LeasedCore, WithoutAdaptiveChunkTheChunkStaysAtTheCap) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  g_fake_ns = 1'000'000'000;
+  const Rule big{.name = "big", .limit = 1000, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
+  int changes = 0;
+  LeasedCore core(redis, plans, {{"big", big}}, 1024, &FakeNow, [&](const Lease&, std::uint32_t, std::uint32_t) { ++changes; },
+                  {.adaptive_chunk = false});
+  Pending first;
+  first.Start(core, "q", "big");
+  redis.Reply(Granted());
+  for (int i = 0; i < 70; ++i) CheckNow(core, "q", "big");
+  g_fake_ns += 11'000'000'000;  // the chunk sat unused for 11 s: adaptive would halve it
+  redis.Reply(Granted());
+  for (int i = 0; i < 71; ++i) CheckNow(core, "q", "big");  // 100 -> 29: below 30% of 100
+  EXPECT_EQ(redis.PendingRequested(), 71u);                   // still topping up to 100
+  EXPECT_EQ(changes, 0);
+  EXPECT_EQ(core.GetStats().topup_requested, 100u + 71 + 71);  // the mean fill the stats report
+  EXPECT_EQ(core.GetStats().topup_target, 300u);
+  redis.Reply(Granted());
+}
+
+TEST(LeasedCore, ReturnLeasesGivesBackWhatEachLeaseStillHolds) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending a, b;
+  a.Start(core, "u1", "burst");
+  b.Start(core, "u2", "open");
+  redis.Reply(Granted());  // 10 tokens each, one taken
+  redis.Reply(Granted());
+  CheckNow(core, "u1", "burst");  // u1 holds 8, u2 holds 9
+
+  const auto r = core.ReturnLeases(std::chrono::seconds(1));
+  EXPECT_EQ(r.leases, 2u);
+  EXPECT_EQ(r.tokens, 17u);
+  EXPECT_EQ(r.failed, 0u);
+  auto returned = redis.Returned();
+  std::sort(returned.begin(), returned.end());
+  EXPECT_EQ(returned, (std::vector<std::string>{"burst/u1/8", "open/u2/9"}));
+  EXPECT_EQ(core.ReturnLeases(std::chrono::seconds(1)).tokens, 0u);  // nothing left to give twice
+}
+
+// A refill still in flight at shutdown brings tokens; they must be returned too (code review, Week 5).
+TEST(LeasedCore, ReturnLeasesWaitsForARefillInFlight) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending first;
+  first.Start(core, "u1", "burst");  // its refill of 10 is out
+  LeasedCore::Returned r{};
+  std::thread shutdown([&] { r = core.ReturnLeases(std::chrono::seconds(2)); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  redis.Reply(Granted());  // lands during the shutdown: 10, one taken by the parked check
+  shutdown.join();
+  EXPECT_EQ(r.tokens, 9u);
+  EXPECT_EQ(r.refills_unfinished, 0u);
+}
+
+TEST(LeasedCore, ReturnLeasesReportsARefillThatNeverLanded) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules());
+  Pending first;
+  first.Start(core, "u1", "burst");
+  const auto r = core.ReturnLeases(std::chrono::milliseconds(30));
+  EXPECT_EQ(r.refills_unfinished, 1u);  // logged, not hidden behind "0 returns failed"
+  redis.Reply(Granted());               // let the parked check finish before the core goes
 }
 
 }  // namespace

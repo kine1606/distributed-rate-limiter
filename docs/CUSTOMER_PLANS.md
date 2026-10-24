@@ -184,7 +184,7 @@ reasoning in Chapter 3.
 | B5, B6, B9 | 4 | [src/plan](../src/plan/README.md), [tools](../tools/README.md) |
 | B7 | 1 (done), 6 | [lua](../lua/README.md), [EVALUATION.md](EVALUATION.md) |
 | B8 | 4 | [src/usage](../src/usage/README.md) |
-| Failure policy per plan | 5 | [src/reliability](../src/reliability/README.md) |
+| Failure policy per plan | 5 (done) | [src/reliability](../src/reliability/README.md), measured in `docs/thesis/evidence/reliability_2026-10-21.md` |
 
 ## Defense demo script (about 2 minutes)
 

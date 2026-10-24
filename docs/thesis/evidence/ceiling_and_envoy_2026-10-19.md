@@ -113,7 +113,9 @@ Does the project go the right way? Mostly yes, with one weak spot:
   because it did not help at this scale (Week 3).
 - **Weak spot: the exact path.** Envoy's per-request Redis path is 1.4 to 3.5 times faster than
   this limiter's on the same laptop (part B), which matters because quotas of small plans always take
-  the exact path. The cause and the fix are known; the fix is Week 7 work.
+  the exact path. The cause and the fix are known; the fix is Week 7 work. *Update 2026-10-21:* four
+  Redis clients took the exact path from 8,896 to 36,283 checks/s at 12 connections, close to
+  Envoy's 38,167 (`reliability_2026-10-21.md`).
 - **Not compared: production hardening.** Envoy and Gubernator run in production. Metrics, health
   and graceful shutdown here are Week 5.
 

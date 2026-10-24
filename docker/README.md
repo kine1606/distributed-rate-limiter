@@ -1,6 +1,6 @@
 # Docker environment
 
-> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: Week 1 done: base cluster verified (`cluster_state:ok`, hash-tagged keys in one slot); development profile `docker-compose.dev.yml` reachable from WSL. Week 2: the 3 limiters run on the cluster (image builds redis-plus-plus), and share one daily quota across instances
+> Week 1 (cluster up, host access), Week 5 (fault injection), Week 6 (multi-instance tests) · Status: Week 1 done: base cluster verified (`cluster_state:ok`, hash-tagged keys in one slot); development profile `docker-compose.dev.yml` reachable from WSL. Week 5: `docker-compose.faults.yml` (3 masters with replicas on 7101-7106, any node can be killed) for `bench/fault_kill_master.sh`; Prometheus in `docker-compose.yml`. Week 2: the 3 limiters run on the cluster (image builds redis-plus-plus), and share one daily quota across instances
 
 ## What this module does
 

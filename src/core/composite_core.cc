@@ -7,6 +7,23 @@
 #include "lease/chunk_policy.h"
 
 namespace ratelimiter {
+namespace {
+
+// Redis could not be asked: the answer carries the rule's failure policy (RedisDownResult).
+bool RedisDown(const CheckResult& r) { return r.reason == Reason::kUnavailable || r.reason == Reason::kUnverified; }
+
+// The customer's plan decides instead (Week 5): paid plans fail open, admitting the call as
+// unverified (not counted, not billed); Free and unknown customers fail closed.
+CheckResult PlanDown(const Plan& plan) {
+  CheckResult r;
+  r.allowed = plan.failure == FailurePolicy::kFailOpen;
+  r.reason = r.allowed ? Reason::kUnverified : Reason::kUnavailable;
+  r.limit = plan.daily;
+  r.retry_after_ms = r.allowed ? 0 : 1000;  // about when the breaker probes Redis again
+  return r;
+}
+
+}  // namespace
 
 CompositeCore::CompositeCore(std::shared_ptr<RateLimiterCore> inner, StrictCore& strict, PlanStore& plans,
                              DenyCache& deny, RuleTable rules, Clock clock, UsageObserver on_decision,
@@ -62,8 +79,8 @@ void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
   // The request's views die when Check returns, so the callbacks keep copies.
   plans_.Get(request.key, [this, &burst, &quota, key = std::string(request.key), cost = request.cost,
                            id = std::string(request.request_id), done = std::move(done)](const Plan* p) mutable {
-    if (p == nullptr) {
-      done(RedisDownResult(quota));
+    if (p == nullptr) {  // never read and Redis down: unknown, so Free
+      done(PlanDown(Plan{}));
       return;
     }
     const Plan plan = *p;  // `p` dies when this callback returns
@@ -84,14 +101,17 @@ void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
     strict_.Check(burst, plan, key, cost, {},
                   [this, &burst, &quota, plan, key, cost, id = std::move(id), done = std::move(done)](
                       const CheckResult& b) mutable {
+      if (RedisDown(b)) {  // no quota call: Redis is unlikely to answer it either
+        done(PlanDown(plan));
+        return;
+      }
       if (!b.allowed) {
         done(b);
         return;
       }
-      const bool burst_counted = b.reason == Reason::kAllowed;  // not when Redis was down and it failed open
-      CheckCallback finish = [this, &burst, plan, key, cost, burst_counted, done = std::move(done)](
-                                 const CheckResult& q) {
-        if (!q.allowed && burst_counted) strict_.GiveBack(burst, plan, key, cost);
+      CheckCallback finish = [this, &burst, plan, key, cost, done = std::move(done)](const CheckResult& answer) {
+        const CheckResult q = RedisDown(answer) ? PlanDown(plan) : answer;
+        if (!q.allowed) strict_.GiveBack(burst, plan, key, cost);  // the burst token was taken
         // A replayed denial was decided under the plan of its first attempt, maybe not this one.
         if (q.reason == Reason::kQuotaExhausted && !q.replayed) {
           deny_.Deny(key, QuotaStamp(plan), now_(), q.reset_after_ms);

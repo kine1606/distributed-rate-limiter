@@ -4,12 +4,14 @@
 // redis-cli is missing (seed: RL_TEST_CLUSTER, see it_cluster.h).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -98,12 +100,15 @@ class PlanChangeIT : public ::testing::Test {
     ASSERT_TRUE(Rlctl("create " + customer));
   }
 
-  void SetUsedToday(const std::string& customer, int used) {
+  // The customer's daily counter at `used`, dated `days_ago` days before today by the script's clock.
+  void SetUsedToday(const std::string& customer, int used, int days_ago = 0) {
     const std::string key = RedisKey(rules_.at("daily_quota"), customer);
-    const auto t = admin_->redis(key, false).command<std::vector<std::string>>("TIME");  // the script's clock
     const std::vector<std::pair<std::string, std::string>> state{
-        {"day", std::to_string(std::stoll(t.at(0)) / 86400)}, {"used", std::to_string(used)}};
+        {"day", std::to_string(RedisDay(key) - days_ago)}, {"used", std::to_string(used)}};
     admin_->hset(key, state.begin(), state.end());
+  }
+  long long RedisDay(const std::string& key) {  // the UTC day of the master that owns `key`
+    return std::stoll(admin_->redis(key, false).command<std::vector<std::string>>("TIME").at(0)) / 86400;
   }
 
   // ms from `start` until every instance holds a plan with `daily`, or -1 after a second.
@@ -154,6 +159,28 @@ TEST_F(PlanChangeIT, UpgradeReachesEveryInstanceWithinOneSecond) {
   EXPECT_EQ(b.remaining, 1798u);
 }
 
+// Evaluation test 2, the reset: yesterday's counter, full, is reset exactly once although both
+// instances meet it at the same moment, because the script that resets it runs atomically on the
+// master by the master's clock; then the day counts on from there on both.
+TEST_F(PlanChangeIT, YesterdaysFullCounterResetsOnceForEveryInstance) {
+  const std::string c = "cust:it-reset";
+  Create(c);
+  SetUsedToday(c, 200, 1);  // out of quota, but yesterday
+  auto a = std::async(std::launch::async, [&] { return instances_[0]->Check(c); });
+  auto b = std::async(std::launch::async, [&] { return instances_[1]->Check(c); });
+  const CheckResult ra = a.get(), rb = b.get();
+  EXPECT_TRUE(ra.allowed);
+  EXPECT_TRUE(rb.allowed);
+  EXPECT_EQ(std::min(ra.remaining, rb.remaining), 198u);  // one reset: 199 and 198, never 199 twice
+  EXPECT_EQ(std::max(ra.remaining, rb.remaining), 199u);
+  std::this_thread::sleep_for(1100ms);  // Free's burst: 2 tokens, 2 a second
+  EXPECT_EQ(instances_[1]->Check(c).remaining, 197u);
+  EXPECT_EQ(instances_[0]->Check(c).remaining, 196u);
+  const std::string key = RedisKey(rules_.at("daily_quota"), c);
+  EXPECT_EQ(admin_->hget(key, "day").value_or(""), std::to_string(RedisDay(key)));
+  EXPECT_EQ(admin_->hget(key, "used").value_or(""), "4");
+}
+
 // Step B9: suspended on every instance within a second; restored with today's usage intact.
 TEST_F(PlanChangeIT, SuspendAndRestoreReachEveryInstance) {
   const std::string c = "cust:it-b9";
@@ -171,6 +198,38 @@ TEST_F(PlanChangeIT, SuspendAndRestoreReachEveryInstance) {
   const auto r = instances_[0]->Check(c);
   EXPECT_TRUE(r.allowed);
   EXPECT_EQ(r.remaining, 1997u);  // the two checks before the suspension still count
+}
+
+// Messages published while the subscription is down are lost, so a listener whose connection was
+// killed must come back by itself and call on_resync again (the instance then drops every cached plan),
+// and messages after that must arrive again.
+TEST(PlanListenerIT, AKilledSubscriptionComesBackAndResyncs) {
+  auto admin = ConnectAdmin();
+  const auto [host, port] = ClusterSeed();
+  if (!admin) GTEST_SKIP() << "Redis Cluster not reachable at " << host << ":" << port;
+  if (std::system("command -v redis-cli >/dev/null") != 0) GTEST_SKIP() << "needs redis-cli";
+  std::atomic<int> resyncs{0};
+  std::mutex mu;
+  std::vector<std::string> seen;
+  PlanListener listener(host, port,
+                        [&](std::string_view c) {
+                          std::lock_guard lock(mu);
+                          seen.emplace_back(c);
+                        },
+                        [&] { ++resyncs; });
+  const auto wait_for = [](auto done) {
+    for (int i = 0; i < 300 && !done(); ++i) std::this_thread::sleep_for(10ms);
+    return done();
+  };
+  ASSERT_TRUE(wait_for([&] { return resyncs.load() == 1; }));
+  const std::string kill = "redis-cli -h " + host + " -p " + std::to_string(port) + " CLIENT KILL TYPE pubsub >/dev/null";
+  ASSERT_EQ(std::system(kill.c_str()), 0);
+  ASSERT_TRUE(wait_for([&] { return resyncs.load() == 2; }));  // back, and told to resync
+  admin->publish(std::string(PlanListener::kChannel), "cust:resync");
+  EXPECT_TRUE(wait_for([&] {
+    std::lock_guard lock(mu);
+    return std::find(seen.begin(), seen.end(), "cust:resync") != seen.end();
+  }));
 }
 
 TEST_F(PlanChangeIT, RlctlRefusesAnUnknownPlanAndASecondCreate) {

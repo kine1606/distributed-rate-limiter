@@ -207,11 +207,12 @@ TEST_F(CompositeCoreTest, RequestIdGoesToTheQuotaOnly) {  // burst is not dedupl
   EXPECT_EQ(redis.calls[1].request_id, "retry-1");
 }
 
-TEST_F(CompositeCoreTest, PlanReadFailureAppliesTheQuotasFailurePolicy) {
+TEST_F(CompositeCoreTest, AnUnknownCustomerWhileRedisIsDownIsFreeAndFailsClosed) {
   redis.plan.redis_error = true;
   const auto r = Run();
   EXPECT_FALSE(r.allowed);
-  EXPECT_EQ(r.reason, Reason::kUnavailable);  // daily_quota fails closed
+  EXPECT_EQ(r.reason, Reason::kUnavailable);
+  EXPECT_EQ(r.limit, 200u);  // the Free plan
   EXPECT_TRUE(redis.calls.empty());
 }
 
@@ -222,11 +223,35 @@ TEST_F(CompositeCoreTest, QuotaUnreachableDeniesAndCachesNothing) {
   EXPECT_EQ(deny.Size(), 0u);           // not a quota decision: nothing to remember
 }
 
-TEST_F(CompositeCoreTest, UncountedBurstIsNotGivenBack) {
-  redis.replies["burst"] = {.redis_error = true};  // burst fails open: allowed, unverified, not counted
-  redis.replies["daily_quota"] = {.allowed = false, .retry_after_ms = 60'000, .reset_after_ms = 60'000};
-  EXPECT_EQ(Run().reason, Reason::kQuotaExhausted);
+// Week 5: when Redis cannot answer, the customer's plan decides (paid open, Free closed), whatever
+// the rule's own failure_policy says.
+TEST_F(CompositeCoreTest, RedisDownAtTheBurstStepFollowsThePlan) {
+  redis.replies["burst"] = {.redis_error = true};
+  redis.plan.fields["failure"] = "open";
+  auto r = Run();
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kUnverified);  // admitted, not counted, not billed
+  EXPECT_EQ(r.limit, 2000u);
+  redis.plan.fields["failure"] = "closed";
+  r = Run();
+  EXPECT_FALSE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kUnavailable);
+  EXPECT_EQ(r.retry_after_ms, 1000u);
+  for (const auto& c : redis.calls) EXPECT_EQ(c.rule, "burst");  // no quota call after a failed burst
   EXPECT_TRUE(redis.returns.empty());
+}
+
+TEST_F(CompositeCoreTest, RedisDownAtTheQuotaStepFollowsThePlan) {
+  redis.replies["daily_quota"] = {.redis_error = true};
+  redis.plan.fields["failure"] = "open";
+  auto r = Run();
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kUnverified);
+  EXPECT_TRUE(redis.returns.empty());  // admitted: its burst token stays taken
+  redis.plan.fields.erase("failure");  // the Free default: closed
+  r = Run();
+  EXPECT_EQ(r.reason, Reason::kUnavailable);
+  EXPECT_EQ(redis.returns.size(), 1u);  // denied: the burst token goes back
 }
 
 // The original was denied under the old plan; its replay after an upgrade must not deny the
@@ -335,6 +360,22 @@ TEST_F(LeasedQuotaTest, ALargePlanTakesItsQuotaFromALease) {
   EXPECT_EQ(redis.calls.size(), 6u);        // burst is still checked per call
 }
 
+// Leases refer to their rule, so the table of leased-quota rules is fixed and never freed: 64 plan
+// sizes. A 65th size takes the exact path, which still answers, with the plan's own policy.
+TEST_F(LeasedQuotaTest, A65thDistinctPlanSizeTakesTheExactPath) {
+  for (int i = 0; i < 64; ++i) {
+    redis.plan.fields["daily"] = std::to_string(1'000'000 + 1000 * i);
+    EXPECT_TRUE(RunOn(auto_core).allowed);
+  }
+  EXPECT_EQ(QuotaCalls().size(), 64u);  // one lease refill per size
+  redis.plan.fields["daily"] = "2000000";
+  for (int i = 0; i < 3; ++i) EXPECT_TRUE(RunOn(auto_core).allowed);
+  const auto q = QuotaCalls();
+  ASSERT_EQ(q.size(), 64u + 3u);  // exact: one quota script per check
+  EXPECT_EQ(q.back().amount, 1u);
+  EXPECT_EQ(q.back().overage, Overage::kCap);
+}
+
 TEST_F(LeasedQuotaTest, PlansBelowTheThresholdAndTheStrictEngineStayExact) {
   redis.plan.fields["daily"] = std::to_string(kLeasedQuotaFrom - 1);
   for (int i = 0; i < 3; ++i) RunOn(auto_core);
@@ -373,6 +414,14 @@ TEST_F(LeasedQuotaTest, OverageBeyondTheLeaseIsBilledOnTheExactPath) {
   redis.next["daily_quota"] = {{.allowed = true, .reset_after_ms = 60'000, .overage = true}};
   EXPECT_EQ(RunOn(auto_core).reason, Reason::kOverage);  // the lease denies locally until the reset
   EXPECT_EQ(QuotaCalls().size(), 3u);                     // one refill, then an exact check each
+}
+
+TEST_F(LeasedQuotaTest, ALeaseThatCannotRefillFollowsThePlan) {  // after the lease runs out
+  redis.replies["daily_quota"] = {.redis_error = true};
+  redis.plan.fields["failure"] = "open";
+  const auto r = RunOn(auto_core);
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kUnverified);
 }
 
 TEST_F(LeasedQuotaTest, AnUpgradeLeasesUnderTheNewLimit) {

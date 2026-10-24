@@ -23,6 +23,7 @@ thread_local std::array<LocalPlan, 256> t_plans;
 }  // namespace
 
 void PlanStore::Read(std::string_view customer, Callback done) {
+  reads_.Add();
   redis_.HGetAll(PlanKey(customer), [done = std::move(done)](const HashResult& h) {
     if (h.redis_error) {
       done(nullptr);
@@ -80,6 +81,7 @@ void PlanStore::Get(std::string_view customer, Callback done) {
 }
 
 void PlanStore::Load(const std::string& customer) {
+  reads_.Add();
   redis_.HGetAll(PlanKey(customer), [this, customer](const HashResult& h) { OnLoad(customer, h); });
 }
 
@@ -99,10 +101,14 @@ void PlanStore::OnLoad(const std::string& customer, const HashResult& h) {
       waiters.swap(it->second.waiters);
       if (plan) {
         it->second.plan = *plan;
+        it->second.has_plan = true;
         it->second.expires_ns = now_() + ttl_ns_;
         it->second.loading = false;
+      } else if (it->second.has_plan) {  // stale if error; still expired, so the next check asks again
+        plan = it->second.plan;
+        it->second.loading = false;
       } else {
-        s.map.erase(it);  // an error is not cached: the next check asks Redis again
+        s.map.erase(it);  // nothing to fall back on: the next check asks Redis again
       }
     }
   }
@@ -117,27 +123,14 @@ void PlanStore::Invalidate(std::string_view customer) {
   Shard& s = ShardOf(customer);
   std::lock_guard lock(s.mu);
   const auto it = s.map.find(customer);
-  if (it != s.map.end()) {
-    if (it->second.loading) {
-      it->second.stale = true;
-    } else {
-      s.map.erase(it);
-    }
-  }
+  if (it != s.map.end()) Expire(it->second);
   generation_.fetch_add(1, std::memory_order_release);  // every thread's copies are stale now
 }
 
 void PlanStore::InvalidateAll() {
   for (Shard& s : shards_) {
     std::lock_guard lock(s.mu);
-    for (auto it = s.map.begin(); it != s.map.end();) {
-      if (it->second.loading) {
-        it->second.stale = true;
-        ++it;
-      } else {
-        it = s.map.erase(it);
-      }
-    }
+    for (auto& [customer, entry] : s.map) Expire(entry);
   }
   generation_.fetch_add(1, std::memory_order_release);
 }

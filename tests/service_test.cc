@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,6 +65,8 @@ class ServiceTest : public ::testing::Test {
     if (server_) server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
   }
 
+  friend class AdmissionTest;
+  friend class ServiceMetrics_EveryAnswerIsCountedByRuleAndReason_Test;
   static v1::CheckRequest Req(const std::string& key, const std::string& rule = "api_default", std::uint32_t cost = 0) {
     v1::CheckRequest r;
     r.set_key(key);
@@ -176,6 +179,178 @@ TEST_F(ServiceTest, OneUnknownRuleFailsTheWholeBatch) {
   v1::CheckBatchResponse resp;
   EXPECT_EQ(Batch({Req("a"), Req("b", "bad"), Req("c")}, &resp).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   EXPECT_EQ(core_->seen.size(), 3u);  // the others were checked; the RPC still fails as a whole
+}
+
+// A rule reload (SIGHUP) swaps the engine under load: a check already in the old engine is answered
+// by it, and every check after the swap goes to the new one.
+TEST_F(ServiceTest, AfterSetCoreNewChecksGoToTheNewCoreAndOldOnesFinish) {
+  core_->late = true;
+  auto in_old = std::async(std::launch::async, [this] {
+    v1::CheckResponse resp;
+    const grpc::Status s = Check(Req("old", "r", 1), &resp);
+    return std::make_pair(s.ok(), resp.remaining());
+  });
+  for (bool seen = false; !seen; std::this_thread::sleep_for(std::chrono::milliseconds(1))) {
+    std::lock_guard lock(core_->mu);
+    seen = !core_->seen.empty();
+  }
+  auto next = std::make_shared<FakeCore>();
+  next->answer = [](const CheckRequest&) { return CheckResult{.allowed = true, .remaining = 99}; };
+  service_.SetCore(next);
+  v1::CheckResponse resp;
+  ASSERT_TRUE(Check(Req("new"), &resp).ok());
+  EXPECT_EQ(resp.remaining(), 99u);
+  EXPECT_EQ(in_old.get(), std::make_pair(true, 1u));  // answered late, by the old engine
+  EXPECT_EQ(next->seen, std::vector<std::string>{"new/api_default/1"});  // a cost of 0 means 1
+}
+
+// ---- metrics (Week 5) ----
+
+TEST(ServiceMetrics, EveryAnswerIsCountedByRuleAndReason) {
+#if defined(__SANITIZE_THREAD__)
+  GTEST_SKIP() << "needs a TSan-instrumented gRPC";
+#endif
+  const RuleTable rules{{"api_default", Rule{.name = "api_default"}}};
+  CheckMetrics metrics(rules);
+  auto core = std::make_shared<FakeCore>();
+  core->answer = [](const CheckRequest& q) {
+    return q.rule == "api_default" ? CheckResult{.allowed = true} : CheckResult{.reason = Reason::kUnknownRule};
+  };
+  RateLimiterService service(core, 10'000, &metrics);
+  grpc::ServerBuilder builder;
+  builder.RegisterService(&service);
+  auto server = builder.BuildAndStart();
+  auto stub = v1::RateLimiter::NewStub(server->InProcessChannel(grpc::ChannelArguments()));
+  const auto call = [&](const std::string& key, const std::string& rule) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    v1::CheckResponse resp;
+    return stub->Check(&ctx, ServiceTest::Req(key, rule), &resp);
+  };
+  EXPECT_TRUE(call("k", "api_default").ok());
+  EXPECT_TRUE(call("k", "api_default").ok());
+  EXPECT_FALSE(call("", "api_default").ok());  // malformed
+  EXPECT_FALSE(call("k", "no_such_rule").ok());  // unknown: no series of its own
+  std::string out;
+  metrics.Render(out);
+  EXPECT_NE(out.find("rl_checks_total{rule=\"api_default\",reason=\"ok\"} 2\n"), std::string::npos) << out;
+  EXPECT_NE(out.find("rl_check_latency_seconds_count{rule=\"api_default\"} 2\n"), std::string::npos);
+  EXPECT_NE(out.find("rl_rejected_total{reason=\"invalid\"} 2\n"), std::string::npos);
+  EXPECT_EQ(out.find("no_such_rule"), std::string::npos);
+  server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
+}
+
+// ---- backpressure (Week 5) ----
+
+// Holds every answer until Release(), so a test can fill the service up.
+class HoldingCore final : public RateLimiterCore {
+ public:
+  void Check(const CheckRequest&, CheckCallback done) override {
+    std::lock_guard lock(mu);
+    held.push_back(std::move(done));
+  }
+  void Release() {
+    std::vector<CheckCallback> out;
+    {
+      std::lock_guard lock(mu);
+      out.swap(held);
+    }
+    for (auto& d : out) d(CheckResult{.allowed = true});
+  }
+  std::size_t Held() {
+    std::lock_guard lock(mu);
+    return held.size();
+  }
+  std::mutex mu;
+  std::vector<CheckCallback> held;
+};
+
+class AdmissionTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "needs a TSan-instrumented gRPC";
+#endif
+    grpc::ServerBuilder builder;
+    builder.RegisterService(&service_);
+    server_ = builder.BuildAndStart();
+    ASSERT_TRUE(server_);
+    stub_ = v1::RateLimiter::NewStub(server_->InProcessChannel(grpc::ChannelArguments()));
+  }
+  void TearDown() override {
+    core_->Release();
+    if (server_) server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
+  }
+  grpc::Status Call(int batch = 0) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    if (batch == 0) {
+      v1::CheckResponse resp;
+      return stub_->Check(&ctx, ServiceTest::Req("k"), &resp);
+    }
+    v1::CheckBatchRequest req;
+    for (int i = 0; i < batch; ++i) *req.add_requests() = ServiceTest::Req("k");
+    v1::CheckBatchResponse resp;
+    return stub_->CheckBatch(&ctx, req, &resp);
+  }
+  // Starts a call that the core holds; its status lands in the returned future.
+  std::future<grpc::Status> Hold() {
+    auto p = std::make_shared<std::promise<grpc::Status>>();
+    auto ctx = std::make_shared<grpc::ClientContext>();
+    auto resp = std::make_shared<v1::CheckResponse>();
+    auto req = std::make_shared<v1::CheckRequest>(ServiceTest::Req("k"));
+    stub_->async()->Check(ctx.get(), req.get(), resp.get(), [p, ctx, resp, req](grpc::Status s) { p->set_value(s); });
+    return p->get_future();
+  }
+  bool WaitHeld(std::size_t n) {
+    for (int i = 0; i < 500 && core_->Held() < n; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    return core_->Held() == n;
+  }
+
+  std::shared_ptr<HoldingCore> core_ = std::make_shared<HoldingCore>();
+  RateLimiterService service_{core_, 2};
+  std::unique_ptr<grpc::Server> server_;
+  std::unique_ptr<v1::RateLimiter::Stub> stub_;
+};
+
+TEST_F(AdmissionTest, BeyondTheLimitACallIsRefusedAtOnce) {
+  auto a = Hold();
+  auto b = Hold();
+  ASSERT_TRUE(WaitHeld(2));
+  EXPECT_EQ(service_.InFlight(), 2);
+  const auto refused = Call();
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);  // not queued behind the two
+  EXPECT_EQ(core_->Held(), 2u);
+  core_->Release();
+  EXPECT_TRUE(a.get().ok());
+  EXPECT_TRUE(b.get().ok());
+  EXPECT_EQ(service_.InFlight(), 0);
+  auto c = Hold();  // room again
+  ASSERT_TRUE(WaitHeld(1));
+  core_->Release();
+  EXPECT_TRUE(c.get().ok());
+}
+
+TEST_F(AdmissionTest, ABatchCountsEveryEntry) {
+  // 3 entries can never fit a limit of 2: invalid, not an overload to retry (code review, Week 5)
+  EXPECT_EQ(Call(3).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  std::thread release([this] {
+    WaitHeld(2);
+    core_->Release();
+  });
+  EXPECT_TRUE(Call(2).ok());
+  release.join();
+  EXPECT_EQ(service_.InFlight(), 0);  // the batch left all at once
+}
+
+TEST_F(AdmissionTest, ABatchThatDoesNotFitWhatIsLeftIsRefusedAtOnce) {
+  auto a = Hold();
+  ASSERT_TRUE(WaitHeld(1));
+  EXPECT_EQ(Call(2).error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);  // 1 + 2 > 2: retry later
+  EXPECT_EQ(core_->Held(), 1u);  // no entry of the batch reached the engine
+  EXPECT_EQ(service_.InFlight(), 1);
+  core_->Release();
+  EXPECT_TRUE(a.get().ok());
 }
 
 }  // namespace

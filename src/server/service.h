@@ -8,8 +8,11 @@
 #include <cstddef>
 #include <memory>
 #include <utility>
+#include <vector>
 
+#include "metrics/check_metrics.h"
 #include "rate_limiter.grpc.pb.h"
+#include "ratelimiter/clock.h"
 #include "ratelimiter/core.h"
 #include "server/convert.h"
 
@@ -18,26 +21,60 @@ namespace ratelimiter {
 // Shared state for one CheckBatch call: the RPC finishes when the last sub-check completes,
 // which may happen on different threads once Redis refills are involved.
 struct BatchState {
-  BatchState(grpc::ServerUnaryReactor* r, std::size_t n) : reactor(r), pending(n) {}
+  BatchState(grpc::ServerUnaryReactor* r, std::size_t n, std::atomic<std::int64_t>& in_flight)
+      : reactor(r), size(static_cast<std::int64_t>(n)), pending(n), in_flight(in_flight) {}
   grpc::ServerUnaryReactor* reactor;
+  const std::int64_t size;
   std::atomic<std::size_t> pending;
   std::atomic<bool> unknown_rule{false};  // published to the last sub-check by `pending`
+  std::atomic<std::int64_t>& in_flight;   // the service's: the batch leaves it all at once
 };
 
 inline grpc::Status UnknownRule() { return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"); }
+inline grpc::Status Overloaded() { return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "limiter overloaded"); }
 
+// Backpressure (Week 5): at most `max_in_flight` checks wait for an answer at once (a batch counts
+// each entry); beyond that a call is refused at once with RESOURCE_EXHAUSTED. Every queue behind
+// the service (lease and plan waiters, the batcher, retries) holds admitted checks only, so this one
+// bound keeps a Redis stall from growing memory without limit.
 class RateLimiterService final : public v1::RateLimiter::CallbackService {
  public:
-  explicit RateLimiterService(std::shared_ptr<RateLimiterCore> core) : core_(std::move(core)) {}
+  // `metrics`, if set, must outlive the service; nullptr records nothing (no clock reads).
+  explicit RateLimiterService(std::shared_ptr<RateLimiterCore> core, std::int64_t max_in_flight = 10'000,
+                              CheckMetrics* metrics = nullptr)
+      : core_(core.get()), max_in_flight_(max_in_flight), metrics_(metrics) {
+    cores_.push_back(std::move(core));
+  }
+
+  // Rule reload (src/config/README.md): checks from now on go to `core`, while a check already in
+  // the previous core finishes there. Every core is kept until the service is destroyed, so a check
+  // that read the old pointer never meets a freed one. Call it from one thread at a time.
+  // shortcut: a replaced core's memory stays until exit (main.cc: about 8 MB of lease table each);
+  // free it once no check can be inside it if reloads become frequent.
+  void SetCore(std::shared_ptr<RateLimiterCore> core) {
+    core_.store(core.get(), std::memory_order_release);
+    cores_.push_back(std::move(core));
+  }
+
+  std::int64_t InFlight() const { return in_flight_.load(std::memory_order_relaxed); }
 
   grpc::ServerUnaryReactor* Check(grpc::CallbackServerContext* ctx, const v1::CheckRequest* req,
                                   v1::CheckResponse* resp) override {
     auto* reactor = ctx->DefaultReactor();
     if (const char* bad = Invalid(*req)) {
+      Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
       reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
       return reactor;
     }
-    core_->Check(ToDomain(*req), [reactor, resp](const CheckResult& r) {
+    if (!Admit(1)) {
+      Count(metrics_ ? &metrics_->rejected_overload : nullptr);
+      reactor->Finish(Overloaded());
+      return reactor;
+    }
+    const Started started = Start(req->rule());
+    core_.load(std::memory_order_acquire)->Check(ToDomain(*req), [this, reactor, resp, started](const CheckResult& r) {
+      in_flight_.fetch_sub(1, std::memory_order_relaxed);
+      Record(started, r);
       if (r.reason == Reason::kUnknownRule) {
         reactor->Finish(UnknownRule());
         return;
@@ -67,19 +104,33 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
         return reactor;
       }
     }
+    if (n > max_in_flight_) {  // could never be admitted: not a transient overload to retry
+      Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
+      reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch larger than the server's in-flight limit"));
+      return reactor;
+    }
+    if (!Admit(n)) {
+      Count(metrics_ ? &metrics_->rejected_overload : nullptr);
+      reactor->Finish(Overloaded());
+      return reactor;
+    }
     resp->mutable_responses()->Reserve(n);
     for (int i = 0; i < n; ++i) resp->add_responses();
 
-    auto state = std::make_shared<BatchState>(reactor, static_cast<std::size_t>(n));
+    auto state = std::make_shared<BatchState>(reactor, static_cast<std::size_t>(n), in_flight_);
+    RateLimiterCore* const core = core_.load(std::memory_order_acquire);  // one core for the whole batch
     for (int i = 0; i < n; ++i) {
       v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
-      core_->Check(ToDomain(req->requests(i)), [state, slot](const CheckResult& r) {
+      const Started started = Start(req->requests(i).rule());
+      core->Check(ToDomain(req->requests(i)), [this, state, slot, started](const CheckResult& r) {
+        Record(started, r);
         if (r.reason == Reason::kUnknownRule) {
           state->unknown_rule.store(true, std::memory_order_relaxed);
         } else {
           Fill(r, slot);
         }
         if (state->pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+          state->in_flight.fetch_sub(state->size, std::memory_order_relaxed);
           state->reactor->Finish(state->unknown_rule.load(std::memory_order_relaxed) ? UnknownRule()
                                                                                      : grpc::Status::OK);
         }
@@ -89,7 +140,38 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   }
 
  private:
-  std::shared_ptr<RateLimiterCore> core_;
+  struct Started {
+    CheckMetrics::PerRule* rule = nullptr;  // nullptr: metrics off, or a rule not in the config
+    std::int64_t ns = 0;
+  };
+  Started Start(std::string_view rule) {
+    if (metrics_ == nullptr) return {};
+    return {metrics_->Of(rule), SteadyNowNs()};
+  }
+  void Record(const Started& s, const CheckResult& r) {
+    if (metrics_ == nullptr) return;
+    if (r.reason == Reason::kUnknownRule || s.rule == nullptr) {
+      metrics_->rejected_invalid.Add();
+      return;
+    }
+    s.rule->by_reason[static_cast<std::size_t>(r.reason)].Add();
+    s.rule->latency.Observe(SteadyNowNs() - s.ns);
+  }
+  static void Count(Counter* c) {
+    if (c != nullptr) c->Add();
+  }
+
+  bool Admit(std::int64_t n) {
+    if (in_flight_.fetch_add(n, std::memory_order_relaxed) + n <= max_in_flight_) return true;
+    in_flight_.fetch_sub(n, std::memory_order_relaxed);
+    return false;
+  }
+
+  std::atomic<RateLimiterCore*> core_;
+  std::vector<std::shared_ptr<RateLimiterCore>> cores_;  // every core set, current last
+  const std::int64_t max_in_flight_;
+  CheckMetrics* const metrics_;
+  std::atomic<std::int64_t> in_flight_{0};
 };
 
 }  // namespace ratelimiter

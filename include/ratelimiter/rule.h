@@ -34,6 +34,7 @@ struct Rule {
   Overage overage{Overage::kHard};   // quota rules: filled from the plan like the limit
   std::uint32_t overage_extra{0};    // grace amount (kGrace) or overage cap (kCap)
   bool quota_auto{false};            // quota_mode: auto: plans of kLeasedQuotaFrom a day or more are leased
+  std::uint32_t lease_chunk_pct{10};  // leased token buckets: chunk cap C in % of the limit (bound limit + N x C)
   // A customer rule (Week 4) has no algorithm of its own: it names a token-bucket rule checked
   // first and a quota rule checked second (CompositeCore). Both empty for every other rule.
   std::string burst_rule{};

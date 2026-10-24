@@ -8,17 +8,18 @@ rules:
     strict: true          # exact: one Redis call per check (quota rules must be strict)
     quota_mode: auto      # with the leased engine, plans of 100,000+ a day lease 0.1% chunks through
                           # the customer rule (up to N x 0.1% over a day); strict | auto
-    failure_policy: fail_closed
+    failure_policy: fail_closed   # through `customer`, the plan's `failure` field decides instead
 
   burst:                  # a customer's burst limit: plan.burst tokens, refilled plan.refill per second
     algorithm: token_bucket
     limit_from: plan.burst
     strict: true          # per-customer leases arrive with the plan cache (Week 4)
-    failure_policy: fail_closed
+    failure_policy: fail_closed   # through `customer`, the plan's `failure` field decides instead
 
   customer:               # one API call of a customer (Week 4): suspended? deny cache? burst, then the
     burst: burst          # daily quota under the plan's overage policy (hard, grace or cap); the burst
     quota: daily_quota    # token goes back when the quota denies. Gateways send this one rule.
+                          # Redis down: the plan fails open (paid, UNVERIFIED) or closed (Free).
 
   api_default:
     algorithm: token_bucket

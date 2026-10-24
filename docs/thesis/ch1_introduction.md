@@ -91,7 +91,7 @@ a single round trip to a single node while the cluster as a whole scales out.
 
 The **burst limit** is served from local leases. Each limiter instance takes a chunk of a
 customer's token bucket from Redis and hands it out with lock-free atomic operations in its own
-memory; only when the chunk runs low does it ask Redis for another, in a batched, pipelined refill.
+memory; only when the chunk runs low does it ask Redis for another, in a pipelined refill.
 A burst check that finds tokens costs one compare-and-swap and no network round trip. The price is
 that tokens held by one instance are invisible to the others: with N instances and chunk size C, at
 most N × C tokens can be outside Redis, which bounds the over-admission per refill interval. The
@@ -100,8 +100,9 @@ idea of handing out capacity as leases goes back to Gray and Cheriton's leases f
 server-side token bucket and measures the resulting bound.
 
 A server-side composite check combines the two for one API call: suspended accounts and customers
-already known to be over quota are refused locally, the burst lease is checked next, and only calls
-that pass the burst check reach the strict quota script.
+already known to be over quota are refused locally, the burst limit is checked next, and only calls
+that pass the burst check reach the strict quota script. In the version built, a customer's burst
+limit is still one script per check; leasing it per customer is future work (Section 3.2).
 
 ## 1.5 Contributions
 
@@ -109,18 +110,20 @@ that pass the burst check reach the strict quota script.
    by the UTC day taken from the Redis clock, storing `used` rather than `remaining` so that plan
    changes rewrite nothing, with request-id deduplication and three overage policies (hard, grace,
    capped billable overage). A Free customer is stopped at exactly 200 of 400 concurrent calls through
-   gRPC on a three-master cluster (measured in Week 2). Retry and overage behaviour: **[Pending:
-   Week 4]**.
+   gRPC on a three-master cluster (measured in Week 2). A retried call is counted once, and request
+   2,001 of a plan of 2,000 a day gets three different answers under the three overage policies,
+   tested through gRPC (Week 4).
 2. **A lease-based fast path with a derived and measured accuracy bound.** Cache-line-aligned leases
    in a lock-free table with single-flight refills, chunk sizes capped at a fraction of the limit,
-   and pipelined Redis refills. The bound N × C is derived in Chapter 3; its measurement against
-   chunk size is **[Pending: Week 6]**.
+   and pipelined Redis refills. The bound N × C is derived in Chapter 3 and measured there: on four
+   instances at chunk caps of 1%, 5% and 10% the worst case stays below it, as a model of the
+   protocol predicts to within 0.3 tokens (Week 6).
 3. **An evaluation that tests each half of the claim separately.** Exactness tests (concurrency,
    day rollover, plan changes, overage), then performance and robustness tests (strict against
    leased mode, scaling across instances, floods, key cardinality, Redis failures), with
    reproducible scripts and raw results. A first strict baseline exists (Week 2: a median of 25,301
    checks per second for one instance on one laptop at high concurrency, 10,024 at p99 10.5 ms);
-   the full matrix is **[Pending: Weeks 6 to 8]**.
+   the full matrix of Week 7 is in Chapter 5 (5.6).
 
 ## 1.6 Structure of the thesis
 
