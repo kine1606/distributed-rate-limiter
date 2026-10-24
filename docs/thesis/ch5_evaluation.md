@@ -319,10 +319,75 @@ detection, running in gRPC's own threads. Switching it off gave:
 
 ## 5.11 Extrapolation to 1,000,000 checks per second
 
-Section 3.8 derives the estimate. It needs 12 to 50 instances for leased rules, depending on the
-latency target, and 9 to 17 Redis masters for customer checks, from per-instance and per-master
-measurements. The final figures, with the matrix's scaling data, are **[Pending: Week 8]**. They are
-estimates, and labelled as such.
+This section applies the model of Section 3.8 to the final measurements (`tools/extrapolate.py`, which
+names the source of every input). Its outputs are **estimates, not measurements**: no cluster of that
+size was run.
+
+*Table 5.z: Redis masters at 1,000,000 checks per second, for traffic of one kind of check only; a
+real mix lies between the rows. A master is taken to absorb 120,000 script calls a second.*
+
+| All checks are | Redis calls per check | Calls/s | Masters at 120,000 |
+| --- | --- | --- | --- |
+| a leased rule, hot keys (10k active) | 0.017 | 17,000 | 1 |
+| a leased rule, 1M keys (Zipf) | 0.217 | 217,000 | 2 |
+| customer checks, enterprise plans (quota leased) | 1.017 | 1,017,000 | 9 |
+| customer checks, Free and Pay, plans cached | 2 | 2,000,000 | 17 |
+| customer checks, Free and Pay, worst case for the plan cache | 2.89 | 2,890,000 | 25 |
+
+*Table 5.w: Limiter instances at 1,000,000 checks per second.*
+
+| Operating point | Checks/s per instance | Instances |
+| --- | --- | --- |
+| leased rule, saturated (p99 about 7 ms) | 67,459 | 15 |
+| leased rule, p99 below 2 ms (goal G6) | 20,000 | 50 |
+| leased rule, CheckBatch of 10 | 400,187 | 3 |
+| customer check, saturated (p99 about 13 ms) | 31,519 | 32 |
+| customer check, at a rate answered in full (p99 7.8 ms) | 20,000 | 50 |
+
+
+**Reading.**
+- **Leased rules are cheap in Redis and bound by gRPC.**
+  - *Redis:* one or two masters, even when a million keys are active.
+  - *Instances:* 15 near saturation, or 50 to keep p99 under 2 ms. That is gRPC's cost per call,
+    since the limiter's own code is 4 to 6% of the CPU (5.10).
+  - *Batching:* with batches of 10, three instances would do.
+- **The customer check is bound by Redis:**
+  - two scripts per check, so 17 masters;
+  - 25 if the plan cache is cold for every check. That worst case was measured at a million customers
+    spread uniformly over one instance; with N instances the plan reads grow with N (3.8.2).
+- **Leasing the burst limit per customer, the future work of 3.2.1,** would bring customer checks
+  far below their limit towards the leased row.
+
+**Cost.** Prices are AWS on-demand list prices, retrieved 2026-10-24 from instances.vantage.sh:
+- c7i.2xlarge (8 vCPU), $0.357 an hour, for one limiter instance. The laptop gave each instance 6
+  logical CPUs.
+- cache.r7g.large (2 vCPU, 13 GiB), $0.219 an hour, for each Redis master and its one replica.
+
+That an 8-vCPU cloud instance does what the laptop instance did, and a Graviton core what a laptop
+core did, are further assumptions.
+
+*Table 5.v: Monthly cost at 1,000,000 checks per second (estimate).*
+
+| Deployment | Instances | Masters (+ replicas) | Per month | Per billion checks |
+| --- | --- | --- | --- | --- |
+| leased rule, p99 below 2 ms | 50 | 2 (+2) | $13,670 | $5.20 |
+| leased rule, CheckBatch of 10 | 3 | 2 (+2) | $1,421 | $0.54 |
+| customer checks, Free and Pay, answered in full | 50 | 17 (+17) | $18,466 | $7.03 |
+
+
+**Reading the cost table.**
+- **Most of the cost is limiter instances, that is, gRPC calls.** Batching ten checks per call cuts
+  the leased deployment's cost by about ten times.
+- **Memory fits.** If every call carries a request id, about 3 GB of stored answers falls on each of
+  17 masters (3.8.2), which fits in 13 GiB.
+
+**Assumptions** (3.8.4), with what Week 7 added:
+- *A server instance does at least what a laptop instance does.* In the matrix runs the load generator
+  used 1.7 to 5.4 cores of the same laptop (5.6).
+- *Instances scale linearly.* Not testable on one laptop. The matrix shows no engine degrading with up
+  to four instances, and the USL fit of a single instance (below) shows where one instance saturates.
+- *A master absorbs 120,000 script calls a second.* Redis Functions ran the same script at the same
+  rate as `EVALSHA` (5.10), so the choice of command does not change it.
 
 ## 5.12 Discussion and threats to validity
 

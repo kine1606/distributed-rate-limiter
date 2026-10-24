@@ -5,17 +5,26 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: Weeks 1 to 4 done (Week 3 gate partly met, Week 4 gate met): overage policies, request
-IDs, deny cache, `CompositeCore`, plan cache with Pub/Sub, usage events, `tools/rlctl` and leased
-quota for large plans; lock-free on the common customer path. Week 5: timeouts, circuit breaker,
-failure policy per plan, backpressure, graceful shutdown, metrics and open-loop load done; gate met
-(a master killed under load costs only its slots, 4 to 5 s).** The limiter runs on a
-3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3) and enforces per-customer
-daily quotas from plan hashes in Redis: a Free customer is stopped at exactly 200 through gRPC
-(`tests/grpc_quota_it.cc`). The default engine serves non-strict rules from a lock-free local lease
-refilled through pipelined Lua calls; strict and plan rules ask Redis per check. Measured on one
-laptop: strict quota checks 25k checks/s median at c=1,024 (10k at p99 10 ms), leased ~31k bound by
-the load generator (raw data and setup in `results/`, git-ignored). **Start with
+**Status: Weeks 1 to 7 done (2026-10-24).** Business rules (plans, daily quotas with request ids and
+three overage policies, burst limits, a deny cache, a plan cache kept fresh over Pub/Sub, usage
+events, `tools/rlctl`), leases with a proved bound, failure handling per plan, metrics, SIGHUP
+reload, the evaluation, and Chapters 1 to 5 of the thesis in draft (`docs/thesis/`). The limiter runs
+on a 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3).
+
+Measured on one laptop, where client, limiter and Redis share 12 hardware threads (evidence in
+`docs/thesis/evidence/`, raw data in `results/`, git-ignored):
+
+- **Quota exact:** 20 of 20 runs on four instances, duplicates counted once.
+- **Leased rule, one instance:** 67,459 checks/s with single checks over Zipf keys, 95,913 on one hot
+  key (within noise of gRPC with no limiter), 400,187 with `CheckBatch` of 10. p99 is 0.58 ms at 10,000 checks/s and
+  1.45 ms at 20,000, open loop.
+- **Burst over-admission:** at most N × C, measured within 0.3 tokens of a model.
+- **Faults:** a slow, silent or killed master costs only its own customers, who get their plan's policy;
+  no call failed.
+- **Tests:** 240, passing in release, ASan and TSan; 97.3% line coverage.
+
+1,000,000 checks/s is an estimate, not a measurement (`tools/extrapolate.py`): 15 to 50 instances,
+depending on the latency target, and 17 Redis masters for customer checks. **Start with
 [docs/ROADMAP.md](docs/ROADMAP.md)**: it is the week-by-week checklist, and every module folder has a
 `README.md` with a skeleton, build order and hints.
 

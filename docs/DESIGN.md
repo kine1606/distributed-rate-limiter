@@ -321,9 +321,11 @@ the harness found both:
 2. A check costing more than C made a lease hold more than C. Seed 4388 (N = 2, C = 1, costs up to
    5) admitted 2.7 against a bound of 2. Fixed by sending such checks to Redis.
 
-The price of the top-up is refills of 0.7 to 1.0 × C instead of exactly C, so somewhat more of
-them; Week 7 measures it. The measured over-admission across instances against chunk size, on the
-real cluster, is the Week 6 accuracy test.
+The price of the top-up is refills of 0.7 to 1.0 × C instead of exactly C, so at most 43% more of
+them. Measured under load (2026-10-24): the mean top-up was 0.87 of the chunk over 10,000 Zipf keys
+(14% more refills) and 0.994 over 1,000,000 (0.6%), counted by `rl_lease_topup_tokens_total`. On the
+real cluster, four instances over-admitted at most 34.7, 189.0 and 381.4 tokens at caps of 1%, 5% and
+10%, against N × C = 40, 200 and 400 (`docs/thesis/evidence/burst_bound_2026-10-22.md`).
 
 **Tuning rule.** Over-admission per window is at most N × C, so choose the cap from the
 over-admission you can accept: with 4 instances and a 10% cap, a burst limit of 1,000 may admit up
@@ -332,7 +334,8 @@ to 400 extra in a window.
 ## 7. Strict versus leased (Week 3, numbers in Week 7)
 
 Week 3 numbers, one instance on the laptop, C++ load generator at 192 calls in flight (medians of
-5, `results/2026-10-18_week3_gate/NOTES.md`); Week 7 repeats this as a full matrix.
+5, `results/2026-10-18_week3_gate/NOTES.md`). The Week 7 matrix, on the final build with servers and load
+generators on separate cores, follows the table.
 
 | Mode | Redis calls per check | Throughput (1 instance) | p50 | p99 | Accuracy |
 | --- | --- | --- | --- | --- | --- |
@@ -344,6 +347,16 @@ Week 3 numbers, one instance on the laptop, C++ load generator at 192 calls in f
 At equal load the lease is 6.3 times the strict throughput and costs under 1% over gRPC alone; the
 laptop's gRPC ceiling, not the lease, sets the leased number. At 10,000 checks/s offered (ghz) the
 leased p50 is 0.40 ms and p99 2.20 ms, against 1.89 ms for gRPC alone.
+
+Week 7 matrix, one instance, checks/s, median of 5 (`docs/thesis/evidence/matrix_2026-10-24.md`):
+
+| Keys | Strict | Leased, cap 10% | Leased / strict |
+| --- | --- | --- | --- |
+| uniform over 1,000,000 | 42,065 | 33,885 (cap 1%: 42,073) | about 1: each key is seen less than once per run |
+| Zipf 0.99 over 1,000,000 | 40,571 | 67,459 | 1.7 |
+| one hot key | 18,386 | 95,913 | 5.2 |
+
+Leases pay where keys repeat. With `CheckBatch` of 10, one instance reached 400,187 checks/s.
 
 When to choose strict: when one chunk would be a large share of the limit (login attempts, a Free
 daily quota of 200, where C would be 20), or when exactness is a product promise.
@@ -368,6 +381,17 @@ daily quota of 200, where C would be 20), or when exactness is a product promise
 | Bad rules file on reload (SIGHUP) | `LoadRules` fails | logged; the old rules stay live, no call is affected | fix the file, send SIGHUP again |
 
 ## 9. Capacity math for 1M checks/s (Week 2 estimate, Week 8 final)
+
+**Final estimate** (Week 8, `tools/extrapolate.py`, Chapter 5 section 5.11), from the final build's
+measurements on one laptop. These are **estimates, not measurements**:
+
+| All checks are | Instances | Redis masters |
+| --- | --- | --- |
+| a leased rule | 15 saturated (p99 about 7 ms); 50 for p99 below 2 ms; 3 with `CheckBatch` of 10 | 1 (hot keys) to 2 (1M keys) |
+| customer checks, Free and Pay | 32 saturated (p99 about 13 ms); 50 answered in full (p99 7.8 ms) | 17 with the plan cache warm; 25 if every check also reads its plan |
+| customer checks, enterprise (quota leased) | as above | 9 |
+
+The Week 2 estimate below is kept for the record.
 
 Week 2 estimate. Every input is a laptop measurement with the load generator on the same machine;
 the outputs are **estimates, not measurements**.
@@ -397,7 +421,8 @@ Estimate for 1,000,000 checks/s:
   strict path until Week 3 and 4 measure the composite.
 
 Assumptions, each to be checked: per-instance throughput on server hardware equals the laptop's;
-throughput scales linearly with instances (measured from 1 to 4 instances in Week 7); keys spread
+throughput scales linearly with instances (one laptop cannot show it: in the Week 7 matrix 1 to 4
+instances share the same CPUs and add no capacity, though no engine degrades); keys spread
 evenly over slots (a single hot customer stays on one master: the lease protects it); the Docker
 network's sub-millisecond RTT. A real network adds latency, which leases hide and strict checks do
 not.
@@ -416,8 +441,47 @@ not.
 | Instances | | CPU of instances is saturated | |
 | Redis masters | 3 | a master's CPU is saturated | |
 
+Measured by the Week 7 ablation (`docs/thesis/evidence/ablation_2026-10-24.md`), what each mechanism is
+worth on one instance: switching off the lease costs 29.7% of the throughput, the deny cache 64.6% (for
+customers out of quota), and the plan cache 19.1%. Early refill, the adaptive chunk, cache-line
+alignment and the batcher change throughput within noise. They are kept for latency, accuracy and
+contention that one instance's throughput does not show, and the batcher stays off. Allocator and build
+settings (jemalloc, LTO, a larger glibc thread cache) were measured within noise and are not used
+(`docs/thesis/evidence/profile_2026-10-24.md`).
+
 ## 11. Limitations and future work (Week 8)
 
-> HINT: Write each limitation the day you meet it. Expected ones: laptop-only measurement, Docker
-> network latency far below real networks, burst checks not deduplicated, counters can be lost on a
-> failover before replication (usage events are the durable record), single region only.
+**Limits of the evidence.**
+- **One laptop.** The load generator, the limiter and Redis share 12 hardware threads. Throughput is
+  a lower bound, the noise is often ±10%, and scaling across instances is estimated, not measured.
+  One run on separate machines would test the estimate of section 9.
+- **Loopback networking through Docker.** Round trips are far below a real network's, which would
+  add its latency to every Redis call. Leases hide it from most checks; the exact path and the
+  customer check do not.
+- **Uniform and Zipf keys are models of traffic,** not traces of it.
+
+**Limits of the design.**
+- **One region.** Nothing coordinates limiters across regions.
+- **A failover can loosen a limit.** Redis Cluster replicates asynchronously: a counter increment
+  acknowledged by a master that fails before its replica has it is lost, and the promoted replica
+  counts low. The usage events are the durable record for billing. The loss was not measured.
+- **Paid plans fail open.** While Redis cannot answer a paid plan's call, the call is allowed as
+  `UNVERIFIED` and not counted. One benchmark run saw such answers during an unexplained stall
+  (`docs/thesis/evidence/matrix_2026-10-24.md`).
+- **Burst checks are not deduplicated.** A retry takes another burst token; only the quota uses
+  request ids.
+- **An over-burst flood within quota costs a Redis call per attempt,** and slows other tenants on the
+  same master (section 8).
+  - *Future work:* deny locally until Redis's retry time, as the deny cache does for quotas, or lease
+    the burst limit per customer.
+- **Plan reads grow with instances × customers,** because every instance has its own plan cache.
+  - *Future work:* a gateway that sends each customer to one instance (consistent hashing) would cut
+    the reads, and would also tighten that customer's lease bound from N × C to C.
+- **Leases are never evicted.** One instance held 224 MB for about 650,000 leases. A long-running
+  instance over many keys needs eviction of idle leases.
+- **Not measured on its own:** the quota script's cost on a master. The master capacity of section 9
+  comes from the token-bucket script.
+
+**What the profile leaves.** On one instance the limiter's own code is 4 to 6% of the CPU, and gRPC is
+40 to 53%. More single-check throughput needs fewer calls per check (`CheckBatch`) or a lighter
+transport, not a faster engine.
