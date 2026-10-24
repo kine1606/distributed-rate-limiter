@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -85,7 +86,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
-//        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below)
+//        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below), RL_ABLATE (ablation only)
 //   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
   // gRPC's mutexes are abseil's, and Ubuntu's abseil checks every lock for deadlock cycles: 2.7% of
@@ -134,6 +135,26 @@ int main(int argc, char** argv) {
   // client on one connection with 192 calls in flight on the exact path, 28,251 to 22,957 checks/s.
   const auto max_streams = EnvNumber("RL_MAX_STREAMS", 100, 0, 1'000'000);
   if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight || !max_streams) return 1;
+  // RL_ABLATE=<a,b>: mechanisms switched off for the Week 7 ablation study (bench/ablation.sh), never in
+  // production: early_refill, adaptive_chunk, deny_cache.
+  LeaseTuning tuning;
+  bool deny_cache = true;
+  if (const char* ablate = std::getenv("RL_ABLATE")) {
+    std::stringstream names(ablate);
+    for (std::string name; std::getline(names, name, ',');) {
+      if (name == "early_refill") {
+        tuning.early_refill = false;
+      } else if (name == "adaptive_chunk") {
+        tuning.adaptive_chunk = false;
+      } else if (name == "deny_cache") {
+        deny_cache = false;
+      } else {
+        spdlog::critical("RL_ABLATE: unknown mechanism '{}' (early_refill, adaptive_chunk, deny_cache)", name);
+        return 1;
+      }
+    }
+    spdlog::warn("ablation: switched off {}", ablate);
+  }
   const std::chrono::milliseconds timeout(*timeout_ms);
   try {
     const auto [host, port] = ParseHostPort(redis_addr);
@@ -220,7 +241,7 @@ int main(int argc, char** argv) {
 
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
   PlanStore plans(*backend, std::chrono::milliseconds(*plan_ttl_ms));
-  DenyCache deny;
+  DenyCache deny(deny_cache);
   // An announced plan change drops the cached plan and the local denial at once (step B5); the TTL
   // covers a message missed while the subscription was down.
   std::unique_ptr<PlanListener> listener;
@@ -253,7 +274,8 @@ int main(int argc, char** argv) {
     e->customer_strict = std::make_unique<StrictCore>(*backend, plans, table);
     std::shared_ptr<RateLimiterCore> inner;
     if (engine == "leased") {
-      auto l = std::make_shared<LeasedCore>(*backend, plans, table, std::size_t{1} << 20, &SteadyNowNs, chunk_log);
+      auto l = std::make_shared<LeasedCore>(*backend, plans, table, std::size_t{1} << 20, &SteadyNowNs, chunk_log,
+                                            tuning);
       e->leased = l.get();
       inner = std::move(l);
     } else {

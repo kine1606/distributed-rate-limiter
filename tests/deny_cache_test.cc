@@ -21,6 +21,13 @@ TEST(DenyCache, DeniesUntilTheResetRedisReturned) {
   EXPECT_EQ(c.DeniedFor("cust:2", 7, 0), 0u);  // never denied
 }
 
+TEST(DenyCache, ADisabledCacheNeverDenies) {  // the Week 7 ablation switch
+  DenyCache c(false);
+  c.Deny("cust:1", 7, 0, 60'000);
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, 1), 0u);
+  EXPECT_EQ(c.Size(), 0u);
+}
+
 TEST(DenyCache, AnotherPlanIgnoresAndDropsTheDenial) {  // step B5: an upgrade applies at once
   DenyCache c;
   c.Deny("cust:1", 7, 0, 60'000);

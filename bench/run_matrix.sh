@@ -74,6 +74,7 @@ el = t1 - t0
 line = {"engine": engine, "instances": int(n), "dist": dist, "run": int(run),
         "checks_per_s": round(sum(d["checks_per_s"] for d in ds)),
         "allowed_per_s": round(sum(d["allowed"] / d["seconds"] for d in ds)),
+        "unverified": sum(d.get("unverified", 0) for d in ds),
         "errors": sum(d["errors"] for d in ds), "p50_ms": max(d["p50_ms"] for d in ds),
         "p99_ms": max(d["p99_ms"] for d in ds), "server_cpu_pct": round((s1 - s0) / hz / el * 100),
         "loadgen_cpu_pct": round((g1 - g0) / hz / el * 100)}

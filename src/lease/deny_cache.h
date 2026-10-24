@@ -28,9 +28,12 @@ namespace ratelimiter {
 // make entries readable without the lock if the flood test (Week 6) shows it.
 class DenyCache {
  public:
+  explicit DenyCache(bool enabled = true) : enabled_(enabled) {}  // false: the Week 7 ablation only
+
   // Records that `customer` is out of quota for `reset_after_ms` after `now_ns` (any monotonic
   // clock, the same one passed to DeniedFor).
   void Deny(std::string_view customer, std::uint64_t plan_stamp, std::int64_t now_ns, std::uint32_t reset_after_ms) {
+    if (!enabled_) return;
     Shard& s = ShardOf(customer);
     std::lock_guard lock(s.mu);
     s.map.insert_or_assign(std::string(customer), Entry{now_ns + std::int64_t{reset_after_ms} * 1'000'000, plan_stamp});
@@ -41,6 +44,7 @@ class DenyCache {
   // ms until the customer's quota resets, or 0 if no denial applies: none recorded, expired, or
   // recorded under another plan (then it is dropped).
   std::uint32_t DeniedFor(std::string_view customer, std::uint64_t plan_stamp, std::int64_t now_ns) {
+    if (!enabled_) return 0;
     Shard& s = ShardOf(customer);
     // A Deny racing this load can be missed once; that check then asks Redis, which denies too.
     if (s.size.load(std::memory_order_relaxed) == 0) return 0;
@@ -97,6 +101,7 @@ class DenyCache {
     s.sweep_at = std::max(kMinSweep, 2 * s.map.size());
   }
 
+  const bool enabled_;
   std::array<Shard, kShards> shards_;
   Counter hits_;
 };

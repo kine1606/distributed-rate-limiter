@@ -77,7 +77,7 @@ struct Slot {
   ratelimiter::v1::CheckBatchResponse bresp;
   Clock::time_point start;
   std::vector<std::uint64_t> hist = std::vector<std::uint64_t>(kBuckets);
-  std::uint64_t ok = 0, checks = 0, allowed = 0, errors = 0;
+  std::uint64_t ok = 0, checks = 0, allowed = 0, unverified = 0, errors = 0;  // unverified: allowed by fail-open
   std::function<void()> on_finished;
 
   std::string prefix = "cust:";
@@ -125,11 +125,15 @@ struct Slot {
       } else if (s.ok() && batch > 1) {
         ++ok;
         checks += static_cast<std::uint64_t>(bresp.responses_size());
-        for (const auto& r : bresp.responses()) allowed += r.allowed();
+        for (const auto& r : bresp.responses()) {
+          allowed += r.allowed();
+          unverified += r.reason() == ratelimiter::v1::REASON_UNVERIFIED;
+        }
       } else if (s.ok()) {
         ++ok;
         ++checks;
         allowed += resp.allowed();
+        unverified += resp.reason() == ratelimiter::v1::REASON_UNVERIFIED;
       } else {
         ++errors;
       }
@@ -363,22 +367,23 @@ int main(int argc, char** argv) {
   }
 
   std::vector<std::uint64_t> hist(kBuckets);
-  std::uint64_t ok = 0, checks = 0, allowed = 0, errors = 0;
+  std::uint64_t ok = 0, checks = 0, allowed = 0, unverified = 0, errors = 0;
   for (const auto& s : slots) {
     for (int b = 0; b < kBuckets; ++b) hist[b] += s->hist[b];
     ok += s->ok;
     checks += s->checks;
     allowed += s->allowed;
+    unverified += s->unverified;
     errors += s->errors;
   }
   std::printf(
       "{\"generator\":\"loadgen\",\"target\":\"%s\",\"rule\":\"%s\",\"channels\":%d,\"in_flight\":%d,"
       "\"keys\":%d,\"warmup_s\":%d,\"batch\":%d,\"seconds\":%.1f,"
-      "\"calls_per_s\":%.0f,\"checks_per_s\":%.0f,\"ok\":%llu,\"allowed\":%llu,\"errors\":%llu,"
-      "\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f}\n",
+      "\"calls_per_s\":%.0f,\"checks_per_s\":%.0f,\"ok\":%llu,\"allowed\":%llu,\"unverified\":%llu,"
+      "\"errors\":%llu,\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f}\n",
       target.c_str(), rule.c_str(), channels, channels * in_flight, keys, warmup, batch, elapsed,
       static_cast<double>(ok) / elapsed, static_cast<double>(checks) / elapsed, static_cast<unsigned long long>(ok),
-      static_cast<unsigned long long>(allowed),
+      static_cast<unsigned long long>(allowed), static_cast<unsigned long long>(unverified),
       static_cast<unsigned long long>(errors), Percentile(hist, 0.50), Percentile(hist, 0.99),
       Percentile(hist, 0.999));
   return 0;

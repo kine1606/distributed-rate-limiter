@@ -21,9 +21,13 @@ struct Waiter {
   CheckCallback done;
 };
 
+#ifndef RL_LEASE_ALIGN
+#define RL_LEASE_ALIGN 64  // the Week 7 ablation builds with 8 (bench/ablation.sh)
+#endif
+
 // One (rule, key)'s local tokens: units this instance already took from Redis and may hand out
 // without asking again. alignas(64): hot leases used from different cores never share a cache line.
-struct alignas(64) Lease {
+struct alignas(RL_LEASE_ALIGN) Lease {
   Lease(const Rule& r, std::string_view k, std::uint64_t key_id = 0) : chunk(ChunkCap(r)), id(key_id), rule(r), key(k) {}
 
   // Touched by every check of this key: atomics only.

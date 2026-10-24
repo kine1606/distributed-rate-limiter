@@ -18,6 +18,12 @@ namespace ratelimiter {
 // Called after a lease's chunk size changed, from the refill path (never on a hit).
 using ChunkObserver = std::function<void(const Lease& lease, std::uint32_t from, std::uint32_t to)>;
 
+// Mechanisms the Week 7 ablation switches off one at a time (bench/ablation.sh); both on in production.
+struct LeaseTuning {
+  bool early_refill = true;    // refill at 30% of the chunk, before the lease runs dry
+  bool adaptive_chunk = true;  // the chunk follows demand; off: always the cap
+};
+
 // The main engine. Non-strict rules are served from a local lease: a check that finds tokens is one
 // CAS (no Redis, no lock, no allocation). Redis is asked only to refill a lease, one chunk at a time
 // and never twice at once for the same key. Strict rules, plan rules, unknown rules, and keys the
@@ -31,7 +37,7 @@ class LeasedCore final : public RateLimiterCore {
   // refill callbacks touch the leases.
   LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules,
              std::size_t lease_capacity = std::size_t{1} << 20, Clock clock = &SteadyNowNs,
-             ChunkObserver on_chunk_change = {});
+             ChunkObserver on_chunk_change = {}, LeaseTuning tuning = {});
 
   void Check(const CheckRequest& request, CheckCallback done) override;
 
@@ -73,6 +79,7 @@ class LeasedCore final : public RateLimiterCore {
   std::atomic<std::uint64_t> parked_{0}, refills_{0};
   const Clock now_;
   const ChunkObserver on_chunk_change_;
+  const LeaseTuning tuning_;
   const RuleTable rules_;
   StrictCore strict_;
   LeaseTable leases_;

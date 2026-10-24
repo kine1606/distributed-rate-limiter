@@ -30,10 +30,11 @@ CheckResult Denied(const Rule& rule, std::int64_t wait_ns) {
 }  // namespace
 
 LeasedCore::LeasedCore(RedisBackend& redis, PlanStore& plans, RuleTable rules, std::size_t lease_capacity,
-                       Clock clock, ChunkObserver on_chunk_change)
+                       Clock clock, ChunkObserver on_chunk_change, LeaseTuning tuning)
     : redis_(redis),
       now_(clock),
       on_chunk_change_(std::move(on_chunk_change)),
+      tuning_(tuning),
       rules_(std::move(rules)),
       strict_(redis, plans, rules_),
       leases_(lease_capacity) {}
@@ -70,7 +71,7 @@ void LeasedCore::CheckLease(const Rule& rule, const CheckRequest& request, Check
   if (const std::int64_t left = TryTake(*lease, request.cost); left >= 0) {
     // Refill before the lease runs dry, so under steady load nobody waits for Redis.
     const std::uint32_t chunk = lease->chunk.load(std::memory_order_relaxed);
-    if (left < std::int64_t{chunk} * 3 / 10 &&
+    if (tuning_.early_refill && left < std::int64_t{chunk} * 3 / 10 &&
         now_() >= lease->deny_until_ns.load(std::memory_order_relaxed)) {
       StartRefill(*lease, chunk);
     }
@@ -140,7 +141,7 @@ void LeasedCore::OnRefill(Lease& l, std::uint32_t requested, std::uint32_t parti
       const std::int64_t now = now_();
       const bool idle = l.last_refill_ns != 0 && now - l.last_refill_ns > kChunkIdleNs;
       chunk_from = l.chunk.load(std::memory_order_relaxed);
-      chunk_to = NextChunk(chunk_from, !l.waiters.empty(), idle, l.rule);
+      chunk_to = tuning_.adaptive_chunk ? NextChunk(chunk_from, !l.waiters.empty(), idle, l.rule) : chunk_from;
       l.chunk.store(chunk_to, std::memory_order_relaxed);  // still the refill owner: no other writer
       l.last_refill_ns = now;
     }

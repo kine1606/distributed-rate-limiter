@@ -334,6 +334,43 @@ TEST(LeasedCore, KeysAFullLeaseTableCannotHoldTakeTheExactPath) {
   }
 }
 
+// The ablation switches (Week 7): each mechanism off on its own, everything else unchanged.
+TEST(LeasedCore, WithoutEarlyRefillTheLeaseRunsDryBeforeAskingAgain) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  LeasedCore core(redis, plans, Rules(), 1024, &SteadyNowNs, {}, {.early_refill = false});
+  Pending first;
+  first.Start(core, "u1", "burst");
+  redis.Reply(Granted());                                     // 10 tokens, one taken
+  for (int i = 0; i < 9; ++i) EXPECT_TRUE(CheckNow(core, "u1", "burst").allowed);  // to 0: no refill
+  EXPECT_EQ(redis.Total(), 1);
+  Pending dry;
+  dry.Start(core, "u1", "burst");
+  EXPECT_FALSE(dry.result.has_value());  // waits for the refill an early one would have avoided
+  EXPECT_EQ(redis.Total(), 2);
+  redis.Reply(Granted());
+}
+
+TEST(LeasedCore, WithoutAdaptiveChunkTheChunkStaysAtTheCap) {
+  ManualBackend redis;
+  PlanStore plans(redis);
+  g_fake_ns = 1'000'000'000;
+  const Rule big{.name = "big", .limit = 1000, .refill_per_sec = 10, .failure_policy = FailurePolicy::kFailClosed};
+  int changes = 0;
+  LeasedCore core(redis, plans, {{"big", big}}, 1024, &FakeNow, [&](const Lease&, std::uint32_t, std::uint32_t) { ++changes; },
+                  {.adaptive_chunk = false});
+  Pending first;
+  first.Start(core, "q", "big");
+  redis.Reply(Granted());
+  for (int i = 0; i < 70; ++i) CheckNow(core, "q", "big");
+  g_fake_ns += 11'000'000'000;  // the chunk sat unused for 11 s: adaptive would halve it
+  redis.Reply(Granted());
+  for (int i = 0; i < 71; ++i) CheckNow(core, "q", "big");  // 100 -> 29: below 30% of 100
+  EXPECT_EQ(redis.PendingRequested(), 71u);                   // still topping up to 100
+  EXPECT_EQ(changes, 0);
+  redis.Reply(Granted());
+}
+
 TEST(LeasedCore, ReturnLeasesGivesBackWhatEachLeaseStillHolds) {
   ManualBackend redis;
   PlanStore plans(redis);
