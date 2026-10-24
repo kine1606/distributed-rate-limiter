@@ -96,7 +96,7 @@ service the customer has already paid for.
 **Fail-open traffic is not billed.** When Redis cannot be asked and a plan fails open, the call is
 admitted without being counted, and the response says so (`REASON_UNVERIFIED`). Billing such calls
 would bill traffic that was never measured and might exceed the quota; the exactness promise of this
-thesis covers counted traffic only. Usage events (Week 4) mark these calls `unverified`, so a billing
+thesis covers counted traffic only. Usage events mark these calls `unverified`, so a billing
 system can apply its own policy to them.
 
 **A missing plan means Free.** A plan hash can be missing because a sign-up has not propagated yet,
@@ -106,8 +106,7 @@ call races the sign-up. The same rule applies to individual fields: a missing or
 takes its Free default (`plan_test.cc`).
 
 **Grace of 10% of the quota.** A single rule is easy to state in a price list and to test: a Pay
-customer with 2,000 calls per day may make 2,200 before being denied (the grace policy is built in
-Week 4). The amount is stored per plan
+customer with 2,000 calls per day may make 2,200 before being denied. The amount is stored per plan
 in the `extra` field of the plan hash, written by the seed tool and the admin tool, so a plan can
 carry a different allowance without a code change; 10% is the value of the shipped presets.
 
@@ -385,7 +384,7 @@ call on three customers whose plans differ only in the policy.
 
 Grace answers `OK`, not `OVERAGE`, because the extra units are free: the reason field tells the
 gateway what to bill, and only cap overage is billed. That choice is also what gives request 2,001
-three different answers, which is the Week 4 gate. It is tested on the script alone and end to end
+three different answers, one of the acceptance tests. It is tested on the script alone and end to end
 through gRPC (`Request2001GivesThreeAnswersOnThreePolicies`). Both counters reset with the UTC day,
 derived from the Redis clock so every instance agrees on the reset instant.
 
@@ -415,7 +414,7 @@ A call under a different plan ignores and drops the entry, so an upgrade lifts t
 call even if no plan-change message arrives.
 
 Plans themselves are cached on each instance for five seconds, which removed the plan read from
-every call: on the Week 2 strict benchmark the cache alone raised throughput from 16,738 to 19,480
+every call: on an early strict benchmark the cache alone raised throughput from 16,738 to 19,480
 checks per second (median of five runs each, same session). The admin tool writes a plan, then
 publishes the customer id on a Pub/Sub channel, and every instance drops its cached plan and its local
 denial. A read in flight when the message arrives is discarded and sent again, because it may have
@@ -440,7 +439,7 @@ billed, is therefore always counted exactly.
 The bound of 3.5.3 applies with no refill during the day. Redis grants at most `limit` units in a day.
 Units leased before midnight and used after it were counted for the old day, so N instances admit at
 most limit + N × C in one day: 0.4% of the day for four instances. Units leased and not used before
-the reset are an under-admission of at most N × C. In the gate test four instances shared one
+the reset are an under-admission of at most N × C. In the acceptance test four instances shared one
 customer of 100,000 a day (C = 100) with 20% more demand than the bound allows. They admitted exactly
 100,000 units, with 1,253 quota calls for 12,048 checks instead of one per check. A leased call does
 not deduplicate request ids: a retry inside the plan counts again and uses up one more unit of the
@@ -455,7 +454,7 @@ instances admitted what Redis granted minus at most N × C held in leases (5.2).
 ### 3.5.1 Why leases
 
 A strict check costs one Redis round trip, and its throughput on one instance is bounded by how many
-round trips are in flight: the Week 2 baseline admits 10,024 checks per second at a p99 of 10.5 ms
+round trips are in flight: an early baseline admits 10,024 checks per second at a p99 of 10.5 ms
 with 64 concurrent calls, and needs 1,024 concurrent calls to reach 25,301. The burst limit is
 checked on every API call, almost always for customers far below their limit, so most of those round
 trips only confirm that tokens remain. A lease removes them: each limiter instance takes a share of a
@@ -690,8 +689,8 @@ raised no false alarm. A tighter timeout needs the I/O thread freed of finishing
 future work.
 
 The timeout is a deadline on each attempt, which the client library alone did not provide. Its
-timeout is an idle timeout per connection, re-armed by any reply that arrives. The fault test of
-Week 6 gave one master 80 ms of extra latency under load: its connection was never idle for 50 ms,
+timeout is an idle timeout per connection, re-armed by any reply that arrives. The fault test
+(5.7) gave one master 80 ms of extra latency under load: its connection was never idle for 50 ms,
 no call timed out, and that master's customers waited about 250 ms for three slow round trips
 instead of getting their plan's policy. The resilient layer now answers every attempt as timed out
 at its deadline, whichever comes first of the reply and the deadline, and drops the late reply. The
@@ -792,7 +791,7 @@ Goal G5 asks for about 1,000,000 checks per second, which is a figure for a clus
 thesis has one laptop, so this section does what Section 1.3 announced: it takes what one instance
 and one Redis master were measured to do, and computes how many of each the target would need, with
 every assumption named. **The results are estimates, not measurements.** The final version, with the
-scaling measurements of Week 7, is in Chapter 5 (5.11).
+scaling measurements, is in Chapter 5 (5.11).
 
 ### 3.8.1 Inputs
 
@@ -800,12 +799,12 @@ scaling measurements of Week 7, is in Chapter 5 (5.11).
 
 | Input | Value | Source (`docs/thesis/evidence/`) |
 | --- | --- | --- |
-| One instance, leased rule, one check per call, 192 calls in flight | 89,743 checks/s, p99 4.28 ms (75,652 before the Week 6 tuning) | `verification_and_speedups_2026-10-23.md` |
+| One instance, leased rule, one check per call, 192 calls in flight | 89,743 checks/s, p99 4.28 ms (75,652 before the tuning of 5.10) | `verification_and_speedups_2026-10-23.md` |
 | One instance, leased rule, fixed arrival rate: the highest rate tried with p99 below 2 ms | 20,000 checks/s, p99 1.80 ms | `week5_gate_2026-10-21.md` |
 | One instance, leased rule, batches of 10 | 538,605 checks/s, p99 7.51 ms per call | `ceiling_and_envoy_2026-10-19.md` |
 | One instance, exact daily quota (one script per check), 192 in flight | 30,376 checks/s, p99 24.2 ms (one run) | `reliability_2026-10-21.md` |
 | One instance, customer check of Pay customers (two scripts), fixed arrival rate | 20,000 checks/s, all answered, p99 19.5 ms | `week5_gate_2026-10-21.md` |
-| Script calls one Redis master absorbs | about 120,000/s | `docs/DESIGN.md` section 3 (Week 1: 360,000/s on three masters, each at about one core) |
+| Script calls one Redis master absorbs | about 120,000/s | `docs/DESIGN.md` section 3 (an early spike: 360,000/s on three masters, each at about one core) |
 | Redis calls per check of a leased rule (refills) | 0.016 | `throughput_2026-10-19.md` |
 | Redis calls per enterprise customer check | 1 script + 0.036 refills | `throughput_2026-10-19.md` |
 | Redis memory per stored request-id answer | 181 bytes | 3.6.2 |
@@ -879,7 +878,7 @@ Each assumption is a way the estimate can be wrong; Chapter 5 checks those it ca
   should help, but no server was measured.
 - **Instances scale linearly.** They share nothing but Redis, which makes it plausible. Four instances
   on the laptop reached 116,515 checks per second, which only shows that the laptop ran out of cores,
-  not how instances scale. The Week 7 matrix confirms it: one to four instances on the same laptop
+  not how instances scale. The benchmark matrix confirms it: one to four instances on the same laptop
   share its CPUs and add no capacity, and none of the engines degrades with more instances (5.6).
 - **A master absorbs 120,000 script calls per second.** This was measured with the token-bucket
   script. The quota script does more work (deduplication, overage) and was not measured on its own.

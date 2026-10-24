@@ -35,7 +35,7 @@ Between the two sit:
 - *Every test passes under the sanitizers:* 240 tests in release, AddressSanitizer and
   ThreadSanitizer, with 97.3% line coverage.
 
-**One Week 3 target was not met.** A leased instance at four times the strict baseline would be
+**One intermediate target was not met.** A leased instance at four times the strict baseline would be
 101,204 checks/s. On the laptop, gRPC with no limiter at all runs at 82,700 to 91,200, so no limiter
 can reach that on one instance with one check per call. With `CheckBatch` of 10 checks per call, one
 instance reached 400,187 checks/s (5.10).
@@ -66,7 +66,7 @@ instance reached 400,187 checks/s (5.10).
 
 ## 6.3 Future work
 
-- **Run the evaluation on separate machines** (dropped from Week 8: the AWS run). This would turn the
+- **Run the evaluation on separate machines** (planned as a cloud run and not done). This would turn the
   extrapolation of 5.11 into a measurement and test its assumptions, starting with linear scaling
   across instances and a master's capacity for the quota script.
 - **Lease the burst limit per customer, or deny locally until Redis's retry time.** This closes the

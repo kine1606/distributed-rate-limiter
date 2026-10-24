@@ -98,7 +98,7 @@ the call is sent once more as `EVAL` with the source.
 
 ## 4.3 Redis client and batching
 
-**Client choice.** The backend uses redis-plus-plus's `AsyncRedisCluster`. A Week 1 spike reached
+**Client choice.** The backend uses redis-plus-plus's `AsyncRedisCluster`. An early spike reached
 290,000 script calls a second from one thread on one connection per master, and about 360,000 on
 three masters, where each master used about one core (`docs/DESIGN.md`, section 3). Pipelining came
 free: calls issued without waiting leave together on the connection, and the pool size made no
@@ -155,7 +155,7 @@ struct alignas(64) Lease {
 The table is open addressing over a fixed array of atomic pointers. A slot goes from empty to a lease
 exactly once, by compare-and-swap, and is never cleared or moved, so a lease pointer stays valid for
 the table's life and lookups take no lock. A lookup compares the 64-bit id first and reads the key
-string only on a match. The price is that leases are never evicted, a recorded shortcut: one
+string only on a match. The price is that leases are never evicted, a known limitation (6.2): one
 instance used 224 MB for about 650,000 leases over 1,000,000 keys
 (`flood_cardinality_2026-10-22.md`).
 
@@ -247,7 +247,7 @@ timer thread and are counted against the breaker.
 
 **Deadlines.** Each attempt is answered as timed out after 50 ms unless Redis answered first. The
 client library's own timeout is an idle timeout per connection, re-armed by any reply, so it did not
-bound a call: the fault test of Week 6 found a slow master never timed out (3.7.2). Every Redis call
+bound a call: the fault test (5.7) found a slow master never timed out (3.7.2). Every Redis call
 registers a deadline, so the structure that holds them is on a busy path, and a first version guarded
 by a mutex cost 448 ns a call and serialised the threads. The final version is Vyukov's intrusive
 multi-producer, single-consumer queue [26].

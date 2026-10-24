@@ -193,7 +193,7 @@ time; `open_loop_2026-10-24.md`):
 | leased `api_default`, p99 | 0.58 ms | 1.45 ms | 2.54 ms | 3.30 ms |
 | customer check (Pay), p99 | 2.54 ms | 7.84 ms | | |
 
-At the Week 5 gate a leased check queued beyond 20,000 offered (p99 156 ms at 30,000). The knee is now
+On an earlier build (2026-10-21) a leased check queued beyond 20,000 offered (p99 156 ms at 30,000). The knee is now
 beyond 40,000, consistent with the throughput gained since (5.10). A leased check stays under 1 ms at
 p99 at 10,000 a second, against the 2 ms target of Chapter 3.
 
@@ -298,7 +298,7 @@ alternating runs, on the workload where it should matter (5 runs each, one insta
 - *The adaptive chunk* serves accuracy and limits stranded tokens.
 - *Alignment* is 14 times faster in the lease microbenchmark at 16 threads, but in the server each
   check also pays for gRPC, which hides it.
-- *The batcher* gained nothing in Week 3 either, and stays off.
+- *The batcher* gained nothing in an earlier comparison either (4.3), and stays off.
 
 **A first deny-cache run measured nothing.** A Free customer's burst of 2 a second cannot reach its
 quota of 200 within a run, so the cache never acted. The run above starts every Free customer out of
@@ -418,7 +418,7 @@ core did, are further assumptions.
 - **Memory fits.** If every call carries a request id, about 3 GB of stored answers falls on each of
   17 masters (3.8.2), which fits in 13 GiB.
 
-**Assumptions** (3.8.4), with what Week 7 added:
+**Assumptions** (3.8.4), with what the measurements added:
 - *A server instance does at least what a laptop instance does.* In the matrix runs the load generator
   used 1.7 to 5.4 cores of the same laptop (5.6).
 - *Instances scale linearly.* Not testable on one laptop. The matrix shows no engine degrading with up
