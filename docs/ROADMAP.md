@@ -311,8 +311,10 @@ About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md
       `docs/thesis/evidence/matrix_2026-10-24.md`): leases equal strict on uniform keys over 1M, +55-66%
       on Zipf, ×4.5-5.2 on one hot key. To do: rerun `bench/open_loop.sh` (latency at fixed rates) on the
       final build, after profiling.
-- [ ] Ablation study (3 h): switch off lease, batcher, early refill, adaptive chunk, deny cache,
+- [x] Ablation study (3 h): switch off lease, batcher, early refill, adaptive chunk, deny cache,
       plan cache, alignment one at a time; throughput and p99 delta table.
+      Done 2026-10-24 (`docs/thesis/evidence/ablation_2026-10-24.md`): without it, lease −29.7%, deny cache
+      −64.6%, plan cache −19.1%; early refill, adaptive chunk, alignment and batcher within noise.
 - [ ] Profile and fix the top one or two bottlenecks (4 h): only what the flamegraph shows, e.g.
       per-thread sub-leases for a hot key, protobuf arenas or pooled callbacks, gRPC thread count.
 - [ ] Build-level wins, each measured (2 h, Should): LTO, PGO, mimalloc or jemalloc via LD_PRELOAD.

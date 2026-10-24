@@ -229,16 +229,37 @@ The others' answers stayed correct in every run.
 
 ## 5.9 Ablation (evaluation test 10)
 
-`bench/ablation.sh` switches one mechanism off at a time on the workload where it should matter:
+`bench/ablation.sh` switches one mechanism off at a time and compares it with the full system in
+alternating runs, on the workload where it should matter (5 runs each, one instance, Zipf keys;
+`ablation_2026-10-24.md`).
+
+*Table 5.y: Throughput without each mechanism.*
+
+| Mechanism | Workload | Full system | Without it | Change |
+| --- | --- | --- | --- | --- |
+| lease | `api_default`, 1M keys | 73,172 checks/s, p99 6.05 ms | 51,434, 8.55 ms | **−29.7%** |
+| deny cache | Free customers out of quota | 98,128, 3.92 ms | 34,706, 13.78 ms | **−64.6%** |
+| plan cache | Pay customers | 42,232, 10.17 ms | 34,148, 11.09 ms | **−19.1%** |
+| early refill | `api_default`, 1M keys | 74,571, 5.79 ms | 73,927, 5.79 ms | noise |
+| adaptive chunk | same | 73,715, 6.05 ms | 74,768, 5.79 ms | noise |
+| cache-line alignment | same | 73,208, 6.05 ms | 74,904, 6.05 ms | noise |
+| batcher (on, against the default off) | strict path | 51,457, 7.84 ms | 50,984, 8.93 ms | noise |
+
+**Three mechanisms carry the throughput:**
 - the lease;
-- early refill;
-- the adaptive chunk;
-- cache-line alignment;
-- the batcher;
-- the deny cache;
+- the deny cache, which answers a customer out of quota locally;
 - the plan cache.
 
-**[Pending: Week 7.]**
+**The other four have no measurable effect on one instance's throughput.** That is not what they are for:
+- *Early refill* serves latency when a lease is about to run dry.
+- *The adaptive chunk* serves accuracy and limits stranded tokens.
+- *Alignment* is 14 times faster in the lease microbenchmark at 16 threads, but in the server each
+  check also pays for gRPC, which hides it.
+- *The batcher* gained nothing in Week 3 either, and stays off.
+
+**A first deny-cache run measured nothing.** A Free customer's burst of 2 a second cannot reach its
+quota of 200 within a run, so the cache never acted. The run above starts every Free customer out of
+quota: an ablation is only as good as its workload.
 
 ## 5.10 Profiling and speed-ups
 
