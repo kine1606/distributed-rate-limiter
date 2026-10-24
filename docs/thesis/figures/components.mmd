@@ -1,0 +1,18 @@
+flowchart LR
+  G[API gateway] -->|Check / CheckBatch, gRPC| S
+  subgraph L[Limiter instance, one of N]
+    S[gRPC service<br/>validation, admission] --> C[Engine<br/>CompositeCore]
+    C --> D[Deny cache]
+    C --> P[Plan cache]
+    C --> LE[Leases<br/>LeasedCore]
+    C --> ST[Exact path<br/>StrictCore]
+    C -.-> U[Usage log]
+    LE --> RB[Resilient backend<br/>timeouts, retries,<br/>slot-group breakers]
+    ST --> RB
+    P --> RB
+    RB --> RC[4 Redis clients]
+  end
+  RC -->|EVALSHA, HGETALL| R[(Redis Cluster)]
+  A[Admin tool rlctl] -->|HSET plan, PUBLISH| R
+  R -.->|plan-changes| P
+  M[Prometheus] -.->|GET /metrics| L

@@ -1,9 +1,5 @@
 # Chapter 1. Introduction
 
-> Draft, Week 2 (2026-10-18). Target length 4 to 6 pages. Statements marked **[Pending: Week N]**
-> describe results that do not exist yet; they must be replaced by measured numbers, or removed,
-> before submission. Citations refer to `references.md`.
-
 ## 1.1 Context: selling access to APIs
 
 A growing share of software is sold not as an installed product but as an API that customers call
@@ -58,6 +54,8 @@ a bounded inaccuracy, explicit and measured rather than unknown.
 ## 1.3 Goals
 
 The goals come from the two halves of the problem (`docs/DESIGN.md`, section 1).
+
+*Table 1.1: The goals of this thesis.*
 
 | Goal | Statement |
 | --- | --- |

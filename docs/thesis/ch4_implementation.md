@@ -1,8 +1,5 @@
 # Chapter 4. Implementation
 
-> Draft, Week 7 (2026-10-24). Target 8 to 10 pages. Results still to come are marked
-> **[Pending: Week N]**.
-
 The design of Chapter 3 is implemented in C++20: 3,966 lines in `src/` and `include/`, 283 lines of
 Lua for the Redis scripts, and 5,557 lines of tests. This chapter shows how the parts that carry the
 thesis claims are built, with short excerpts and the measurements that decided them. The full code,
@@ -33,6 +30,8 @@ transcription of the scripts on a fake clock, or the real cluster behind the sam
 The build uses CMake with five presets: `release` (`-O3 -march=native`), `debug`, `asan`, `tsan`
 and `coverage`. `scripts/test.sh <preset>` builds a preset and runs every test. The libraries are
 Ubuntu 24.04 packages except redis-plus-plus, which is built from source:
+
+*Table 4.2: Libraries and their versions.*
 
 | Library | Version | Used for |
 | --- | --- | --- |
@@ -119,7 +118,7 @@ threads.
 **The batcher, measured and left off.** A batcher was built that collects calls and sends them
 together, on a timer or adaptively. It gained nothing:
 
-*Table 4.2: Batcher modes on the exact path (3 runs, `results/2026-10-18_batcher/NOTES.md`).*
+*Table 4.3: Batcher modes on the exact path (3 runs, `results/2026-10-18_batcher/NOTES.md`).*
 
 | Mode | p50 at 1,000 checks/s | Checks/s at 192 in flight |
 | --- | --- | --- |
@@ -251,7 +250,7 @@ client library's own timeout is an idle timeout per connection, re-armed by any 
 bound a call: the fault test of Week 6 found a slow master never timed out (3.7.2). Every Redis call
 registers a deadline, so the structure that holds them is on a busy path, and a first version guarded
 by a mutex cost 448 ns a call and serialised the threads. The final version is Vyukov's intrusive
-multi-producer, single-consumer queue.
+multi-producer, single-consumer queue [26].
 
 *Listing 4.5: Adding an attempt to the deadline queue: one atomic exchange.*
 
@@ -287,7 +286,7 @@ The measured overhead of metrics was within noise.
 
 ## 4.7 Testing
 
-*Table 4.3: Tests by kind (240 in all; every one passes in release, ASan and TSan).*
+*Table 4.4: Tests by kind (240 in all; every one passes in release, ASan and TSan).*
 
 | Kind | Count | Against | Examples |
 | --- | --- | --- | --- |

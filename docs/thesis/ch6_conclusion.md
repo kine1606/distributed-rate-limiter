@@ -1,7 +1,5 @@
 # Chapter 6. Conclusion
 
-> Draft, written ahead in Week 8 (2026-10-24). Target 3 to 4 pages.
-
 This thesis set out to show that a multi-tenant rate limiter can keep quotas exact while answering
 most checks without a round trip to shared storage. The design splits the two kinds of limit:
 - **Daily quotas, which are billed, are decided in Redis by atomic Lua scripts:** exact, deduplicated

@@ -1,9 +1,5 @@
 # Chapter 3. Design
 
-> Drafted in Weeks 2 to 5: product decisions (3.1.3) in Week 2, the lease protocol (3.5) in Week 3,
-> quota and overage logic (3.4) in Week 4, and the rest in Week 5 (complete draft 2026-10-22).
-> Results still to come are marked **[Pending: Week N]**. Tables are numbered in reading order.
-
 ## 3.1 Requirements
 
 The goals of Section 1.3 say what the service must achieve. This section turns them into
@@ -29,8 +25,8 @@ must do it (3.1.2), and the product decisions that no technical argument settles
 
 The API separates two kinds of "no". A decision is an answer: the call succeeds, and a reason says
 what was decided. There are seven reasons (`OK`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, `OVERAGE`,
-`SUSPENDED`, `UNAVAILABLE`, `UNVERIFIED`), which the gateway maps to HTTP: 429 for the two limits, 403
-for a suspended account, 503 for `UNAVAILABLE`. A gRPC error means that no decision could be made:
+`SUSPENDED`, `UNAVAILABLE`, `UNVERIFIED`), which the gateway maps to HTTP: 429 [18] for the two limits, with `Retry-After` [17] in whole seconds
+from the answer's `retry_after_ms`, 403 for a suspended account, 503 for `UNAVAILABLE`. A gRPC error means that no decision could be made:
 `INVALID_ARGUMENT` for a malformed request (an empty key or rule, a key or request id longer than 128
 bytes, a rule the configuration does not have) and `RESOURCE_EXHAUSTED` for an overloaded instance. A
 Redis outage is deliberately an answer, not an error. The limiter applies the plan's failure policy
@@ -123,28 +119,10 @@ Figure 3.1 shows the processes that take part in a check: the provider's API gat
 limiter instances, and one Redis Cluster. Only Redis holds state that matters; everything an instance
 holds can be lost.
 
-```mermaid
-flowchart LR
-  G[API gateway] -->|Check / CheckBatch, gRPC| S
-  subgraph L[Limiter instance, one of N]
-    S[gRPC service<br/>validation, admission] --> C[Engine<br/>CompositeCore]
-    C --> D[Deny cache]
-    C --> P[Plan cache]
-    C --> LE[Leases<br/>LeasedCore]
-    C --> ST[Exact path<br/>StrictCore]
-    C -.-> U[Usage log]
-    LE --> RB[Resilient backend<br/>timeouts, retries,<br/>slot-group breakers]
-    ST --> RB
-    P --> RB
-    RB --> RC[4 Redis clients]
-  end
-  RC -->|EVALSHA, HGETALL| R[(Redis Cluster)]
-  A[Admin tool rlctl] -->|HSET plan, PUBLISH| R
-  R -.->|plan-changes| P
-  M[Prometheus] -.->|GET /metrics| L
-```
+![Components of the service](figures/components.png)
 
-*Figure 3.1: Components. Solid arrows are calls on the path of a check; dashed ones are not.*
+*Figure 3.1: Components. Solid arrows are calls on the path of a check; dashed ones are not.
+(Source: `figures/components.mmd`, Mermaid.)*
 
 **API gateway.** The gateway is outside the system built here; a small demo gateway
 (`examples/gateway-python`) plays its part in the tests. It authenticates the end user's API key,
@@ -717,7 +695,7 @@ Week 6 gave one master 80 ms of extra latency under load: its connection was nev
 no call timed out, and that master's customers waited about 250 ms for three slow round trips
 instead of getting their plan's policy. The resilient layer now answers every attempt as timed out
 at its deadline, whichever comes first of the reply and the deadline, and drops the late reply. The
-deadlines wait in a lock-free queue in send order (Vyukov's multi-producer, single-consumer queue),
+deadlines wait in a lock-free queue in send order (Vyukov's multi-producer, single-consumer queue [26]),
 which a timer thread empties and checks in batches. In the whole server its cost is within run-to-run
 noise, and no deadline was missed at saturation or under open-loop overload at 30,000 checks per
 second (`docs/thesis/evidence/faults_2026-10-23.md`). A first version guarded the queue with a mutex:
