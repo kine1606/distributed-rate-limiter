@@ -814,7 +814,7 @@ Goal G5 asks for about 1,000,000 checks per second, which is a figure for a clus
 thesis has one laptop, so this section does what Section 1.3 announced: it takes what one instance
 and one Redis master were measured to do, and computes how many of each the target would need, with
 every assumption named. **The results are estimates, not measurements.** The final version, with the
-scaling measurements of Week 7, is in Chapter 5 **[Pending: Week 8]**.
+scaling measurements of Week 7, is in Chapter 5 (5.11).
 
 ### 3.8.1 Inputs
 

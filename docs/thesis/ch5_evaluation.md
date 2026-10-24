@@ -1,7 +1,6 @@
 # Chapter 5. Evaluation
 
-> Draft, Week 7 (2026-10-24). Target 12 to 14 pages. The extrapolation is marked
-> **[Pending: Week 8]**.
+> Draft complete, Weeks 7 and 8 (2026-10-24). Target 12 to 14 pages.
 
 This chapter tests the two halves of the thesis claim separately, as Chapter 1 set out. First
 correctness: quotas are exact under concurrency, retries, plan changes and failures (5.2 to 5.4).
