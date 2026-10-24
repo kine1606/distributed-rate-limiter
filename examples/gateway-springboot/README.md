@@ -1,6 +1,7 @@
 # Demo gateway (Spring Boot, bonus)
 
-> Week 7, bonus (dropped first if late) · Flow steps A1 to A3, A14 · Status: not started
+> Week 7, bonus (dropped first if late) · Flow steps A1 to A3, A14 · Status: dropped (2026-10-25): no JDK in
+> the build environment; the Python gateway (`examples/gateway-python`, `scripts/demo.sh`) plays this part.
 
 ## What this module does
 

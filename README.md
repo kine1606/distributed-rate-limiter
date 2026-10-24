@@ -5,10 +5,12 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: Weeks 1 to 7 done (2026-10-24).** Business rules (plans, daily quotas with request ids and
-three overage policies, burst limits, a deny cache, a plan cache kept fresh over Pub/Sub, usage
-events, `tools/rlctl`), leases with a proved bound, failure handling per plan, metrics, SIGHUP
-reload, the evaluation, and Chapters 1 to 5 of the thesis in draft (`docs/thesis/`). The limiter runs
+**Status (2026-10-25): built, evaluated and written up.** Business rules (plans, daily quotas with
+request ids and three overage policies, burst limits, a deny cache, a plan cache kept fresh over
+Pub/Sub, usage events, `tools/rlctl`), leases with a proved bound, failure handling per plan, metrics,
+SIGHUP reload, and the evaluation. The thesis is assembled in `docs/thesis/thesis.pdf` (71 pages; built
+by `docs/thesis/build.sh`), and `scripts/live_demo.sh` plays a 90-second live demo. Still to come: the
+faculty template, the advisor's review, and an optional run on separate machines. The limiter runs
 on a 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3).
 
 Measured on one laptop, where client, limiter and Redis share 12 hardware threads (evidence in
