@@ -305,12 +305,13 @@ After the freeze (2026-10-23, fixes and measured changes only;
 
 About 16 h, much of it unattended runs. See [bench/README.md](../bench/README.md).
 
-- [ ] Benchmark matrix (5 h): engines × 1/2/4 instances × chunk caps × uniform/Zipf/hot keys,
+- [x] Benchmark matrix (5 h): engines × 1/2/4 instances × chunk caps × uniform/Zipf/hot keys,
       open-loop, 5 runs, median with min and max, cores pinned with `taskset`.
       Throughput half done 2026-10-24 (`bench/run_matrix.sh`, closed loop at the plateau, 240 runs,
       `docs/thesis/evidence/matrix_2026-10-24.md`): leases equal strict on uniform keys over 1M, +55-66%
-      on Zipf, ×4.5-5.2 on one hot key. To do: rerun `bench/open_loop.sh` (latency at fixed rates) on the
-      final build, after profiling.
+      on Zipf, ×4.5-5.2 on one hot key. Open-loop latency on the final build
+      (`docs/thesis/evidence/open_loop_2026-10-24.md`): leased p99 3.30 ms at 40,000/s, where Week 5 queued
+      (137 ms).
 - [x] Ablation study (3 h): switch off lease, batcher, early refill, adaptive chunk, deny cache,
       plan cache, alignment one at a time; throughput and p99 delta table.
       Done 2026-10-24 (`docs/thesis/evidence/ablation_2026-10-24.md`): without it, lease −29.7%, deny cache

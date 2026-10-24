@@ -179,6 +179,18 @@ more instances cannot add capacity:
 
 Capacity with more machines is estimated in 5.11, not measured.
 
+**Latency at fixed rates** (`bench/open_loop.sh`, open loop: latency from each call's scheduled
+time; `open_loop_2026-10-24.md`):
+
+| Rule | 10,000/s | 20,000/s | 30,000/s | 40,000/s |
+| --- | --- | --- | --- | --- |
+| leased `api_default`, p99 | 0.58 ms | 1.45 ms | 2.54 ms | 3.30 ms |
+| customer check (Pay), p99 | 2.54 ms | 7.85 ms | | |
+
+At the Week 5 gate a leased check queued beyond 20,000 offered (p99 156 ms at 30,000). The knee is now
+beyond 40,000, consistent with the throughput gained since (5.10). A leased check stays under 1 ms at
+p99 at 10,000 a second, against the 2 ms target of Chapter 3.
+
 **The customer check on one hot key measured three states of one customer**, whose quota carried over
 between runs:
 - **Over its burst, within quota:** 14,365 checks a second, every call a burst script on one master.
