@@ -64,9 +64,13 @@ class LeasedCore final : public RateLimiterCore {
   struct Stats {
     std::uint64_t parked;   // checks that waited for a refill
     std::uint64_t refills;  // refill calls sent to Redis
+    // Top-ups: tokens asked for, and the lease sizes they topped up to; requested / target is the
+    // mean fill, so a full chunk per refill would need fill x refills of them.
+    std::uint64_t topup_requested = 0, topup_target = 0;
   };
   Stats GetStats() const {
-    return {parked_.load(std::memory_order_relaxed), refills_.load(std::memory_order_relaxed)};
+    return {parked_.load(std::memory_order_relaxed), refills_.load(std::memory_order_relaxed),
+            topup_requested_.load(std::memory_order_relaxed), topup_target_.load(std::memory_order_relaxed)};
   }
 
  private:
@@ -76,7 +80,7 @@ class LeasedCore final : public RateLimiterCore {
   void OnRefill(Lease& l, std::uint32_t requested, std::uint32_t partial_retry_ms, const ScriptResult& s);
 
   RedisBackend& redis_;
-  std::atomic<std::uint64_t> parked_{0}, refills_{0};
+  std::atomic<std::uint64_t> parked_{0}, refills_{0}, topup_requested_{0}, topup_target_{0};
   const Clock now_;
   const ChunkObserver on_chunk_change_;
   const LeaseTuning tuning_;

@@ -298,6 +298,8 @@ int main(int argc, char** argv) {
       const auto s = e->leased->GetStats();
       total.parked += s.parked;
       total.refills += s.refills;
+      total.topup_requested += s.topup_requested;
+      total.topup_target += s.topup_target;
     }
     return total;
   };
@@ -325,6 +327,11 @@ int main(int argc, char** argv) {
           AppendSample(out, "rl_lease_waits_total", "", static_cast<double>(s.parked));
           AppendFamily(out, "rl_lease_refills_total", "counter", "Lease refills sent to Redis");
           AppendSample(out, "rl_lease_refills_total", "", static_cast<double>(s.refills));
+          AppendFamily(out, "rl_lease_topup_tokens_total", "counter",
+                       "Tokens asked for by lease top-ups, and the lease sizes they topped up to");
+          AppendSample(out, "rl_lease_topup_tokens_total", "kind=\"requested\"",
+                       static_cast<double>(s.topup_requested));
+          AppendSample(out, "rl_lease_topup_tokens_total", "kind=\"target\"", static_cast<double>(s.topup_target));
         }
         AppendFamily(out, "rl_plan_cache_reads_total", "counter", "Plan reads sent to Redis (cache misses)");
         AppendSample(out, "rl_plan_cache_reads_total", "", static_cast<double>(plans.Reads()));

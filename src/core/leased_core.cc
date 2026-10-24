@@ -110,7 +110,10 @@ void LeasedCore::StartRefill(Lease& l, std::uint32_t target) {
   // counts exactly that. Adding a full chunk at the 30% watermark let an instance hold 1.3 x C, and
   // the seeded harness caught a window over N x C (tests/lease_harness_test.cc).
   const std::int64_t have = std::max<std::int64_t>(0, l.tokens.load(std::memory_order_relaxed));
-  Refill(l, static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have)), 0);
+  const auto amount = static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have));
+  topup_requested_.fetch_add(amount, std::memory_order_relaxed);
+  topup_target_.fetch_add(target, std::memory_order_relaxed);
+  Refill(l, amount, 0);
 }
 
 void LeasedCore::Refill(Lease& l, std::uint32_t amount, std::uint32_t partial_retry_ms) {

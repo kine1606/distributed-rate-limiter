@@ -100,12 +100,15 @@ class PlanChangeIT : public ::testing::Test {
     ASSERT_TRUE(Rlctl("create " + customer));
   }
 
-  void SetUsedToday(const std::string& customer, int used) {
+  // The customer's daily counter at `used`, dated `days_ago` days before today by the script's clock.
+  void SetUsedToday(const std::string& customer, int used, int days_ago = 0) {
     const std::string key = RedisKey(rules_.at("daily_quota"), customer);
-    const auto t = admin_->redis(key, false).command<std::vector<std::string>>("TIME");  // the script's clock
     const std::vector<std::pair<std::string, std::string>> state{
-        {"day", std::to_string(std::stoll(t.at(0)) / 86400)}, {"used", std::to_string(used)}};
+        {"day", std::to_string(RedisDay(key) - days_ago)}, {"used", std::to_string(used)}};
     admin_->hset(key, state.begin(), state.end());
+  }
+  long long RedisDay(const std::string& key) {  // the UTC day of the master that owns `key`
+    return std::stoll(admin_->redis(key, false).command<std::vector<std::string>>("TIME").at(0)) / 86400;
   }
 
   // ms from `start` until every instance holds a plan with `daily`, or -1 after a second.
@@ -154,6 +157,28 @@ TEST_F(PlanChangeIT, UpgradeReachesEveryInstanceWithinOneSecond) {
   EXPECT_EQ(a.limit, 2000u);
   EXPECT_EQ(a.remaining, 1799u);  // usage carried over
   EXPECT_EQ(b.remaining, 1798u);
+}
+
+// Evaluation test 2, the reset: yesterday's counter, full, is reset exactly once although both
+// instances meet it at the same moment, because the script that resets it runs atomically on the
+// master by the master's clock; then the day counts on from there on both.
+TEST_F(PlanChangeIT, YesterdaysFullCounterResetsOnceForEveryInstance) {
+  const std::string c = "cust:it-reset";
+  Create(c);
+  SetUsedToday(c, 200, 1);  // out of quota, but yesterday
+  auto a = std::async(std::launch::async, [&] { return instances_[0]->Check(c); });
+  auto b = std::async(std::launch::async, [&] { return instances_[1]->Check(c); });
+  const CheckResult ra = a.get(), rb = b.get();
+  EXPECT_TRUE(ra.allowed);
+  EXPECT_TRUE(rb.allowed);
+  EXPECT_EQ(std::min(ra.remaining, rb.remaining), 198u);  // one reset: 199 and 198, never 199 twice
+  EXPECT_EQ(std::max(ra.remaining, rb.remaining), 199u);
+  std::this_thread::sleep_for(1100ms);  // Free's burst: 2 tokens, 2 a second
+  EXPECT_EQ(instances_[1]->Check(c).remaining, 197u);
+  EXPECT_EQ(instances_[0]->Check(c).remaining, 196u);
+  const std::string key = RedisKey(rules_.at("daily_quota"), c);
+  EXPECT_EQ(admin_->hget(key, "day").value_or(""), std::to_string(RedisDay(key)));
+  EXPECT_EQ(admin_->hget(key, "used").value_or(""), "4");
 }
 
 // Step B9: suspended on every instance within a second; restored with today's usage intact.

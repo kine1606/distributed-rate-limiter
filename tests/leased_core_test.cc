@@ -368,6 +368,8 @@ TEST(LeasedCore, WithoutAdaptiveChunkTheChunkStaysAtTheCap) {
   for (int i = 0; i < 71; ++i) CheckNow(core, "q", "big");  // 100 -> 29: below 30% of 100
   EXPECT_EQ(redis.PendingRequested(), 71u);                   // still topping up to 100
   EXPECT_EQ(changes, 0);
+  EXPECT_EQ(core.GetStats().topup_requested, 100u + 71 + 71);  // the mean fill the stats report
+  EXPECT_EQ(core.GetStats().topup_target, 300u);
   redis.Reply(Granted());
 }
 
