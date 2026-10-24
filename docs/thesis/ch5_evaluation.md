@@ -263,9 +263,31 @@ quota: an ablation is only as good as its workload.
 
 ## 5.10 Profiling and speed-ups
 
-A profile of the server under load (`perf`, 2026-10-23) found abseil's mutex deadlock detection
-running in gRPC's own threads: 2.7% of the CPU in `GraphCycles::GetId` alone. Switching it off raised
-throughput a lot:
+**The final build's profile** (`bench/profile.sh`, `profile_2026-10-24.md`; Figure 5.2) was taken with
+`perf` at 999 Hz with frame-pointer stacks, under the closed loop on one instance.
+
+| Self time | Leased rule (75,289 checks/s) | Customer rule (39,933) |
+| --- | --- | --- |
+| gRPC | 53.3% | 39.6% |
+| allocation | 15.9% | 20.3% |
+| Redis client | 4.3% | 8.6% |
+| the limiter's own code | 4.1% | 6.3% |
+
+![Flamegraph of the leased rule under load](figures/profile_leased.svg)
+
+*Figure 5.2: Where a leased check's CPU goes (`figures/profile_leased.svg`; the customer rule's
+is `profile_customer.svg`).*
+
+**The limiter's own code is a small part of the cost.** gRPC takes the largest share, plus most of
+the allocation and all the locks. Allocation is spread thin:
+- gRPC's per-call arena is the largest single caller, at 2.8%.
+- This project's code allocates about 3% on the customer path and nothing on the lease path beyond
+  gRPC's own.
+
+So the remaining speed-up lies in fewer gRPC calls per check (`CheckBatch`), not in the engine.
+
+**The one large finding came from the same method, the day before:** abseil's mutex deadlock
+detection, running in gRPC's own threads. Switching it off gave:
 
 | Workload | Before | After | Change |
 | --- | --- | --- | --- |
@@ -273,9 +295,11 @@ throughput a lot:
 | customer rule | 36,469 | 41,654 | +14.2% |
 | gRPC alone | 74,733 | 91,154 | +22.0% |
 
-Making the per-attempt deadline queue lock-free took a Redis call through the resilient layer from
-448 to 214 ns. jemalloc added 3.7% on the customer rule and nothing on the leased one. The flamegraph
-of the final build is **[Pending: Week 7]**.
+**Smaller results:**
+- A lock-free per-attempt deadline queue took a Redis call through the resilient layer from 448 to
+  214 ns.
+- LTO, a larger glibc thread cache and jemalloc changed throughput within noise, so none is adopted.
+- PGO was not tried: like LTO it rebuilds only the project's code, 4 to 6% of the CPU.
 
 ## 5.11 Extrapolation to 1,000,000 checks per second
 

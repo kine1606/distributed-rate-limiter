@@ -38,7 +38,7 @@ workload() {
     >"$out/$name.loadgen.json" &
   local lp=$!
   sleep 4
-  "$perf" record -q -F 999 -g --call-graph fp -e cpu-clock:u -p "$sp" -o "$out/$name.perf.data" -- sleep 10 2>/dev/null
+  "$perf" record -F 999 -g --call-graph fp -e cpu-clock:u -p "$sp" -o "$out/$name.perf.data" -- sleep 10 2>&1 | tail -1
   wait "$lp"
   kill "$sp"
   wait "$sp" 2>/dev/null || true
@@ -46,8 +46,8 @@ workload() {
   "$perf" script -i "$out/$name.perf.data" 2>/dev/null | "$fg/stackcollapse-perf.pl" >"$out/$name.folded"
   "$fg/flamegraph.pl" --title "$name: $(python3 -c "import json; print(json.load(open('$out/$name.loadgen.json'))['checks_per_s'])") checks/s" \
     "$out/$name.folded" >"$out/$name.svg"
-  "$perf" report -i "$out/$name.perf.data" --no-children --sort sym --stdio 2>/dev/null | grep -v '^#' | grep -v '^$' |
-    head -25 >"$out/$name.top.txt"
+  "$perf" report -i "$out/$name.perf.data" --no-children --sort sym --stdio -g none 2>/dev/null | grep -v '^#' |
+    grep -v '^$' | head -25 >"$out/$name.top.txt" || true  # head closes the pipe early
   tools/profile_summary.py "$out/$name.folded" | tee "$out/$name.summary.txt"
   rm -f "$out/$name.perf.data"
 }
