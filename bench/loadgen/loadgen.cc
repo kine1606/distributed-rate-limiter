@@ -2,8 +2,9 @@
 // Check calls outstanding for a fixed time and prints one JSON line: calls/s and latency percentiles.
 // Faster than ghz, so at high load the limiter, not the client, is the limit.
 //   loadgen <target> <rule> <seconds> [channels=8] [in_flight_per_channel=128] [keys=10000] [warmup_s=5]
-//           [batch=1] [rate=0] [key_prefix=cust:]
-// Each check picks cust:1..keys uniformly; a call has a 1 s deadline. Each channel is its own TCP
+//           [batch=1] [rate=0] [key_prefix=cust:] [dist=uniform|zipf]
+// Each check picks cust:1..keys uniformly, or with dist=zipf by a Zipf law of exponent 0.99 (as YCSB),
+// so a few keys get most calls; keys=1 is one hot key. A call has a 1 s deadline. Each channel is its own TCP
 // connection. Latency is measured from send to reply (closed loop: Week 5 adds open-loop timing).
 // batch > 1 sends CheckBatch calls of that many checks: calls_per_s counts calls, checks_per_s checks.
 // rule "envoy:<domain>" loads envoyproxy/ratelimit instead: one descriptor {cust: N} per check, a
@@ -38,6 +39,18 @@ using Clock = std::chrono::steady_clock;
 
 // Log-scale latency buckets: 16 per doubling of microseconds (about 4% resolution), up to ~16 s.
 constexpr int kBucketsPerDoubling = 16, kBuckets = 24 * kBucketsPerDoubling;
+
+// Which key a call uses (1..n): uniform, or Zipf from a precomputed cumulative table.
+struct KeyPicker {
+  int n = 10'000;
+  std::vector<double> cdf;  // empty: uniform
+  int operator()(std::mt19937_64& rng) const {
+    if (cdf.empty()) return std::uniform_int_distribution<int>(1, n)(rng);
+    const double u = std::uniform_real_distribution<double>(0, cdf.back())(rng);
+    return static_cast<int>(std::upper_bound(cdf.begin(), cdf.end(), u) - cdf.begin()) + 1;
+  }
+};
+KeyPicker g_key;  // set in main, read-only after
 int Bucket(double us) {
   if (us < 1) return 0;
   return std::min(kBuckets - 1, static_cast<int>(std::log2(us) * kBucketsPerDoubling));
@@ -68,7 +81,7 @@ struct Slot {
   std::function<void()> on_finished;
 
   std::string prefix = "cust:";
-  std::string Key() { return prefix + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)); }
+  std::string Key() { return prefix + std::to_string(g_key(rng)); }
 
   void Issue() {
     ctx = std::make_unique<grpc::ClientContext>();
@@ -79,7 +92,7 @@ struct Slot {
       for (int i = 0; i < batch; ++i) {
         auto* e = rls_req.add_descriptors()->add_entries();
         e->set_key("cust");
-        e->set_value(std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)));
+        e->set_value(std::to_string(g_key(rng)));
       }
       start = Clock::now();
       rls->async()->ShouldRateLimit(ctx.get(), &rls_req, &rls_resp, [this](grpc::Status s) { Done(s); });
@@ -229,7 +242,7 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
         c->measure_from = measure_from;
         c->measured = measured;
         c->ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-        c->req.set_key(prefix + std::to_string(std::uniform_int_distribution<int>(1, keys)(rng)));
+        c->req.set_key(prefix + std::to_string(g_key(rng)));
         c->req.set_rule(rule);
         ++st.outstanding;
         if (measured) ++st.sent;
@@ -278,7 +291,7 @@ int main(int argc, char** argv) {
   if (argc < 4) {
     std::fprintf(stderr,
                  "usage: loadgen <target> <rule> <seconds> [channels] [in_flight] [keys] [warmup_s] [batch] [rate] "
-                 "[key_prefix]\n");
+                 "[key_prefix] [dist=uniform|zipf]\n");
     return 2;
   }
   const std::string target = argv[1], rule = argv[2];
@@ -290,6 +303,16 @@ int main(int argc, char** argv) {
   const int batch = argc > 8 ? std::stoi(argv[8]) : 1;
   const double rate = argc > 9 ? std::stod(argv[9]) : 0;
   const std::string prefix = argc > 10 ? argv[10] : "cust:";
+  const std::string dist = argc > 11 ? argv[11] : "uniform";
+  g_key.n = keys;
+  if (dist == "zipf") {
+    g_key.cdf.resize(static_cast<std::size_t>(keys));
+    double sum = 0;
+    for (int i = 0; i < keys; ++i) g_key.cdf[static_cast<std::size_t>(i)] = sum += 1.0 / std::pow(i + 1, 0.99);
+  } else if (dist != "uniform") {
+    std::fprintf(stderr, "dist must be uniform or zipf\n");
+    return 2;
+  }
 
   const bool envoy = rule.starts_with("envoy:");
   std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>> stubs;
