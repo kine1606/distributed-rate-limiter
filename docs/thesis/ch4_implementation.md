@@ -287,11 +287,11 @@ The measured overhead of metrics was within noise.
 
 ## 4.7 Testing
 
-*Table 4.3: Tests by kind (236 in all; every one passes in release, ASan and TSan).*
+*Table 4.3: Tests by kind (239 in all; every one passes in release, ASan and TSan).*
 
 | Kind | Count | Against | Examples |
 | --- | --- | --- | --- |
-| Unit | 185 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines |
+| Unit | 188 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines |
 | Script | 33 | a real Redis (port 6380) | each algorithm's limits, request ids, overage, clock jumps, day rollover |
 | Integration | 18 | the three-master cluster | exactly 200 of 400 concurrent calls; plan changes reaching two instances; leased quota on four instances; a killed subscription coming back |
 
