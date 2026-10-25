@@ -3,8 +3,9 @@
 // (CompositeCore over StrictCore or LeasedCore, PlanStore, DenyCache) on a fake Redis that executes
 // the scripts' rules (lua/token_bucket.lua, quota.lua, return_lease.lua) under a fake clock.
 //
-// 1. Exact plans: every answer and every usage event must equal a reference model that states the
-//    product rules of Chapter 3, 3.4 in one sequential function, written from those rules.
+// 1. Exact plans: every answer, every usage event and every alert must equal a reference model that
+//    states the product rules of Chapter 3, 3.4 and 3.9 in one sequential function, written from those
+//    rules: daily and monthly periods, boosts, prepaid top-ups, overage policies, alerts.
 // 2. Leased quota (plans of 100,000 a day or more) admits differently from the exact path by design,
 //    so it is checked against its bounds instead (3.4.5): Redis never grants beyond the plan, and
 //    what N instances admitted is what Redis granted minus at most N x C units still held in leases.
@@ -49,6 +50,31 @@ void Advance(std::int64_t ms) { g_now_ns += ms * 1'000'000; }
 constexpr std::int64_t kDayMs = 86'400'000;
 constexpr std::int64_t kIdTtlMs = 300'000;
 
+// The period a quota counts in at `now`: the UTC day, or the UTC calendar month numbered as quota.lua
+// does (year * 12 + month - 1), with the ms until it ends and its name ("d<day>" or "m<month>").
+struct Period {
+  bool monthly;
+  std::int64_t id, reset_after_ms;
+  std::string name;
+};
+Period PeriodOf(bool monthly, std::int64_t now) {
+  if (!monthly) return {false, now / kDayMs, (now / kDayMs + 1) * kDayMs - now, "d" + std::to_string(now / kDayMs)};
+  using namespace std::chrono;
+  const sys_days day{floor<days>(sys_time<milliseconds>(milliseconds(now)))};
+  const year_month_day ymd{day};
+  const sys_days next{year_month_day{(ymd.year() / ymd.month() / 1) + months(1)}};
+  const std::int64_t id = static_cast<int>(ymd.year()) * 12LL + static_cast<unsigned>(ymd.month()) - 1;
+  return {true, id, duration_cast<milliseconds>(next.time_since_epoch()).count() - now, "m" + std::to_string(id)};
+}
+
+// One message on rl-alerts.
+struct Alert {
+  std::string customer, event;
+  std::int64_t used, over, limit;
+  std::string period;
+  bool operator==(const Alert&) const = default;
+};
+
 using Fields = std::unordered_map<std::string, std::string>;
 
 // ---- A fake Redis that runs the scripts' rules (transcribed from lua/) on the fake clock ----
@@ -57,6 +83,7 @@ class ScriptRedis final : public RedisBackend {
  public:
   bool down = false;                   // every call fails, as with a dead master
   std::map<std::string, Fields> hashes;  // plan hashes, by key
+  std::vector<Alert> alerts;           // published on rl-alerts
 
   void Eval(const Rule& rule, std::string_view key, std::uint32_t requested, std::string_view request_id,
             ScriptCallback done) override {
@@ -105,7 +132,9 @@ class ScriptRedis final : public RedisBackend {
   // Units the quota counter `rule|key` granted per UTC day: {day: (used, overage_used)}.
   std::map<std::int64_t, std::pair<std::int64_t, std::int64_t>> Granted(const std::string& counter) const {
     auto out = history_.count(counter) ? history_.at(counter) : decltype(history_)::mapped_type{};
-    if (const auto it = counters_.find(counter); it != counters_.end()) out[it->second.day] = {it->second.used, it->second.over};
+    if (const auto it = counters_.find(counter); it != counters_.end() && !it->second.monthly) {
+      out[it->second.period] = {it->second.used, it->second.over};
+    }
     return out;
   }
 
@@ -115,7 +144,8 @@ class ScriptRedis final : public RedisBackend {
     std::int64_t last_ms, expires_ms;
   };
   struct CounterState {
-    std::int64_t day, used, over;
+    bool monthly;
+    std::int64_t period, used, over, alerts;
   };
   struct StoredAnswer {
     bool allowed;
@@ -152,10 +182,14 @@ class ScriptRedis final : public RedisBackend {
 
   // lua/quota.lua.
   ScriptResult Quota(const Rule& rule, const std::string& key, std::uint32_t requested, const std::string& id) {
-    const std::int64_t now = NowMs(), day = now / kDayMs, limit = rule.limit, cost = requested,
-                       extra = rule.overage_extra;
+    const std::int64_t now = NowMs(), cost = requested, extra = rule.overage_extra;
+    const Period p = PeriodOf(rule.quota_period == QuotaPeriod::kMonth, now);
+    std::int64_t limit = rule.limit;
+    if (now < rule.boost_until_ms) limit += rule.boost;
+    if (rule.topup > 0 && rule.topup_period == p.name) limit += rule.topup;
     ScriptResult r;
-    r.reset_after_ms = static_cast<std::uint32_t>((day + 1) * kDayMs - now);
+    r.reset_after_ms = static_cast<std::uint32_t>(p.reset_after_ms);
+    r.limit = static_cast<std::uint32_t>(limit);
     const std::string counter = rule.name + "|" + key;
     if (!id.empty()) {
       if (const auto it = answers_.find(counter + "|" + id); it != answers_.end() && now <= it->second.expires_ms) {
@@ -167,10 +201,10 @@ class ScriptRedis final : public RedisBackend {
         return r;
       }
     }
-    CounterState& c = counters_.try_emplace(counter, CounterState{day, 0, 0}).first->second;
-    if (c.day != day) {
-      history_[counter][c.day] = {c.used, c.over};
-      c = {day, 0, 0};
+    CounterState& c = counters_.try_emplace(counter, CounterState{p.monthly, p.id, 0, 0, 0}).first->second;
+    if (c.monthly != p.monthly || c.period != p.id) {  // a new period, or the other kind of period
+      if (!c.monthly) history_[counter][c.period] = {c.used, c.over};
+      c = {p.monthly, p.id, 0, 0, 0};
     }
     bool allowed = false, overage = false;
     if (c.used + cost <= limit) {
@@ -189,6 +223,15 @@ class ScriptRedis final : public RedisBackend {
         allowed = overage = true;
       }
     }
+    const auto alert = [&](std::int64_t bit, const char* event) {
+      if ((c.alerts & bit) != 0) return;
+      c.alerts |= bit;
+      alerts.push_back({key, event, c.used, c.over, limit, p.name});
+    };
+    if (limit > 0 && c.used * 5 >= limit * 4) alert(1, "quota.80");
+    if (limit > 0 && c.used >= limit) alert(2, "quota.100");
+    if (c.over > 0) alert(4, "overage.started");
+    if (!allowed) alert(8, "quota.denied");
     const std::int64_t remaining = std::max<std::int64_t>(0, limit - c.used);
     if (!id.empty()) answers_[counter + "|" + id] = {allowed, remaining, overage, now + kIdTtlMs};
     r.allowed = allowed;
@@ -221,6 +264,11 @@ struct ModelPlan {  // a missing hash or field means Free (3.1.3)
   Overage overage = Overage::kHard;
   std::uint32_t extra = 0;
   bool suspended = false, fail_open = false;
+  bool monthly = false;                    // the quota is per UTC calendar month (3.9.3)
+  std::uint32_t boost = 0;                 // extra units while now < boost_until_ms
+  std::int64_t boost_until_ms = 0;
+  std::uint32_t topup = 0;                 // prepaid units for the period named topup_period only
+  std::string topup_period;
 };
 
 struct Usage {
@@ -237,6 +285,7 @@ class Model {
   bool down = false;
   std::map<std::string, ModelPlan> plans;  // what Redis holds; absent = Free
   std::vector<Usage> usage;
+  std::vector<Alert> alerts;  // what the quota script published
 
   // A plan-change message arrived (only with the plan cache, as PlanListener does it).
   void Announce(const std::string& c) { denial_.erase(c); }
@@ -252,8 +301,10 @@ class Model {
     double tokens_m;
     std::int64_t last_ms, expires_ms;
   };
-  struct Day {
-    std::int64_t day = -1, used = 0, over = 0;
+  struct Counter {  // one customer's quota in its current period
+    bool monthly = false;
+    std::int64_t period = -1, used = 0, over = 0;
+    std::uint32_t alerted = 0;  // 1: 80%, 2: the limit, 4: overage, 8: a denial; once a period
   };
   struct Answer {
     bool allowed;
@@ -261,12 +312,15 @@ class Model {
     bool overage;
     std::int64_t expires_ms;
   };
+  using QuotaTerms = std::tuple<std::uint32_t, std::uint32_t, Overage, bool, std::uint32_t, std::int64_t, std::uint32_t, std::string>;
   struct Denial {
     std::int64_t until_ms;
-    std::tuple<std::uint32_t, std::uint32_t, Overage> terms;  // a denial holds only under its plan's quota terms
+    QuotaTerms terms;  // a denial holds only under its plan's quota terms
   };
 
-  static std::tuple<std::uint32_t, std::uint32_t, Overage> Terms(const ModelPlan& p) { return {p.daily, p.extra, p.overage}; }
+  static QuotaTerms Terms(const ModelPlan& p) {
+    return {p.daily, p.extra, p.overage, p.monthly, p.boost, p.boost_until_ms, p.topup, p.topup_period};
+  }
 
   // Redis cannot answer: a paid plan admits unverified, anything else is unavailable for a second.
   static CheckResult Unreachable(const ModelPlan& p) {
@@ -326,20 +380,24 @@ class Model {
       return r;
     }
     tokens -= cost * 1000.0;
-    // 4. The daily quota of the current UTC day under the plan's overage policy; a request id
-    // decided in the last five minutes gets its first answer again and is not counted.
-    const std::int64_t day = now / kDayMs;
+    // 4. The quota of the current period (a UTC day, or a UTC calendar month) under the plan's overage
+    // policy. The limit in force adds a boost until it ends and a top-up bought for this period. A
+    // request id decided in the last five minutes gets its first answer again and is not counted.
+    const Period period = PeriodOf(plan.monthly, now);
+    std::int64_t limit = plan.daily;
+    if (now < plan.boost_until_ms) limit += plan.boost;
+    if (plan.topup > 0 && plan.topup_period == period.name) limit += plan.topup;
     CheckResult r;
-    r.limit = plan.daily;
-    r.reset_after_ms = static_cast<std::uint32_t>((day + 1) * kDayMs - now);
+    r.limit = static_cast<std::uint32_t>(limit);
+    r.reset_after_ms = static_cast<std::uint32_t>(period.reset_after_ms);
     Answer a{};
     if (const auto it = answers_.find(c + "|" + id); !id.empty() && it != answers_.end() && now <= it->second.expires_ms) {
       a = it->second;
       r.replayed = true;
     } else {
-      Day& d = days_[c];
-      if (d.day != day) d = {day, 0, 0};
-      const std::int64_t room = static_cast<std::int64_t>(plan.daily) - d.used;
+      Counter& d = counters_[c];
+      if (d.monthly != period.monthly || d.period != period.id) d = {period.monthly, period.id, 0, 0, 0};
+      const std::int64_t room = limit - d.used;
       if (cost <= room) {  // within the plan, whatever the policy
         d.used += cost;
         a.allowed = true;
@@ -354,7 +412,17 @@ class Model {
           a.allowed = a.overage = true;
         }
       }
-      a.remaining = std::max<std::int64_t>(0, static_cast<std::int64_t>(plan.daily) - d.used);
+      // Alerts: each threshold the first time this period, against the limit in force.
+      const auto alert = [&](std::uint32_t bit, const char* event) {
+        if ((d.alerted & bit) != 0) return;
+        d.alerted |= bit;
+        alerts.push_back({c, event, d.used, d.over, limit, period.name});
+      };
+      if (limit > 0 && 5 * d.used >= 4 * limit) alert(1, "quota.80");
+      if (limit > 0 && d.used >= limit) alert(2, "quota.100");
+      if (d.over > 0) alert(4, "overage.started");
+      if (!a.allowed) alert(8, "quota.denied");
+      a.remaining = std::max<std::int64_t>(0, limit - d.used);
       a.expires_ms = now + kIdTtlMs;
       if (!id.empty()) answers_[c + "|" + id] = a;
     }
@@ -372,7 +440,7 @@ class Model {
   const bool plan_cache_;
   std::map<std::string, ModelPlan> last_read_;
   std::map<std::string, Bucket> bucket_;
-  std::map<std::string, Day> days_;
+  std::map<std::string, Counter> counters_;
   std::map<std::string, Answer> answers_;
   std::map<std::string, Denial> denial_;
 };
@@ -419,14 +487,38 @@ std::pair<std::optional<Fields>, ModelPlan> RandomPlan(std::mt19937_64& rng) {
   m.extra = pick(0, 15);
   m.fail_open = pick(0, 1) == 1;
   static constexpr const char* kPolicy[] = {"hard", "grace", "cap"};
-  return {Fields{{"plan", "pay"},
-                 {"daily", std::to_string(m.daily)},
-                 {"burst", std::to_string(m.burst)},
-                 {"refill", std::to_string(m.refill)},
-                 {"overage", kPolicy[static_cast<int>(m.overage)]},
-                 {"extra", std::to_string(m.extra)},
-                 {"failure", m.fail_open ? "open" : "closed"}},
-          m};
+  Fields f{{"plan", "pay"},
+           {"daily", std::to_string(m.daily)},
+           {"burst", std::to_string(m.burst)},
+           {"refill", std::to_string(m.refill)},
+           {"overage", kPolicy[static_cast<int>(m.overage)]},
+           {"extra", std::to_string(m.extra)},
+           {"failure", m.fail_open ? "open" : "closed"}};
+  // Phase 2 terms (3.9): a monthly period, a boost (some already over), a top-up (some bought for
+  // another period, some with a malformed period, which gives no top-up at all).
+  if (pick(0, 6) == 0) {
+    m.monthly = true;
+    f["period"] = "month";
+  }
+  if (pick(0, 4) == 0) {
+    m.boost = pick(1, 10);
+    m.boost_until_ms = NowMs() + std::uniform_int_distribution<std::int64_t>(-60'000, 3'600'000)(rng);
+    f["boost"] = std::to_string(m.boost);
+    f["boost_until"] = std::to_string(m.boost_until_ms);
+  }
+  if (pick(0, 4) == 0) {
+    const std::uint32_t units = pick(1, 10);
+    const Period now = PeriodOf(m.monthly, NowMs());
+    const int which = static_cast<int>(pick(0, 9));
+    const std::string period = which < 7 ? now.name : which < 9 ? (now.monthly ? "m" : "d") + std::to_string(now.id - 1) : "x1";
+    if (period != "x1") {
+      m.topup = units;
+      m.topup_period = period;
+    }
+    f["topup"] = std::to_string(units);
+    f["topup_period"] = period;
+  }
+  return {f, m};
 }
 
 std::int64_t RandomStep(std::mt19937_64& rng) {  // how far the clock moves, in ms
@@ -438,15 +530,19 @@ std::int64_t RandomStep(std::mt19937_64& rng) {  // how far the clock moves, in 
   if (kind < 95) return ms(60'000, 600'000);  // past a stored answer's five minutes
   if (kind < 97) return kIdTtlMs + ms(-1, 1);  // a retry at the edge of the five minutes
   const std::int64_t to_midnight = kDayMs - NowMs() % kDayMs;
-  if (kind < 99) return std::max<std::int64_t>(0, to_midnight + ms(-1500, 1500));  // around the reset
-  return to_midnight + ms(0, 3 * 3'600'000);  // into the next UTC day
+  if (kind < 98) return std::max<std::int64_t>(0, to_midnight + ms(-1500, 1500));  // around the reset
+  if (kind < 99) return to_midnight + ms(0, 3 * 3'600'000);  // into the next UTC day
+  // Around the end of the month, so monthly quotas roll over too.
+  return std::max<std::int64_t>(0, PeriodOf(true, NowMs()).reset_after_ms + ms(-1500, 1500));
 }
 
 // What the histories reached, summed over every seed of a run: a pass only means something if every
 // branch was taken.
 struct Coverage {
   std::map<Reason, std::uint64_t> reasons;
+  std::map<std::string, std::uint64_t> alerts;
   std::uint64_t checks = 0, replayed = 0, plan_changes = 0, outages = 0, rollovers = 0;
+  std::uint64_t month_rollovers = 0, monthly_checks = 0, boosted_checks = 0, topped_up_checks = 0;
 };
 Coverage g_coverage;
 struct LeasedCoverage {
@@ -517,24 +613,65 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
       core.Check(CheckRequest{c, "customer", cost, id}, [&got](const CheckResult& r) { got = r; });
       const CheckResult want = model.Check(c, cost, id);
       if (!got) return "step " + std::to_string(step) + " (" + what + "): no answer";
-      if (!Same(*got, want) || usage != model.usage) {
+      if (!Same(*got, want) || usage != model.usage || redis.alerts != model.alerts) {
         std::string trail;
         for (const auto& s : recent) trail += "\n    " + s;
+        std::string alerts;
+        if (redis.alerts != model.alerts) {
+          alerts = " (alerts differ: script " + std::to_string(redis.alerts.size()) + ", model " +
+                   std::to_string(model.alerts.size());
+          if (!redis.alerts.empty()) alerts += ", script's last " + redis.alerts.back().event;
+          if (!model.alerts.empty()) alerts += ", model's last " + model.alerts.back().event;
+          alerts += ")";
+        }
         return "step " + std::to_string(step) + " (" + what + "): got " + Show(*got) + ", model " + Show(want) +
-               (usage != model.usage ? " (usage events differ)" : "") + "\n  last steps:" + trail;
+               (usage != model.usage ? " (usage events differ)" : "") + alerts + "\n  last steps:" + trail;
       }
       what += " -> " + Show(want);
       ++g_coverage.checks;
       ++g_coverage.reasons[want.reason];
       g_coverage.replayed += want.replayed;
+      if (const auto it = model.plans.find(c); it != model.plans.end()) {
+        const ModelPlan& mp = it->second;
+        g_coverage.monthly_checks += mp.monthly;
+        g_coverage.boosted_checks += mp.boost > 0 && NowMs() < mp.boost_until_ms;
+        g_coverage.topped_up_checks += mp.topup > 0 && mp.topup_period == PeriodOf(mp.monthly, NowMs()).name;
+      }
     } else if (op < 87) {
       const std::int64_t ms = RandomStep(rng);
       g_coverage.rollovers += (NowMs() + ms) / kDayMs != NowMs() / kDayMs;
+      g_coverage.month_rollovers += PeriodOf(true, NowMs() + ms).id != PeriodOf(true, NowMs()).id;
       Advance(ms);
       what = "advance " + std::to_string(ms) + " ms";
     } else if (op < 98) {
       if (redis.down) continue;  // the admin tool cannot write while Redis is down
-      auto [fields, plan] = RandomPlan(rng);
+      std::optional<Fields> fields;
+      ModelPlan plan;
+      if (op >= 94 && redis.hashes.count(PlanKey(c)) && !model.plans[c].suspended) {
+        // What the management API does to a plan it leaves otherwise alone (3.9.3): extend a boost
+        // with the same units, end it, or add units to this period's top-up.
+        fields = redis.hashes[PlanKey(c)];
+        plan = model.plans[c];
+        const int change = std::uniform_int_distribution<int>(0, 2)(rng);
+        if (change == 0) {
+          plan.boost = plan.boost ? plan.boost : 3;
+          plan.boost_until_ms = NowMs() + std::uniform_int_distribution<std::int64_t>(1'000, 3'600'000)(rng);
+        } else if (change == 1) {
+          plan.boost_until_ms = NowMs();  // ended now; the units stay in the hash
+        } else {
+          const std::string current = PeriodOf(plan.monthly, NowMs()).name;
+          plan.topup = (plan.topup_period == current ? plan.topup : 0) + std::uniform_int_distribution<std::uint32_t>(1, 5)(rng);
+          plan.topup_period = current;
+          (*fields)["topup"] = std::to_string(plan.topup);
+          (*fields)["topup_period"] = current;
+        }
+        if (change < 2) {
+          (*fields)["boost"] = std::to_string(plan.boost);
+          (*fields)["boost_until"] = std::to_string(plan.boost_until_ms);
+        }
+      } else {
+        std::tie(fields, plan) = RandomPlan(rng);
+      }
       if (fields) {
         redis.hashes[PlanKey(c)] = *fields;
         model.plans[c] = plan;
@@ -550,7 +687,12 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
       }
       what = "plan " + c + (fields ? " daily " + std::to_string(plan.daily) + " burst " + std::to_string(plan.burst) +
                                          " policy " + std::to_string(static_cast<int>(plan.overage)) + " extra " +
-                                         std::to_string(plan.extra) + (plan.suspended ? " suspended" : "")
+                                         std::to_string(plan.extra) + (plan.suspended ? " suspended" : "") +
+                                         (plan.monthly ? " monthly" : "") +
+                                         (plan.boost ? " boost " + std::to_string(plan.boost) + " until " +
+                                                           std::to_string(plan.boost_until_ms - NowMs()) + " ms"
+                                                     : "") +
+                                         (plan.topup ? " topup " + std::to_string(plan.topup) + " " + plan.topup_period : "")
                                    : " deleted");
     } else {
       redis.down = model.down = !redis.down;
@@ -560,6 +702,7 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
     recent.push_back(what);
     if (recent.size() > 12) recent.pop_front();
   }
+  for (const Alert& a : model.alerts) ++g_coverage.alerts[a.event];
   return "";
 }
 
@@ -680,6 +823,12 @@ void RunSeeds(const char* label, const std::function<std::string(std::uint64_t)>
     for (const auto& [reason, n] : g_coverage.reasons) {
       std::printf(" %s %llu", kName[static_cast<int>(reason)], static_cast<unsigned long long>(n));
     }
+    std::printf("\n[property]   %llu month rollovers; checks on monthly plans %llu, with a boost %llu, with a top-up %llu; alerts:",
+                static_cast<unsigned long long>(g_coverage.month_rollovers),
+                static_cast<unsigned long long>(g_coverage.monthly_checks),
+                static_cast<unsigned long long>(g_coverage.boosted_checks),
+                static_cast<unsigned long long>(g_coverage.topped_up_checks));
+    for (const auto& [event, n] : g_coverage.alerts) std::printf(" %s %llu", event.c_str(), static_cast<unsigned long long>(n));
     std::printf("\n");
     g_coverage = {};
   }

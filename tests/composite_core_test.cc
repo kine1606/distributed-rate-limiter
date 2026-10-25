@@ -387,6 +387,23 @@ TEST_F(LeasedQuotaTest, PlansBelowTheThresholdAndTheStrictEngineStayExact) {
   EXPECT_EQ(QuotaCalls().size(), 3u);
 }
 
+// Phase 2: a monthly, boosted or topped-up quota takes the exact path whatever its size, since only
+// the script sees the Redis clock that ends a month, a boost or a top-up's period.
+TEST_F(LeasedQuotaTest, MonthlyBoostedOrToppedUpLargePlansStayExact) {
+  const std::vector<std::pair<std::string, std::string>> extras[] = {
+      {{"period", "month"}}, {{"boost", "5000"}, {"boost_until", "9999999999999"}}, {{"topup", "5000"}, {"topup_period", "d20751"}}};
+  for (const auto& more : extras) {
+    redis.calls.clear();
+    for (const auto& [field, value] : more) redis.plan.fields[field] = value;
+    plans.Invalidate("cust:ent");
+    for (int i = 0; i < 3; ++i) EXPECT_TRUE(RunOn(auto_core).allowed);
+    const auto q = QuotaCalls();
+    ASSERT_EQ(q.size(), 3u) << more.front().first;  // one script per check, no lease refill
+    EXPECT_EQ(q.back().amount, 1u) << more.front().first;
+    for (const auto& [field, value] : more) redis.plan.fields.erase(field);
+  }
+}
+
 // The plan is used up as far as leases go: the exact path decides, with the plan's policy and the
 // request id, and a denial is cached as on the strict path.
 TEST_F(LeasedQuotaTest, WhenTheLeaseIsOutTheExactPathDecides) {
