@@ -14,8 +14,8 @@
 #   tools/rlctl merchant-add    <merchant>                          prints a new API key, once
 #   tools/rlctl merchant-revoke <merchant>                          all of its API keys stop working
 # Fields: daily (the quota per period), burst, refill, extra (numbers), overage hard|grace|cap,
-# failure open|closed, period day|month. Applying a plan replaces the customer's whole hash, so custom
-# limits and boosts end with it. Plans: M's catalogue, then tools/plans.sh.
+# failure open|closed, period day|month. Applying a plan replaces the customer's hash, so custom limits
+# and boosts end with it; a top-up already paid for is kept. Plans: M's catalogue, then tools/plans.sh.
 # env: REDIS_HOST=127.0.0.1 REDIS_PORT=7001 (any cluster node).
 set -euo pipefail
 source "$(dirname "$0")/plans.sh"
@@ -108,10 +108,13 @@ case $cmd in
     if [ "$cmd" = create ] && [ "$(cli exists "$key")" != 0 ]; then
       die "$customer already has a plan; use upgrade or downgrade"
     fi
-    # One script, so no limiter can read the hash half written.
+    # One script, so no limiter can read the hash half written; a top-up already paid for is kept (as
+    # the management API does, control/rlcontrol/store.py APPLY).
     # shellcheck disable=SC2086  # the preset is field-value pairs
-    cli eval "redis.call('DEL', KEYS[1]); return redis.call('HSET', KEYS[1], unpack(ARGV))" 1 "$key" \
-      plan "$plan" $fields >/dev/null || die "writing $key failed"
+    cli eval "local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period'); redis.call('DEL', KEYS[1]);
+      redis.call('HSET', KEYS[1], unpack(ARGV));
+      if keep[1] and keep[2] then redis.call('HSET', KEYS[1], 'topup', keep[1], 'topup_period', keep[2]) end
+      return 1" 1 "$key" plan "$plan" $fields >/dev/null || die "writing $key failed"
     announce
     echo "$id: $plan"
     ;;

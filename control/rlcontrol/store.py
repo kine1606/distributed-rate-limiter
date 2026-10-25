@@ -1,0 +1,146 @@
+"""Everything the control plane keeps in Redis, in one place: key names, the plan-hash fields the C++
+server reads (src/plan/plan.h), and the atomic writes. Every change to a customer is written by one
+script on the customer's own hash, then announced on plan-changes, as tools/rlctl does, so every
+limiter drops its cached plan and local denial at once."""
+import hashlib
+import re
+import secrets
+import time
+
+KEYS_HASH = "{rl:merchants}:keys"    # sha256(check key) -> merchant (read by src/server/merchants.h)
+ADMIN_HASH = "{rl:merchants}:admin"  # sha256(management key) -> merchant
+MERCHANTS = "{rl:merchants}:list"    # merchant -> created at, Unix ms
+CHANNEL = "plan-changes"
+MERCHANTS_CHANGED = "!merchants"
+ALERTS = "rl-alerts"                 # published by lua/quota.lua
+QUOTA_RULE = "daily_quota"           # config/rules.yaml: the customer rule's quota
+
+MERCHANT_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")    # as ValidMerchant in src/server/merchants.h
+CUSTOMER_RE = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
+PLAN_RE = re.compile(r"[a-z0-9_-]{1,32}")
+UINT32 = 4_294_967_295
+
+PLAN_FIELDS = ("daily", "burst", "refill", "period", "overage", "extra", "failure")
+OVERAGE_TO_API = {"hard": "hard", "grace": "grace", "cap": "postpaid"}
+OVERAGE_FROM_API = {v: k for k, v in OVERAGE_TO_API.items()}
+ALERT_BITS = ((1, "quota.80"), (2, "quota.100"), (4, "overage.started"), (8, "quota.denied"))
+
+
+def catalog_key(merchant):
+    return f"{{rl:m:{merchant}}}:catalog"
+
+
+def webhook_key(merchant):
+    return f"{{rl:m:{merchant}}}:webhook"
+
+
+def purchases_key(merchant):  # a stream of top-ups, for the invoice (P3)
+    return f"{{rl:m:{merchant}}}:purchases"
+
+
+def idempotency_key(merchant, key):
+    return f"{{rl:m:{merchant}}}:idem:{hashlib.sha256(key.encode()).hexdigest()}"
+
+
+def customer_id(merchant, customer):  # what the limiter calls it (src/server/merchants.h, TenantKey)
+    return f"{merchant}|{customer}"
+
+
+def plan_key(merchant, customer):
+    return f"{{{customer_id(merchant, customer)}}}:plan"
+
+
+def quota_key(merchant, customer):  # src/redis/keys.h, RedisKey
+    return f"{{{customer_id(merchant, customer)}}}:{QUOTA_RULE}:q"
+
+
+def sha256_hex(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def new_key(prefix):
+    return prefix + secrets.token_hex(24)
+
+
+def now_ms(redis):
+    seconds, micros = redis.time()
+    return int(seconds) * 1000 + int(micros) // 1000
+
+
+# ---- atomic writes, each on one customer's plan hash ----
+
+# Creates the hash unless it exists. ARGV: field value ...
+CREATE = """
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('HSET', KEYS[1], unpack(ARGV))
+return 1
+"""
+
+# Replaces the hash with a plan's fields, keeping a top-up already paid for. ARGV: field value ...
+APPLY = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period')
+redis.call('DEL', KEYS[1])
+redis.call('HSET', KEYS[1], unpack(ARGV))
+if keep[1] and keep[2] then redis.call('HSET', KEYS[1], 'topup', keep[1], 'topup_period', keep[2]) end
+return 1
+"""
+
+# Sets some fields of an existing hash. ARGV: field value ...
+UPDATE = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HSET', KEYS[1], unpack(ARGV))
+return 1
+"""
+
+# Boost of ARGV[1] units for ARGV[2] minutes from now by the Redis clock. Returns its end, or 0.
+BOOST = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+local t = redis.call('TIME')
+local until_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000) + tonumber(ARGV[2]) * 60000
+redis.call('HSET', KEYS[1], 'boost', ARGV[1], 'boost_until', until_ms)
+return until_ms
+"""
+
+# Adds ARGV[1] prepaid units for the current period: ARGV[2] if the plan counts per day, ARGV[3] if
+# per month. A top-up for an earlier period is replaced. Returns the period's total, or -1.
+TOPUP = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local period = redis.call('HGET', KEYS[1], 'period') == 'month' and ARGV[3] or ARGV[2]
+local cur = redis.call('HMGET', KEYS[1], 'topup', 'topup_period')
+local units = tonumber(ARGV[1])
+if cur[2] == period then units = units + (tonumber(cur[1]) or 0) end
+redis.call('HSET', KEYS[1], 'topup', units, 'topup_period', period)
+return {units, period}
+"""
+
+# Suspends, remembering the plan, or resumes it; the numbers are kept either way.
+SUSPEND = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+local plan = redis.call('HGET', KEYS[1], 'plan') or 'free'
+if plan ~= 'suspended' then redis.call('HSET', KEYS[1], 'resume_plan', plan, 'plan', 'suspended') end
+return 1
+"""
+RESUME = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HGET', KEYS[1], 'plan') == 'suspended' then
+  redis.call('HSET', KEYS[1], 'plan', redis.call('HGET', KEYS[1], 'resume_plan') or 'free')
+  redis.call('HDEL', KEYS[1], 'resume_plan')
+end
+return 1
+"""
+
+
+def flatten(fields):
+    out = []
+    for k, v in fields.items():
+        out += [k, str(v)]
+    return out
+
+
+def announce(redis, merchant, customer):
+    redis.publish(CHANNEL, customer_id(merchant, customer))
+
+
+def decode_alerts(bits):
+    return [name for bit, name in ALERT_BITS if int(bits) & bit]

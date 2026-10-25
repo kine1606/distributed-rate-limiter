@@ -131,3 +131,7 @@ Desktop.ini
 
 # Python bytecode (tests/eval imports tools/usage_report.py)
 __pycache__/
+
+# control service environment (control/setup.sh)
+control/.venv/
+__pycache__/

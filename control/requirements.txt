@@ -1,0 +1,5 @@
+# The management API and the alert notifier (control/README.md). Pinned; installed by control/setup.sh.
+fastapi==0.115.6
+uvicorn==0.32.1
+redis==5.2.1
+httpx==0.28.1
