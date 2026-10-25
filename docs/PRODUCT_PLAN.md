@@ -214,17 +214,42 @@ Gate status: met.
 
 ### Week P2 (Nov 2 to 8): control plane and the emergency policies
 
-- [ ] Management API (FastAPI, OpenAPI). Platform admin: merchants. Merchants: plans, customers,
-      overrides, boosts, suspend, current usage. It writes Redis and publishes `plan-changes` (12 h).
-- [ ] Policies per plan, overridable per customer: hard; grace; postpaid up to a spending cap; prepaid
-      top-up (6 h).
-- [ ] Merchant webhooks at 80% and 100%, at overage start and at the cap, sent from usage events, never
-      on the request path (6 h).
-- [ ] The property tests' reference model extended with overrides, boosts, monthly periods, postpaid
-      and caps (6 h).
+Done 2026-10-25 on branch `feat/merchants`:
 
-Gate: the advisor's three options shown end to end through the API, configurable per plan and per
-customer, changed live; property tests equal the model.
+- [x] Management API (`control/rlcontrol/api.py`, FastAPI, OpenAPI page at `/docs`).
+  - *The operator:* merchants, and rotating or revoking their keys.
+  - *A merchant:* plans, customers, custom limits, boosts, top-ups, suspension, usage, its webhook.
+  - *How:* every write is one atomic script on the customer's hash, then a `plan-changes` message.
+  - *Credentials:* a separate management key per merchant, hashed; the merchant always comes from the
+    key, never from the URL.
+- [x] Policies per plan, overridable per customer: hard; grace; postpaid up to a spending cap (`cap`,
+      named `postpaid` in the API); and prepaid top-ups.
+  - *Top-ups:* bought for the current period only, kept across plan changes, and idempotent with an
+    `Idempotency-Key`.
+  - *For billing:* each purchase is recorded in `{rl:m:<merchant>}:purchases`.
+- [x] Alerts:
+  - *What:* `lua/quota.lua` publishes on `rl-alerts` at 80%, at the limit, at the first overage and
+    at the first denial, each once a period, and never for a replay.
+  - *Delivery:* `control/rlcontrol/notifier.py` sends them to the merchant's webhook: signed
+    (HMAC-SHA256 with a timestamp), retried with backoff, not retried on a 4xx.
+  - *Safety:* private and internal addresses are refused, at registration and before each delivery.
+  - *The cost:* at most once while the notifier is down; the same state stays readable through the API.
+- [x] The property tests' model extended with monthly periods, boosts, top-ups and alerts:
+  - *Coverage:* 2,000 seeds per configuration, 571,131 checks each, 1,138 month rollovers.
+  - *Proof they can fail:* three planted bugs are caught. Writing them exposed a gap: the histories
+    never changed a boost alone, so new operations now extend or end a boost, or add a top-up, alone.
+
+Gate status: met (`control/tests/test_e2e.py`, with the real limiter):
+- *The three answers through gRPC:* hard 10 then blocked; grace 10 + 1 free; postpaid 10 + 3 billed,
+  then blocked.
+- *Changed live per customer through the API,* each past the limiter's local denial: hard switched to
+  postpaid, a boost, a top-up.
+- *All 11 alerts* delivered and signed.
+- *Isolation:* another merchant's customer of the same id untouched; a revoked key locked out.
+- *Property tests* equal the model.
+
+Tests: 4 new in C++ (257 pass in release, ASan and TSan; the property tests extended) and 18 in
+`control/run_tests.sh`.
 
 ### Week P3 (Nov 9 to 15): metering, billing, backend protection
 

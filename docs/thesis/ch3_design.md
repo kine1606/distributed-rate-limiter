@@ -948,8 +948,9 @@ exact path; plain daily plans keep the leased path of 3.4.5.
 | --- | --- | --- | --- |
 | Block | `hard` | an outage at the worst moment | yes (3.4.2) |
 | A bounded grace | `grace`, e.g. +10% | survives small spikes, free | yes (3.4.2) |
-| Allow now, bill later | `cap`: counted exactly as billable overage, up to a cap | no outage; pays for the overage | counting yes; the spending cap per customer, alerts and the invoice are next |
+| Allow now, bill later | `cap` (`postpaid` in the API): counted exactly as billable overage, up to a spending cap | no outage; pays for the overage | yes, per plan and per customer (3.9.5); the invoice is next |
 | A boost | granted by the merchant, until a time | no outage, on the merchant's terms | yes (3.9.3) |
+| A prepaid top-up | bought by the customer, for this period | no outage; paid in advance | yes (3.9.5) |
 
 The recommended default:
 - *Free plans:* block.
@@ -958,3 +959,42 @@ The recommended default:
 
 Billing a card later never means storing card numbers. A payment provider keeps the card; the service
 keeps only the provider's customer id.
+
+### 3.9.5 Managing the service
+
+A management API (`control/`) changes what the limiters answer, while the limiters answer checks. The
+two meet only in Redis. Every change is one atomic script on the customer's hash, followed by the
+plan-change message of 3.4.4. The API's main choices, each against the alternative it rejects:
+
+- **Two credentials per merchant.**
+  - *The two keys:* a check key for its gateway's calls to the limiter, and a management key for the
+    API, both stored as hashes.
+  - *Why separate:* a gateway that leaks its key cannot change plans.
+  - *Isolation:* the merchant always comes from the credential, never from the URL.
+  - *Rejected:* one key for both; or the merchant in the path, checked against the key, where a single
+    missing check would open another merchant's customers.
+- **Top-ups belong to a period.**
+  - *How:* the plan hash holds the prepaid units and the period they were bought for. The script adds
+    them only in that period, by the Redis clock, so they end without a cleanup job.
+  - *What survives:* moving a customer to another plan keeps them, since they were paid for.
+  - *Retries:* a top-up request may carry an idempotency key, so a client retrying after a timeout
+    does not buy twice. Each purchase is also recorded for the invoice.
+  - *Rejected:* a separate counter of prepaid units, which a plan change or a new period would have
+    to reset in a second place.
+- **Alerts come from the quota script.**
+  - *How:* the script is the one place that sees a threshold being crossed atomically. It publishes
+    the first time in a period that a customer reaches 80% of its limit in force, reaches the limit,
+    goes into billed overage, or is denied. A bitmask in the counter makes each alert once a period,
+    and a replayed answer sends none.
+  - *Delivery:* a separate notifier sends each alert to the merchant's webhook, signed, and retries
+    on errors, so nothing is added to the limiter's request path.
+  - *The cost:* delivery is at most once while the notifier is down, because Pub/Sub keeps no
+    messages. The same state stays readable through the API.
+  - *Rejected:* a scan of counters for crossings, which grows with the number of customers and
+    reports late.
+- **The platform calls only public addresses.**
+  - *Why:* a webhook URL is chosen by the merchant, so it could point the platform at its own
+    internal network.
+  - *How:* URLs that resolve to private, loopback, link-local or reserved addresses are refused, when
+    registered and again before every delivery, and redirects are not followed.
+

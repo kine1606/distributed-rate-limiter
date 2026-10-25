@@ -70,7 +70,9 @@ preset. Nothing in the limiter changes; the next request for that customer reads
 
 - **Writes:** `HSET {cust:42}:plan plan free daily 200 burst 2 refill 2 overage hard extra 0 failure closed`
 - **Phase 2 fields** (docs/PRODUCT_PLAN.md): `period day|month` (`daily` is then the quota per month), `boost` and
-  `boost_until` (extra units until Unix ms, Redis clock). A merchant's customer is `{<merchant>|cust:42}:plan`.
+  `boost_until` (extra units until Unix ms, Redis clock), `topup` and `topup_period` (prepaid units for the period
+  `d<day>` or `m<month>` only; P2). A merchant's customer is `{<merchant>|cust:42}:plan`. Written by the
+  management API (`control/`) or `tools/rlctl`.
 - **Limiter:** a customer with no plan hash is treated as Free, so even a request that races the
   sign-up is safe.
 - **You build:** `rlctl create` (Week 4, done), `seed_plans` for bulk test data (Week 2).
