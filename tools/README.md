@@ -15,7 +15,7 @@ not on the hot path.
 | --- | --- | --- |
 | `plans.sh` | The plan catalogue (`PLAN[name]`), sourced by `seed_plans.sh` and `rlctl` | 4 |
 | `seed_plans.sh` | Create many customers on Free, Pay and Enterprise for tests and benchmarks | 2 |
-| `rlctl` (bash, `redis-cli`) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer | 4 |
+| `rlctl` (bash, `redis-cli`) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer; Phase 2: `--merchant`, `set` (custom limits), `boost`, `plan-define` (a merchant's catalogue), `merchant-add` and `merchant-revoke` (API keys, stored hashed) | 4, P1 |
 | `usage_report.py` | Sum usage-event files per customer across instances (`--self-check` tests it) | 4 |
 | `plots/*.py` | Turn `results/` files into thesis figures | 7, 8 |
 

@@ -81,3 +81,14 @@ grpc::ServerUnaryReactor* RateLimiterService::Check(grpc::CallbackServerContext*
 - [x] Week 2: server runs with `StrictCore` against the Docker cluster; `grpcurl` call works.
 - [ ] Week 4: all proto v1 fields filled and tested through a real gRPC client.
 - [ ] Week 5: shutdown drains without dropping in-flight calls (test with load running).
+
+## Merchants (Phase 2, P1)
+
+`merchants.h`: with `RL_TENANCY=merchants`, every call must carry a merchant's API key in the gRPC
+metadata `x-api-key`, or it is refused with `UNAUTHENTICATED`. The service then checks customer
+`cust:42` of merchant `acme` as `acme|cust:42`, so merchants share no key, plan, lease or denial.
+- **Keys:** stored hashed (SHA-256) in `{rl:merchants}:keys`. Every instance loads them at start and
+  on `!merchants` on `plan-changes`. Each thread caches the keys it has resolved, with no lock, and
+  drops them when the keys change.
+- **Admin:** `tools/rlctl merchant-add` and `merchant-revoke`.
+- **Default:** unset, the service serves one API owner, as before.

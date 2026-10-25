@@ -180,17 +180,37 @@ All existing results stay valid.
 
 ### Week P1 (Oct 26 to Nov 1): merchants and adjustable limits
 
-- [ ] The business design, written as a Ch3 section, decisions and rejected alternatives first (4 h).
-- [ ] Merchant identity: API keys in gRPC metadata, stored hashed, cached per instance; a wrong key is
-      refused (6 h).
-- [ ] Key space and catalogs per merchant; platform defaults replace `config/rules.yaml` for plans (6 h).
-- [ ] Overrides per customer and boosts with an expiry, read by the scripts (6 h).
-- [ ] Monthly periods in `quota.lua` beside the daily ones (5 h).
-- [ ] Tests: Lua, unit, and isolation between two merchants (6 h).
+Done 2026-10-25 on branch `feat/merchants`:
 
-Gate: two merchants with different catalogs on the same instances; a custom limit or a boost applies on
-the next call on every instance; a key cannot reach another merchant's customers; all 240 existing
-tests still pass.
+- [x] The business design, written as a Ch3 section (`docs/thesis/ch3_design.md` 3.9), with decisions and
+      rejected alternatives first.
+- [x] Merchant identity: API keys in the gRPC metadata `x-api-key`, stored hashed (SHA-256) in
+      `{rl:merchants}:keys`, loaded at start and on `!merchants`. Resolved with no lock, by a per-thread
+      cache dropped on every change; a wrong or missing key gets `UNAUTHENTICATED`. Switched on with
+      `RL_TENANCY=merchants` (`src/server/merchants.h`).
+- [x] Key space and catalogues per merchant: the service names merchant `acme`'s customer `cust:42`
+      `acme|cust:42`, so every key, plan, lease and denial is the merchant's own. A merchant's plans live
+      in `{rl:m:<merchant>}:catalog`; the platform's plans (`tools/plans.sh`) remain the defaults.
+      `config/rules.yaml` keeps the rules, which are the same for every merchant.
+- [x] Custom limits per customer (`rlctl set`) and boosts with an expiry (`rlctl boost`), read by the
+      script, which decides by the Redis clock. Applying a plan replaces the hash atomically.
+- [x] Monthly periods in `quota.lua` (`period month`, UTC calendar month), beside the daily ones.
+      Monthly and boosted plans take the exact path.
+- [x] Tests, 13 new (253 in all):
+  - Lua: a monthly quota, and a boost;
+  - unit: parsing; the key index (hashing, resolving, revoking, a failed reload, concurrency); the
+    service refusing unknown keys and prefixing single and batch checks;
+  - integration: the end-to-end gRPC path with a key loaded from Redis; two merchants' catalogues,
+    a boost and a custom limit on two instances.
+
+Gate status: met.
+- *Two merchants, own catalogues, same instances:* daily quotas 2 and 3, the same customer id counted
+  apart.
+- *A boost and a custom limit:* each reached both instances within one second, past a denial both held
+  locally.
+- *Refusal:* a call without a merchant's key is refused.
+- *The real server (`RL_TENANCY=merchants`):* a key added and then revoked with `rlctl` worked, then was
+  refused at once.
 
 ### Week P2 (Nov 2 to 8): control plane and the emergency policies
 

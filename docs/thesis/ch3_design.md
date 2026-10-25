@@ -887,3 +887,74 @@ Each assumption is a way the estimate can be wrong; Chapter 5 checks those it ca
   quota.
 - **A loopback network.** A real network adds its round trip to every Redis call. Leases hide it from
   most checks; the exact path and the customer check do not.
+
+## 3.9 Merchants: one service, many API owners
+
+Sections 3.1 to 3.8 serve one API owner. The service is meant to be sold to many: each API owner (a
+**merchant**) has its own customers and plans, and must not see or affect another's. This section adds
+that layer. It changes how a call is named, not how it is decided.
+
+### 3.9.1 Who is calling
+
+A call carries its merchant's API key in the gRPC metadata `x-api-key`. The service resolves the key to
+a merchant before any engine work, and refuses a call without a known key with `UNAUTHENTICATED`.
+- **Keys are stored hashed.** The hash `{rl:merchants}:keys` maps the SHA-256 of each key to its
+  merchant, so a copy of Redis does not hand out working keys. The admin tool prints a new key once.
+- **No lock and no round trip per call.** Each instance loads the hash at start and again on a control
+  message (`!merchants` on `plan-changes`). Each gRPC thread keeps the keys it has resolved, and drops
+  them when a new index is published, so a revoked key stops at its next call.
+
+Rejected alternatives:
+- *A merchant field in the request:* any caller could claim to be any merchant.
+- *A Redis read per call:* a round trip on every call, the cost leases exist to avoid.
+- *A TLS client certificate per merchant:* stronger, but every merchant's gateway would then manage
+  certificates. It remains possible later.
+
+### 3.9.2 Isolation by name
+
+The service turns customer `cust:42` of merchant `acme` into the key `acme|cust:42` before the engine
+sees it. Every Redis key, plan, lease, cached denial and usage event below the service is built from
+that key, so merchants share nothing but capacity.
+- **Unambiguous:** a merchant id is 1 to 64 of A-Z, a-z, 0-9, `_` and `-`, so it cannot contain `|`.
+- **Spread:** the hash tag stays per customer (3.3.3), so a merchant's customers spread over all
+  masters.
+- **No allocation:** the key is built in a buffer each thread reuses, and the engines copy what they
+  keep before the call returns.
+
+Rejected alternatives:
+- *A Redis database per merchant:* Redis Cluster has only one database.
+- *A cluster per merchant:* the cost would grow with the number of merchants, not with the traffic.
+
+### 3.9.3 Limits that are not fixed
+
+Each customer's plan hash already holds its own numbers (3.3.2); a plan is a template copied into it.
+- **A catalogue per merchant:** a merchant defines its plans with any numbers
+  (`{rl:m:<merchant>}:catalog`); the platform's plans remain the defaults.
+- **Custom limits:** any field of one customer's plan can be set for that customer alone.
+- **Boosts:** extra units until a given time, for example +500 for a day in an emergency.
+- **Monthly quotas:** with `period month`, the quota counts per UTC calendar month.
+
+Every change is written first, then announced on `plan-changes`, so it applies on the next call on
+every instance. A test measured under one second; the plan change of 3.4.4 took 22 ms. Applying a
+plan replaces the whole hash, so custom limits and boosts end with it.
+
+The Redis clock decides both when a boost ends and when a month turns, as it decides the daily reset.
+So instances never disagree. A lease cannot see that clock, so monthly and boosted quotas take the
+exact path; plain daily plans keep the leased path of 3.4.5.
+
+### 3.9.4 A paying customer at the limit in an emergency
+
+| Answer | Policy | What the customer gets | Built |
+| --- | --- | --- | --- |
+| Block | `hard` | an outage at the worst moment | yes (3.4.2) |
+| A bounded grace | `grace`, e.g. +10% | survives small spikes, free | yes (3.4.2) |
+| Allow now, bill later | `cap`: counted exactly as billable overage, up to a cap | no outage; pays for the overage | counting yes; the spending cap per customer, alerts and the invoice are next |
+| A boost | granted by the merchant, until a time | no outage, on the merchant's terms | yes (3.9.3) |
+
+The recommended default:
+- *Free plans:* block.
+- *Paid plans:* a small grace, then billable overage up to a spending cap. The cap is what keeps a
+  faulty client from running up an unbounded bill.
+
+Billing a card later never means storing card numbers. A payment provider keeps the card; the service
+keeps only the provider's customer id.

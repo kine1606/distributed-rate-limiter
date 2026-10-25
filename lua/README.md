@@ -15,6 +15,7 @@ That atomicity is the whole reason for using Lua instead of `GET` then `SET` fro
 | `token_bucket.lua` | Burst limit; also serves lease refills through `requested` | 1 | done |
 | `quota.lua` | Daily quota per UTC day, stores `used` | 1 | done |
 | `quota.lua` (extended) | Overage policies `hard`, `grace`, `cap` | 4 | done |
+| `quota.lua` v3 | ARGV 5 to 7: period `day` or `month` (UTC calendar month), boost and its end (Unix ms, Redis clock); returns the limit in force as a seventh value | P1 | done |
 | `dedupe` logic | Request ID: count a retried request once | 4 | done, inside `quota.lua` |
 | `return_lease.lua` | Give tokens back: a burst token after a quota denial (Week 4), unused leases on shutdown (Week 5) | 4 | done; shutdown use in Week 5 |
 | `fixed_window.lua` | Counter per epoch-aligned window; cheapest, up to 2x limit across an edge | 2 | done |
