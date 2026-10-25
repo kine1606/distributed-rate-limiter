@@ -42,6 +42,7 @@
 #include "redis/sharded_backend.h"
 #include "reliability/resilient_backend.h"
 #include "reliability/slot_breakers.h"
+#include "server/merchants.h"
 #include "server/service.h"
 #include "usage/usage_log.h"
 
@@ -83,6 +84,8 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //   config/rules.yaml) go through CompositeCore.
 //   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
 //        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
+//        RL_TENANCY (unset: one API owner; "merchants": every call carries a merchant's API key, see
+//        src/server/merchants.h),
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
@@ -242,18 +245,39 @@ int main(int argc, char** argv) {
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
   PlanStore plans(*backend, std::chrono::milliseconds(*plan_ttl_ms));
   DenyCache deny(deny_cache);
+  // RL_TENANCY=merchants: calls name their merchant by API key (Phase 2, src/server/merchants.h).
+  std::unique_ptr<MerchantKeys> merchants;
+  if (const char* tenancy = std::getenv("RL_TENANCY"); tenancy != nullptr && *tenancy != '\0') {
+    if (std::string_view(tenancy) != "merchants") {
+      spdlog::critical("RL_TENANCY: '{}' is not 'merchants'", tenancy);
+      return 1;
+    }
+    merchants = std::make_unique<MerchantKeys>(*backend);
+    if (merchants->ReloadAndWait(std::chrono::seconds(2))) {
+      spdlog::info("tenancy: merchants, {} API keys", merchants->Size());
+    } else {
+      spdlog::warn("tenancy: merchants, keys not loaded (Redis did not answer); every call is refused until they are");
+    }
+  }
   // An announced plan change drops the cached plan and the local denial at once (step B5); the TTL
-  // covers a message missed while the subscription was down.
+  // covers a message missed while the subscription was down. "!merchants" reloads the API keys.
   std::unique_ptr<PlanListener> listener;
   if (engine != "allow_all") {
     const auto [host, port] = ParseHostPort(redis_addr);
     listener = std::make_unique<PlanListener>(
         host, port,
-        [&plans, &deny](std::string_view customer) {
+        [&plans, &deny, &merchants](std::string_view customer) {
+          if (customer == kMerchantsChanged) {
+            if (merchants) merchants->Reload();
+            return;
+          }
           plans.Invalidate(customer);
           deny.Clear(customer);
         },
-        [&plans] { plans.InvalidateAll(); });
+        [&plans, &merchants] {
+          plans.InvalidateAll();
+          if (merchants) merchants->Reload();  // a key change may have been missed too
+        });
   }
   // One engine per rule table: a reload builds a new one from the new file (see the main loop).
   struct Engine {
@@ -304,7 +328,8 @@ int main(int argc, char** argv) {
     return total;
   };
   spdlog::info("engine: {}, plan cache {} ms, at most {} checks in flight", engine, *plan_ttl_ms, *max_in_flight);
-  RateLimiterService service(engines.back()->core, *max_in_flight, metrics_on ? &check_metrics : nullptr);
+  RateLimiterService service(engines.back()->core, *max_in_flight, metrics_on ? &check_metrics : nullptr,
+                             merchants.get());
 
   // After everything it reads, so it stops first. A port in use (several servers on one machine)
   // leaves the server running without an endpoint.

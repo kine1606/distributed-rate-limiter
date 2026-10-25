@@ -181,6 +181,53 @@ TEST_F(PlanChangeIT, YesterdaysFullCounterResetsOnceForEveryInstance) {
   EXPECT_EQ(admin_->hget(key, "used").value_or(""), "4");
 }
 
+// Phase 2, P1 gate: two merchants with their own plan catalogues share the instances; the same
+// customer id is a different customer under each; a boost, then a custom limit, set with rlctl reach
+// every instance within a second, even past a denial each instance holds locally.
+TEST_F(PlanChangeIT, MerchantsCatalogsBoostsAndCustomLimitsReachEveryInstance) {
+  for (const std::string m : {"acme", "globex"}) {
+    const std::string c = m + "|u1";
+    for (const char* rule : {"daily_quota", "burst"}) admin_->del(RedisKey(rules_.at(rule), c));
+    admin_->del(PlanKey(c));
+  }
+  ASSERT_TRUE(Rlctl("--merchant acme plan-define basic daily 2 burst 10 refill 10 overage hard extra 0 failure closed"));
+  ASSERT_TRUE(Rlctl("--merchant globex plan-define basic daily 3 burst 10 refill 10 overage hard extra 0 failure closed"));
+  ASSERT_TRUE(Rlctl("--merchant acme create u1 --plan basic"));
+  ASSERT_TRUE(Rlctl("--merchant globex create u1 --plan basic"));
+  const std::string acme = "acme|u1", globex = "globex|u1";  // as the service names them
+
+  EXPECT_TRUE(instances_[0]->Check(acme).allowed);
+  EXPECT_TRUE(instances_[1]->Check(acme).allowed);
+  for (auto& i : instances_) EXPECT_EQ(i->Check(acme).reason, Reason::kQuotaExhausted);  // denied locally now
+  for (int n = 0; n < 3; ++n) EXPECT_TRUE(instances_[n % 2]->Check(globex).allowed) << "globex call " << n;
+  EXPECT_FALSE(instances_[0]->Check(globex).allowed);
+
+  const auto until_every = [this](const std::string& c, auto&& seen) {
+    const auto start = Steady::now();
+    for (;;) {
+      bool all = true;
+      for (auto& i : instances_) all = all && seen(i->GetPlan(c));
+      if (all) return true;
+      if (Steady::now() - start > 1s) return false;
+      std::this_thread::sleep_for(2ms);
+    }
+  };
+  ASSERT_TRUE(Rlctl("--merchant acme boost u1 2 10"));  // +2 for ten minutes
+  ASSERT_TRUE(until_every(acme, [](const Plan& p) { return p.boost == 2; })) << "boost not seen within 1 s";
+  const auto a = instances_[0]->Check(acme);
+  EXPECT_TRUE(a.allowed);
+  EXPECT_EQ(a.limit, 4u);  // 2 + the boost
+  EXPECT_TRUE(instances_[1]->Check(acme).allowed);
+  EXPECT_FALSE(instances_[0]->Check(acme).allowed);
+
+  ASSERT_TRUE(Rlctl("--merchant acme set u1 daily 100"));
+  ASSERT_TRUE(until_every(acme, [](const Plan& p) { return p.daily == 100; })) << "custom limit not seen within 1 s";
+  const auto b = instances_[1]->Check(acme);
+  EXPECT_TRUE(b.allowed);
+  EXPECT_EQ(b.limit, 102u);
+  EXPECT_FALSE(instances_[0]->Check(globex).allowed);  // globex's customer untouched
+}
+
 // Step B9: suspended on every instance within a second; restored with today's usage intact.
 TEST_F(PlanChangeIT, SuspendAndRestoreReachEveryInstance) {
   const std::string c = "cust:it-b9";

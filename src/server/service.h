@@ -7,6 +7,8 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,7 @@
 #include "ratelimiter/clock.h"
 #include "ratelimiter/core.h"
 #include "server/convert.h"
+#include "server/merchants.h"
 
 namespace ratelimiter {
 
@@ -32,6 +35,7 @@ struct BatchState {
 
 inline grpc::Status UnknownRule() { return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown rule"); }
 inline grpc::Status Overloaded() { return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "limiter overloaded"); }
+inline grpc::Status Unauthenticated() { return grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "missing or unknown API key"); }
 
 // Backpressure (Week 5): at most `max_in_flight` checks wait for an answer at once (a batch counts
 // each entry); beyond that a call is refused at once with RESOURCE_EXHAUSTED. Every queue behind
@@ -40,9 +44,11 @@ inline grpc::Status Overloaded() { return grpc::Status(grpc::StatusCode::RESOURC
 class RateLimiterService final : public v1::RateLimiter::CallbackService {
  public:
   // `metrics`, if set, must outlive the service; nullptr records nothing (no clock reads).
+  // `merchants`, if set, must outlive the service: every call must then carry a merchant's API key,
+  // and its keys name that merchant's customers (merchants.h); nullptr serves one API owner.
   explicit RateLimiterService(std::shared_ptr<RateLimiterCore> core, std::int64_t max_in_flight = 10'000,
-                              CheckMetrics* metrics = nullptr)
-      : core_(core.get()), max_in_flight_(max_in_flight), metrics_(metrics) {
+                              CheckMetrics* metrics = nullptr, MerchantKeys* merchants = nullptr)
+      : core_(core.get()), max_in_flight_(max_in_flight), metrics_(metrics), merchants_(merchants) {
     cores_.push_back(std::move(core));
   }
 
@@ -66,13 +72,25 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
       return reactor;
     }
+    std::string_view merchant;
+    if (merchants_ != nullptr) {
+      const auto m = Merchant(ctx);
+      if (!m) {
+        Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
+        reactor->Finish(Unauthenticated());
+        return reactor;
+      }
+      merchant = *m;
+    }
     if (!Admit(1)) {
       Count(metrics_ ? &metrics_->rejected_overload : nullptr);
       reactor->Finish(Overloaded());
       return reactor;
     }
     const Started started = Start(req->rule());
-    core_.load(std::memory_order_acquire)->Check(ToDomain(*req), [this, reactor, resp, started](const CheckResult& r) {
+    CheckRequest check = ToDomain(*req);
+    if (merchants_ != nullptr) check.key = TenantKey(merchant, check.key);
+    core_.load(std::memory_order_acquire)->Check(check, [this, reactor, resp, started](const CheckResult& r) {
       in_flight_.fetch_sub(1, std::memory_order_relaxed);
       Record(started, r);
       if (r.reason == Reason::kUnknownRule) {
@@ -104,6 +122,16 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
         return reactor;
       }
     }
+    std::string_view merchant;  // one merchant for the whole batch
+    if (merchants_ != nullptr) {
+      const auto m = Merchant(ctx);
+      if (!m) {
+        Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
+        reactor->Finish(Unauthenticated());
+        return reactor;
+      }
+      merchant = *m;
+    }
     if (n > max_in_flight_) {  // could never be admitted: not a transient overload to retry
       Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
       reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch larger than the server's in-flight limit"));
@@ -122,7 +150,9 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     for (int i = 0; i < n; ++i) {
       v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
       const Started started = Start(req->requests(i).rule());
-      core->Check(ToDomain(req->requests(i)), [this, state, slot, started](const CheckResult& r) {
+      CheckRequest check = ToDomain(req->requests(i));
+      if (merchants_ != nullptr) check.key = TenantKey(merchant, check.key);
+      core->Check(check, [this, state, slot, started](const CheckResult& r) {
         Record(started, r);
         if (r.reason == Reason::kUnknownRule) {
           state->unknown_rule.store(true, std::memory_order_relaxed);
@@ -161,6 +191,14 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     if (c != nullptr) c->Add();
   }
 
+  // The merchant whose API key the call carries, or nullopt (tenancy on).
+  std::optional<std::string_view> Merchant(grpc::CallbackServerContext* ctx) {
+    const auto& metadata = ctx->client_metadata();
+    const auto it = metadata.find(grpc::string_ref(kApiKeyHeader.data(), kApiKeyHeader.size()));
+    if (it == metadata.end()) return std::nullopt;
+    return merchants_->Resolve(std::string_view(it->second.data(), it->second.size()));
+  }
+
   bool Admit(std::int64_t n) {
     if (in_flight_.fetch_add(n, std::memory_order_relaxed) + n <= max_in_flight_) return true;
     in_flight_.fetch_sub(n, std::memory_order_relaxed);
@@ -171,6 +209,7 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
   std::vector<std::shared_ptr<RateLimiterCore>> cores_;  // every core set, current last
   const std::int64_t max_in_flight_;
   CheckMetrics* const metrics_;
+  MerchantKeys* const merchants_;
   std::atomic<std::int64_t> in_flight_{0};
 };
 

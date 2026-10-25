@@ -1,57 +1,141 @@
 #!/usr/bin/env bash
-# Plays the account service for one customer (docs/CUSTOMER_PLANS.md, steps B1, B5, B6, B9): writes
-# the plan hash, then publishes the customer ID on plan-changes, so every limiter drops its cached
-# plan and local denial at once. In that order: published first, an instance could re-read the old plan.
-#   tools/rlctl create    <customer> [--plan free]   fails if the customer has a plan
-#   tools/rlctl upgrade   <customer> --plan <name>   also restores a suspended customer
-#   tools/rlctl downgrade <customer> --plan <name>   "end of cycle" is when you run it
-#   tools/rlctl suspend   <customer>
-#   tools/rlctl show      <customer>                 plan hash and today's quota hash
-# Plans: tools/plans.sh. env: REDIS_HOST=127.0.0.1 REDIS_PORT=7001 (any cluster node).
+# Plays the account service (docs/CUSTOMER_PLANS.md, steps B1, B5, B6, B9; merchants: docs/PRODUCT_PLAN.md).
+# Writes a customer's plan hash, then publishes the customer on plan-changes, so every limiter drops
+# its cached plan and local denial at once. In that order: published first, an instance could re-read
+# the old plan. With --merchant M the customer is M's: the key "M|<customer>" (src/server/merchants.h).
+#   tools/rlctl [--merchant M] create    <customer> [--plan free]   fails if the customer has a plan
+#   tools/rlctl [--merchant M] upgrade   <customer> --plan <name>   also restores a suspended customer
+#   tools/rlctl [--merchant M] downgrade <customer> --plan <name>   "end of cycle" is when you run it
+#   tools/rlctl [--merchant M] suspend   <customer>
+#   tools/rlctl [--merchant M] set       <customer> <field> <value>...  this customer's own limits
+#   tools/rlctl [--merchant M] boost     <customer> <units> <minutes>   extra quota for a while
+#   tools/rlctl [--merchant M] show      <customer>                 plan hash and this period's quota hash
+#   tools/rlctl --merchant M plan-define <plan> <field> <value>...  a plan of M's own catalogue
+#   tools/rlctl merchant-add    <merchant>                          prints a new API key, once
+#   tools/rlctl merchant-revoke <merchant>                          all of its API keys stop working
+# Fields: daily (the quota per period), burst, refill, extra (numbers), overage hard|grace|cap,
+# failure open|closed, period day|month. Applying a plan replaces the customer's whole hash, so custom
+# limits and boosts end with it. Plans: M's catalogue, then tools/plans.sh.
+# env: REDIS_HOST=127.0.0.1 REDIS_PORT=7001 (any cluster node).
 set -euo pipefail
 source "$(dirname "$0")/plans.sh"
 host=${REDIS_HOST:-127.0.0.1} port=${REDIS_PORT:-7001}
-usage() { sed -n '5,10s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+usage() { sed -n '5,20s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+cli() { redis-cli -c -h "$host" -p "$port" "$@"; }
+die() { echo "$*" >&2; exit 1; }
+valid_merchant() { [[ $1 =~ ^[A-Za-z0-9_-]{1,64}$ ]]; }  # as ValidMerchant in src/server/merchants.h
 
-[ $# -ge 2 ] || usage
-cmd=$1 customer=$2
-shift 2
-plan=""
-case $cmd in create) plan=free ;; suspend) plan=suspended ;; esac
+merchant="" plan="" args=()
 while [ $# -gt 0 ]; do
   case $1 in
+    --merchant) [ $# -ge 2 ] || usage; merchant=$2; shift 2 ;;
     --plan) [ $# -ge 2 ] || usage; plan=$2; shift 2 ;;
-    *) usage ;;
+    *) args+=("$1"); shift ;;
   esac
 done
+[ ${#args[@]} -ge 2 ] || usage
+cmd=${args[0]}
+[ -z "$merchant" ] || valid_merchant "$merchant" || die "merchant must be 1 to 64 of A-Z a-z 0-9 _ -"
+
+# check_fields <field> <value>...: the fields a plan hash may hold, with values the limiter reads.
+check_fields() {
+  [ $# -gt 0 ] && [ $(($# % 2)) = 0 ] || die "fields come in <field> <value> pairs"
+  while [ $# -gt 0 ]; do
+    case $1 in
+      daily | burst | refill | extra) [[ $2 =~ ^[0-9]{1,10}$ ]] && [ "$2" -le 4294967295 ] || die "$1 must be a whole number" ;;
+      overage) [[ $2 =~ ^(hard|grace|cap)$ ]] || die "overage is hard, grace or cap" ;;
+      failure) [[ $2 =~ ^(open|closed)$ ]] || die "failure is open or closed" ;;
+      period) [[ $2 =~ ^(day|month)$ ]] || die "period is day or month" ;;
+      *) die "unknown field '$1' (daily burst refill extra overage failure period)" ;;
+    esac
+    shift 2
+  done
+}
+
+case $cmd in
+  merchant-add)
+    m=${args[1]}
+    valid_merchant "$m" || die "merchant must be 1 to 64 of A-Z a-z 0-9 _ -"
+    key="rl_$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+    hash=$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)  # only the hash is stored
+    cli hset "{rl:merchants}:keys" "$hash" "$m" >/dev/null
+    cli publish plan-changes '!merchants' >/dev/null
+    echo "$m: API key $key (shown once; send it as the x-api-key metadata)"
+    exit 0
+    ;;
+  merchant-revoke)
+    m=${args[1]}
+    n=0
+    while read -r hash && read -r owner; do
+      if [ "$owner" = "$m" ]; then cli hdel "{rl:merchants}:keys" "$hash" >/dev/null; n=$((n + 1)); fi
+    done < <(cli hgetall "{rl:merchants}:keys")
+    cli publish plan-changes '!merchants' >/dev/null
+    echo "$m: $n API keys revoked"
+    exit 0
+    ;;
+  plan-define)
+    [ -n "$merchant" ] || die "plan-define needs --merchant (the platform's plans are tools/plans.sh)"
+    name=${args[1]}
+    [[ $name =~ ^[a-z0-9_-]{1,32}$ ]] && [ "$name" != suspended ] || die "plan names are 1 to 32 of a-z 0-9 _ - (not suspended)"
+    check_fields "${args[@]:2}"
+    cli hset "{rl:m:$merchant}:catalog" "$name" "${args[*]:2}" >/dev/null
+    echo "$merchant: plan $name = ${args[*]:2}"
+    exit 0
+    ;;
+esac
+
+customer=${args[1]}
 # The limiter accepts keys of 1 to 128 bytes (src/server/convert.h); the hash tag is built the same way.
-[ "${#customer}" -ge 1 ] && [ "${#customer}" -le 128 ] || { echo "customer must be 1 to 128 bytes" >&2; exit 2; }
-key="{$customer}:plan"
-cli() { redis-cli -c -h "$host" -p "$port" "$@"; }
+[ "${#customer}" -ge 1 ] && [ "${#customer}" -le 128 ] || die "customer must be 1 to 128 bytes"
+id=$customer
+[ -z "$merchant" ] || id="$merchant|$customer"
+key="{$id}:plan"
 show_hash() {  # one field per line, or (none)
   local out
   out=$(cli hgetall "$1")
   if [ -n "$out" ]; then paste - - <<<"$out" | sed 's/^/  /'; else echo "  (none)"; fi
 }
+announce() { cli publish plan-changes "$id" >/dev/null; }
+case $cmd in create) plan=${plan:-free} ;; suspend) plan=suspended ;; esac
 
 case $cmd in
   create | upgrade | downgrade | suspend)
-    [ -n "$plan" ] && [ -n "${PLAN[$plan]+x}" ] || { echo "unknown plan '$plan' (${!PLAN[*]})" >&2; exit 2; }
-    [ "$cmd" = suspend ] && [ "$plan" != suspended ] && usage
+    [ -n "$plan" ] || usage
+    fields=""
+    if [ -n "$merchant" ] && [ "$plan" != suspended ]; then fields=$(cli hget "{rl:m:$merchant}:catalog" "$plan"); fi
+    [ -n "$fields" ] || fields=${PLAN[$plan]:-}
+    [ -n "$fields" ] || die "unknown plan '$plan' (not in ${merchant:-the platform} catalogue; platform plans: ${!PLAN[*]})"
     if [ "$cmd" = create ] && [ "$(cli exists "$key")" != 0 ]; then
-      echo "$customer already has a plan; use upgrade or downgrade" >&2
-      exit 1
+      die "$customer already has a plan; use upgrade or downgrade"
     fi
+    # One script, so no limiter can read the hash half written.
     # shellcheck disable=SC2086  # the preset is field-value pairs
-    [ "$(cli hset "$key" plan "$plan" ${PLAN[$plan]})" -ge 0 ] 2>/dev/null || { echo "writing $key failed" >&2; exit 1; }
-    cli publish plan-changes "$customer" >/dev/null
-    echo "$customer: $plan"
+    cli eval "redis.call('DEL', KEYS[1]); return redis.call('HSET', KEYS[1], unpack(ARGV))" 1 "$key" \
+      plan "$plan" $fields >/dev/null || die "writing $key failed"
+    announce
+    echo "$id: $plan"
+    ;;
+  set)
+    [ "$(cli exists "$key")" = 1 ] || die "$id has no plan; create it first"
+    check_fields "${args[@]:2}"
+    cli hset "$key" "${args[@]:2}" >/dev/null
+    announce
+    echo "$id: ${args[*]:2}"
+    ;;
+  boost)
+    [ ${#args[@]} = 4 ] && [[ ${args[2]} =~ ^[0-9]{1,9}$ ]] && [[ ${args[3]} =~ ^[0-9]{1,6}$ ]] || usage
+    [ "$(cli exists "$key")" = 1 ] || die "$id has no plan; create it first"
+    now_ms=$(cli time | { read -r s; read -r us; echo $((s * 1000 + us / 1000)); })  # the clock the script reads
+    until_ms=$((now_ms + args[3] * 60000))
+    cli hset "$key" boost "${args[2]}" boost_until "$until_ms" >/dev/null
+    announce
+    echo "$id: +${args[2]} for ${args[3]} min (until $until_ms ms)"
     ;;
   show)
     echo "plan ($key):"
     show_hash "$key"
-    echo "today ({$customer}:daily_quota:q):"  # the quota rule's key (config/rules.yaml, src/redis/keys.h)
-    show_hash "{$customer}:daily_quota:q"
+    echo "this period ({$id}:daily_quota:q):"  # the quota rule's key (config/rules.yaml, src/redis/keys.h)
+    show_hash "{$id}:daily_quota:q"
     ;;
   *) usage ;;
 esac
