@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sequence: An Alert Reaches the Merchant",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sequence-5-alert-webhook.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "participants": [
+    {
+      "id": "gateway",
+      "type": "external",
+      "label": "Merchant gateway",
+      "sublabel": "u42's 8th call of 10",
+      "sources": [
+        {
+          "path": "proto/rate_limiter.proto",
+          "line": 23,
+          "end_line": 31,
+          "label": "Check"
+        }
+      ]
+    },
+    {
+      "id": "limiter",
+      "type": "backend",
+      "label": "Limiter",
+      "sublabel": "CompositeCore",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 112,
+          "end_line": 131,
+          "label": "quota step"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis Cluster",
+      "sublabel": "quota.lua, rl-alerts",
+      "sources": [
+        {
+          "path": "lua/quota.lua",
+          "line": 118,
+          "end_line": 125,
+          "label": "alert bits"
+        },
+        {
+          "path": "lua/quota.lua",
+          "line": 142,
+          "end_line": 148,
+          "label": "PUBLISH"
+        },
+        {
+          "path": "control/rlcontrol/store.py",
+          "line": 33,
+          "end_line": 34,
+          "label": "webhook key"
+        }
+      ]
+    },
+    {
+      "id": "notifier",
+      "type": "messagebus",
+      "label": "Alert notifier",
+      "sublabel": "control plane process",
+      "sources": [
+        {
+          "path": "control/rlcontrol/notifier.py",
+          "line": 27,
+          "end_line": 56,
+          "label": "delivery, handle"
+        },
+        {
+          "path": "control/rlcontrol/notifier.py",
+          "line": 58,
+          "end_line": 84,
+          "label": "send, retries"
+        },
+        {
+          "path": "control/rlcontrol/webhooks.py",
+          "line": 44,
+          "end_line": 48,
+          "label": "sign"
+        }
+      ]
+    },
+    {
+      "id": "webhook",
+      "type": "external",
+      "label": "Merchant webhook",
+      "sublabel": "acme's HTTPS endpoint",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 313,
+          "end_line": 323,
+          "label": "put_webhook"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 162,
+      "to": 344,
+      "label": "Inside the check"
+    },
+    {
+      "from": 372,
+      "to": 584,
+      "label": "Delivery, off the request path"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-check",
+      "from": "gateway",
+      "to": "limiter",
+      "y": 176,
+      "label": "Check(u42)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-eval",
+      "from": "limiter",
+      "to": "redis",
+      "y": 206,
+      "label": "EVALSHA quota.lua",
+      "variant": "default"
+    },
+    {
+      "id": "m-publish",
+      "from": "redis",
+      "to": "notifier",
+      "y": 236,
+      "label": "PUBLISH rl-alerts quota.80",
+      "variant": "dashed",
+      "note": "once a period; never for a replayed answer"
+    },
+    {
+      "id": "m-allowed",
+      "from": "redis",
+      "to": "limiter",
+      "y": 298,
+      "label": "allowed, used 8",
+      "variant": "return"
+    },
+    {
+      "id": "m-ok",
+      "from": "limiter",
+      "to": "gateway",
+      "y": 328,
+      "label": "OK",
+      "variant": "return"
+    },
+    {
+      "id": "m-hook",
+      "from": "notifier",
+      "to": "redis",
+      "y": 386,
+      "label": "HGETALL {rl:m:acme}:webhook",
+      "variant": "default"
+    },
+    {
+      "id": "m-url",
+      "from": "redis",
+      "to": "notifier",
+      "y": 416,
+      "label": "url, secret",
+      "variant": "return"
+    },
+    {
+      "id": "m-post",
+      "from": "notifier",
+      "to": "webhook",
+      "y": 446,
+      "label": "POST, X-RL-Signature",
+      "variant": "emphasis",
+      "note": "HMAC-SHA256 of t.body; X-RL-Delivery id"
+    },
+    {
+      "id": "m-503",
+      "from": "webhook",
+      "to": "notifier",
+      "y": 508,
+      "label": "503",
+      "variant": "return"
+    },
+    {
+      "id": "m-retry",
+      "from": "notifier",
+      "to": "webhook",
+      "y": 538,
+      "label": "same delivery, after backoff",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-200",
+      "from": "webhook",
+      "to": "notifier",
+      "y": 568,
+      "label": "200",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Delivery rules",
+      "items": [
+        "Retried on errors and 5xx, with backoff; never on a refusal (4xx other than 429)",
+        "The URL is checked again before each attempt: no private, loopback or reserved addresses"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "If the notifier is down",
+      "items": [
+        "Pub/Sub keeps no messages, so that alert is lost; the merchant can still read usage.alerts from GET /v1/customers/{id}"
+      ]
+    }
+  ]
+}

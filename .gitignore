@@ -121,6 +121,7 @@ results/*
 .claude/
 .agents/
 graphify-out/
+.archify/
 
 # ==============================================================================
 # OS Generated Files

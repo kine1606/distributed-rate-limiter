@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "c2e0d4a3-020b-44ad-86d1-b577dbfb9dcf",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\src\\activity-4-redis-failure.json",
+  "output": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\activity-4-redis-failure.html",
+  "specification": {
+    "sha256": "e53feb984c3841ddc6f4fc061cb2174d4831c8e4eb0de8f78b7a0fe3c4086fb7",
+    "bytes": 7399
+  },
+  "artifact": {
+    "sha256": "e9f8bed186185799db5a169f3036ca21a909c89b3d7c7fed0594b6584d759b00",
+    "bytes": 844812
+  }
+}

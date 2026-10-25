@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "c43458b6-85ee-44c4-b3a9-dcd8f28b8957",
+  "status": "current",
+  "command": "deliver",
+  "type": "sequence",
+  "input": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\src\\sequence-3-live-limit-change.json",
+  "output": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\sequence-3-live-limit-change.html",
+  "specification": {
+    "sha256": "0b3bb240d14a63fc16dc2d40de8ad46f4624633385e1d173d0d912bd5ba067cb",
+    "bytes": 5794
+  },
+  "artifact": {
+    "sha256": "3602aad7dd6fad414b278bcc12c3acff17f75a2a22a7949dccab4f5730243b0a",
+    "bytes": 838944
+  }
+}

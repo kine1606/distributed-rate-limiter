@@ -1,0 +1,484 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Activity: Processing a Check",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/activity-1-check.html",
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Limiter step"
+        },
+        "security": {
+          "label": "Gate, refusal or failure policy"
+        },
+        "database": {
+          "label": "Redis data or Lua script"
+        },
+        "external": {
+          "label": "Gateway side"
+        }
+      }
+    },
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "lanes": [
+    {
+      "id": "caller",
+      "label": "Merchant gateway"
+    },
+    {
+      "id": "service",
+      "label": "gRPC service"
+    },
+    {
+      "id": "engine",
+      "label": "Customer rule (CompositeCore)"
+    },
+    {
+      "id": "redis",
+      "label": "Redis Cluster, Lua by the Redis clock"
+    },
+    {
+      "id": "failure",
+      "label": "Redis unreachable",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "gateway",
+    "validate",
+    "tenant",
+    "plan",
+    "gates",
+    "burst",
+    "quota",
+    "answer"
+  ],
+  "nodes": [
+    {
+      "id": "gateway",
+      "lane": "caller",
+      "col": 0,
+      "type": "external",
+      "label": "Gateway call",
+      "sublabel": "Check(key, rule, cost, id)",
+      "sources": [
+        {
+          "path": "proto/rate_limiter.proto",
+          "line": 23,
+          "end_line": 31,
+          "label": "RateLimiter service"
+        }
+      ]
+    },
+    {
+      "id": "refused",
+      "lane": "caller",
+      "col": 2,
+      "type": "security",
+      "label": "gRPC error",
+      "sublabel": "no decision made",
+      "sources": [
+        {
+          "path": "src/server/service.h",
+          "line": 36,
+          "end_line": 38,
+          "label": "error statuses"
+        }
+      ]
+    },
+    {
+      "id": "answer",
+      "lane": "caller",
+      "col": 5,
+      "type": "external",
+      "label": "Answer",
+      "sublabel": "allowed, reason, remaining",
+      "sources": [
+        {
+          "path": "src/server/service.h",
+          "line": 93,
+          "end_line": 101,
+          "label": "fill and finish"
+        },
+        {
+          "path": "src/server/convert.h",
+          "line": 43,
+          "end_line": 50,
+          "label": "response fields"
+        }
+      ]
+    },
+    {
+      "id": "validate",
+      "lane": "service",
+      "col": 1,
+      "type": "backend",
+      "label": "Validate",
+      "sublabel": "key and rule, at most 128 B",
+      "sources": [
+        {
+          "path": "src/server/convert.h",
+          "line": 16,
+          "end_line": 22,
+          "label": "Invalid()"
+        },
+        {
+          "path": "src/server/service.h",
+          "line": 70,
+          "end_line": 74,
+          "label": "INVALID_ARGUMENT"
+        }
+      ]
+    },
+    {
+      "id": "tenant",
+      "lane": "service",
+      "col": 2,
+      "type": "security",
+      "label": "Merchant key, admit",
+      "sublabel": "x-api-key to acme|cust:42",
+      "tag": "RL_TENANCY",
+      "sources": [
+        {
+          "path": "src/server/service.h",
+          "line": 75,
+          "end_line": 92,
+          "label": "auth, backpressure, key"
+        },
+        {
+          "path": "src/server/merchants.h",
+          "line": 88,
+          "end_line": 102,
+          "label": "Resolve()"
+        },
+        {
+          "path": "src/server/merchants.h",
+          "line": 134,
+          "end_line": 140,
+          "label": "TenantKey()"
+        }
+      ]
+    },
+    {
+      "id": "plan",
+      "lane": "engine",
+      "col": 2,
+      "type": "backend",
+      "label": "Plan",
+      "sublabel": "PlanStore cache, 5 s",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 80,
+          "end_line": 86,
+          "label": "plans_.Get"
+        },
+        {
+          "path": "src/plan/plan_store.cc",
+          "line": 37,
+          "end_line": 81,
+          "label": "PlanStore::Get"
+        }
+      ]
+    },
+    {
+      "id": "gates",
+      "lane": "engine",
+      "col": 3,
+      "type": "security",
+      "label": "Local gates",
+      "sublabel": "suspended? denied till reset?",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 87,
+          "end_line": 100,
+          "label": "suspended, deny cache"
+        }
+      ]
+    },
+    {
+      "id": "burst",
+      "lane": "engine",
+      "col": 4,
+      "type": "backend",
+      "label": "Burst limit",
+      "sublabel": "token bucket, every check",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 101,
+          "end_line": 111,
+          "label": "burst step"
+        }
+      ]
+    },
+    {
+      "id": "quota",
+      "lane": "engine",
+      "col": 5,
+      "type": "backend",
+      "label": "Quota",
+      "sublabel": "lease hit or exact script",
+      "tag": "day or month",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 112,
+          "end_line": 145,
+          "label": "quota step"
+        }
+      ]
+    },
+    {
+      "id": "planhash",
+      "lane": "redis",
+      "col": 2,
+      "type": "database",
+      "label": "Plan hash",
+      "sublabel": "{acme|cust:42}:plan",
+      "sources": [
+        {
+          "path": "src/redis/keys.h",
+          "line": 27,
+          "label": "PlanKey"
+        },
+        {
+          "path": "src/plan/plan_store.cc",
+          "line": 85,
+          "label": "HGETALL on a miss"
+        }
+      ]
+    },
+    {
+      "id": "bucket",
+      "lane": "redis",
+      "col": 4,
+      "type": "database",
+      "label": "token_bucket.lua",
+      "sublabel": "refill and take, atomic",
+      "sources": [
+        {
+          "path": "lua/token_bucket.lua",
+          "line": 17,
+          "end_line": 58,
+          "label": "token bucket"
+        }
+      ]
+    },
+    {
+      "id": "quotalua",
+      "lane": "redis",
+      "col": 5,
+      "type": "database",
+      "label": "quota.lua",
+      "sublabel": "policy, request ids, top-ups",
+      "tag": "publishes alerts",
+      "sources": [
+        {
+          "path": "lua/quota.lua",
+          "line": 72,
+          "end_line": 117,
+          "label": "replay, period, decide"
+        },
+        {
+          "path": "lua/quota.lua",
+          "line": 118,
+          "end_line": 149,
+          "label": "alerts, stored answer"
+        }
+      ]
+    },
+    {
+      "id": "policy",
+      "lane": "failure",
+      "col": 4,
+      "type": "security",
+      "label": "Plan's failure policy",
+      "sublabel": "paid open, Free closed",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 17,
+          "end_line": 24,
+          "label": "PlanDown"
+        },
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 104,
+          "end_line": 107,
+          "label": "Redis down at burst"
+        },
+        {
+          "path": "src/reliability/resilient_backend.h",
+          "line": 21,
+          "end_line": 28,
+          "label": "deadline per attempt"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "call",
+      "from": "gateway",
+      "to": "validate",
+      "label": "Check",
+      "variant": "emphasis"
+    },
+    {
+      "id": "valid",
+      "from": "validate",
+      "to": "tenant",
+      "variant": "emphasis"
+    },
+    {
+      "id": "named",
+      "from": "tenant",
+      "to": "plan",
+      "label": "acme|cust:42",
+      "variant": "emphasis"
+    },
+    {
+      "id": "plan-read",
+      "from": "plan",
+      "to": "planhash",
+      "label": "HGETALL on a miss",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "to-gates",
+      "from": "plan",
+      "to": "gates",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-burst",
+      "from": "gates",
+      "to": "burst",
+      "label": "neither",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bucket-call",
+      "from": "burst",
+      "to": "bucket",
+      "label": "EVALSHA",
+      "variant": "default"
+    },
+    {
+      "id": "to-quota",
+      "from": "burst",
+      "to": "quota",
+      "label": "token taken",
+      "variant": "emphasis"
+    },
+    {
+      "id": "quota-call",
+      "from": "quota",
+      "to": "quotalua",
+      "label": "EVALSHA or lease refill",
+      "variant": "default"
+    },
+    {
+      "id": "decided",
+      "from": "quota",
+      "to": "answer",
+      "label": "OK, OVERAGE or QUOTA_EXHAUSTED",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "malformed",
+      "from": "validate",
+      "to": "refused",
+      "label": "INVALID_ARGUMENT",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "unknown-key",
+      "from": "tenant",
+      "to": "refused",
+      "label": "UNAUTHENTICATED or overloaded",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "local-denial",
+      "from": "gates",
+      "to": "answer",
+      "label": "SUSPENDED or QUOTA_EXHAUSTED, no Redis",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "rate-limited",
+      "from": "burst",
+      "to": "answer",
+      "label": "RATE_LIMITED",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "bucket-down",
+      "from": "bucket",
+      "to": "policy",
+      "label": "timeout or down",
+      "variant": "dashed",
+      "role": "error"
+    },
+    {
+      "id": "quota-down",
+      "from": "quotalua",
+      "to": "policy",
+      "label": "timeout or down",
+      "variant": "dashed",
+      "role": "error"
+    },
+    {
+      "id": "policy-answer",
+      "from": "policy",
+      "to": "answer",
+      "label": "UNVERIFIED or UNAVAILABLE",
+      "variant": "security",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Other rules",
+      "items": [
+        "A rule without a plan, such as api_default, skips this path and is served from local leases (LeasedCore)",
+        "CheckBatch sends every entry down the same path, under one merchant"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Alerts",
+      "items": [
+        "quota.lua publishes on rl-alerts at 80%, at the limit, at the first overage and at the first denial, once a period",
+        "control/rlcontrol/notifier.py signs and delivers them to the merchant's webhook"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "After a quota denial",
+      "items": [
+        "The burst token goes back to the bucket",
+        "The denial is cached until the reset, so the next calls never reach Redis"
+      ]
+    }
+  ]
+}

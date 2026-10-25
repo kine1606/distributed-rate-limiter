@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "512d6fd7-cbe9-4ef4-8129-84ff076cea67",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\src\\activity-3-leased-check.json",
+  "output": "D:\\GitHub\\distributed-rate-limiter\\docs\\diagrams\\activity-3-leased-check.html",
+  "specification": {
+    "sha256": "2a45970c0f37ea983afbdfbc449f9fd392cc24979eee9d2d26589f2fb684384e",
+    "bytes": 8333
+  },
+  "artifact": {
+    "sha256": "165b02c8c6a63c223ae45d1552641fdd2190128be1d55f58d33ddc668650d702",
+    "bytes": 851437
+  }
+}
