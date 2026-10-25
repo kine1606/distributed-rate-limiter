@@ -1,5 +1,5 @@
--- Daily quota: counts usage per UTC day, atomically, with the plan's overage policy and request-ID
--- deduplication (lua/README.md, Week 4).
+-- Quota: counts usage per UTC day or UTC calendar month, atomically, with the plan's overage policy
+-- and request-ID deduplication (lua/README.md, Week 4; months and boosts: docs/PRODUCT_PLAN.md, P1).
 --
 -- KEYS[1]  hash-tagged quota key, e.g. {cust:42}:daily_quota:q
 -- KEYS[2]  optional, same hash tag: the request's stored answer, e.g. {cust:42}:daily_quota:req:<id>
@@ -8,8 +8,12 @@
 -- ARGV[2]  cost of this request
 -- ARGV[3]  overage policy at the limit: "hard" (default) | "grace" | "cap"
 -- ARGV[4]  grace amount (grace) or overage cap (cap); default 0
--- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1), replayed (0|1) }
+-- ARGV[5]  period: "day" (default) | "month" (UTC calendar month; the limit is per month)
+-- ARGV[6]  boost: extra units on top of the limit while it lasts; default 0
+-- ARGV[7]  boost end, Unix ms by the Redis clock (the same clock as the reset); default 0 = none
+-- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1), replayed (0|1), limit }
 --          replayed = 1: the stored answer of a retried request ID, not counted again
+--          limit = the limit in force, the boost included
 --
 -- State stores `used` (not remaining) so a plan change never rewrites history.
 -- The day number comes from Redis TIME, so all instances agree on rollover.
@@ -21,27 +25,55 @@ local limit  = tonumber(ARGV[1])
 local cost   = tonumber(ARGV[2])
 local policy = ARGV[3] or 'hard'
 local extra  = tonumber(ARGV[4]) or 0
+local monthly = ARGV[5] == 'month'
+local boost = tonumber(ARGV[6]) or 0
+local boost_until = tonumber(ARGV[7]) or 0
 
 local t = redis.call('TIME')
 local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local day_ms = 86400000
 local day = math.floor(now_ms / day_ms)
-local reset_after = (day + 1) * day_ms - now_ms
+if now_ms < boost_until then limit = limit + boost end
+
+-- The period this call counts in, the counter field that holds it, and the time until it ends.
+local field, period, reset_after = 'day', day, (day + 1) * day_ms - now_ms
+if monthly then
+  -- Days since 1970-01-01 to year * 12 + month - 1, and back to the first day of the next month
+  -- (H. Hinnant's civil-calendar algorithms, valid for every date Redis can return).
+  local z = day + 719468
+  local era = math.floor(z / 146097)
+  local doe = z - era * 146097
+  local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524) - math.floor(doe / 146096)) / 365)
+  local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+  local mp = math.floor((5 * doy + 2) / 153)
+  local m = mp < 10 and mp + 3 or mp - 9
+  local y = yoe + era * 400 + (m <= 2 and 1 or 0)
+  field, period = 'month', y * 12 + m - 1
+  local ny, nm = y, m + 1  -- the next month
+  if nm > 12 then ny, nm = y + 1, 1 end
+  if nm <= 2 then ny = ny - 1 end
+  local nera = math.floor(ny / 400)
+  local nyoe = ny - nera * 400
+  local nmp = nm > 2 and nm - 3 or nm + 9
+  local ndoe = nyoe * 365 + math.floor(nyoe / 4) - math.floor(nyoe / 100) + math.floor((153 * nmp + 2) / 5)
+  reset_after = (nera * 146097 + ndoe - 719468) * day_ms - now_ms
+end
 
 -- 1. A retry of a request already decided gets the stored answer and is not counted again.
 if KEYS[2] then
   local stored = redis.call('GET', KEYS[2])
   if stored then
     local a, u, r, o = string.match(stored, '^(%d+),(%d+),(%d+),(%d+)$')
-    return { tonumber(a), tonumber(u), tonumber(r), reset_after, tonumber(o), 1 }
+    return { tonumber(a), tonumber(u), tonumber(r), reset_after, tonumber(o), 1, limit }
   end
 end
 
--- 2. Load today's counters; a new UTC day (or first use) starts both at zero.
-local st = redis.call('HMGET', KEYS[1], 'day', 'used', 'overage_used')
+-- 2. Load this period's counters; a new period (or first use) starts both at zero. A customer moved
+-- between daily and monthly plans starts the new kind of period at zero.
+local st = redis.call('HMGET', KEYS[1], field, 'used', 'overage_used')
 local used = tonumber(st[2]) or 0
 local over_used = tonumber(st[3]) or 0
-if tonumber(st[1]) ~= day then
+if tonumber(st[1]) ~= period then
   used = 0
   over_used = 0
 end
@@ -66,8 +98,13 @@ elseif policy == 'cap' then
   end
 end
 
-redis.call('HSET', KEYS[1], 'day', day, 'used', used, 'overage_used', over_used)
--- Keep the key until the day ends plus a margin, then Redis cleans it up.
+if monthly then
+  redis.call('HDEL', KEYS[1], 'day')
+else
+  redis.call('HDEL', KEYS[1], 'month')
+end
+redis.call('HSET', KEYS[1], field, period, 'used', used, 'overage_used', over_used)
+-- Keep the key until the period ends plus a margin, then Redis cleans it up.
 redis.call('PEXPIRE', KEYS[1], reset_after + 3600000)
 
 local remaining = limit - used
@@ -77,4 +114,4 @@ if remaining < 0 then remaining = 0 end   -- after a downgrade, or in grace, use
 if KEYS[2] then
   redis.call('SET', KEYS[2], allowed .. ',' .. used .. ',' .. remaining .. ',' .. overage, 'PX', 300000)
 end
-return { allowed, used, remaining, reset_after, overage, 0 }
+return { allowed, used, remaining, reset_after, overage, 0, limit }

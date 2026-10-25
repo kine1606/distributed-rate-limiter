@@ -63,5 +63,29 @@ TEST(Plan, ZeroIsAValidLimit) {  // the suspended preset
   EXPECT_EQ(p.refill, 0u);
 }
 
+TEST(Plan, PeriodAndBoost) {  // Phase 2, P1
+  const Plan p = ParsePlan({{"daily", "50000"}, {"period", "month"}, {"boost", "500"}, {"boost_until", "1792900000000"}});
+  EXPECT_EQ(p.period, QuotaPeriod::kMonth);
+  EXPECT_EQ(p.boost, 500u);
+  EXPECT_EQ(p.boost_until_ms, 1792900000000);
+  const Plan bad = ParsePlan({{"period", "week"}, {"boost", "-3"}, {"boost_until", "soon"}});
+  EXPECT_EQ(bad.period, QuotaPeriod::kDay);  // unknown: the daily default
+  EXPECT_EQ(bad.boost, 0u);
+  EXPECT_EQ(bad.boost_until_ms, 0);
+}
+
+TEST(Plan, QuotaStampChangesWithABoostOrThePeriod) {
+  const Plan base = ParsePlan({{"daily", "2000"}});
+  Plan boosted = base, longer = base, monthly = base;
+  boosted.boost = 100;
+  longer.boost = 100;
+  longer.boost_until_ms = 5;
+  monthly.period = QuotaPeriod::kMonth;
+  EXPECT_NE(QuotaStamp(base), QuotaStamp(boosted));
+  EXPECT_NE(QuotaStamp(boosted), QuotaStamp(longer));
+  EXPECT_NE(QuotaStamp(base), QuotaStamp(monthly));
+  EXPECT_EQ(QuotaStamp(base), QuotaStamp(ParsePlan({{"daily", "2000"}})));
+}
+
 }  // namespace
 }  // namespace ratelimiter

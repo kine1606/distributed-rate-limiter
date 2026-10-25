@@ -50,7 +50,8 @@ std::vector<std::string> Args(const Rule& rule, std::uint32_t requested) {
     case Algorithm::kQuota: {
       static constexpr std::array<const char*, 3> kPolicy{"hard", "grace", "cap"};  // indexed by Overage
       return {std::to_string(rule.limit), std::to_string(requested), kPolicy[static_cast<std::size_t>(rule.overage)],
-              std::to_string(rule.overage_extra)};
+              std::to_string(rule.overage_extra), rule.quota_period == QuotaPeriod::kMonth ? "month" : "day",
+              std::to_string(rule.boost), std::to_string(rule.boost_until_ms)};
     }
   }
   return {};
@@ -58,8 +59,8 @@ std::vector<std::string> Args(const Rule& rule, std::uint32_t requested) {
 
 ScriptResult Parse(Algorithm algorithm, const Reply& v) {
   ScriptResult r;
-  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms, overage, replayed}
-    if (v.size() != 6) {
+  if (algorithm == Algorithm::kQuota) {  // {allowed, used, remaining, reset_after_ms, overage, replayed, limit}
+    if (v.size() != 7) {
       r.redis_error = true;
       return r;
     }
@@ -69,6 +70,7 @@ ScriptResult Parse(Algorithm algorithm, const Reply& v) {
     r.retry_after_ms = r.allowed ? 0 : r.reset_after_ms;
     r.overage = v[4] == 1;
     r.replayed = v[5] == 1;
+    r.limit = static_cast<std::uint32_t>(v[6]);
     return r;
   }
   if (v.size() != 3) {  // {allowed, remaining, retry_after_ms}

@@ -22,6 +22,9 @@ enum class FailurePolicy { kFailOpen, kFailClosed };
 // allow a free grace amount, or allow overage billed separately up to a cap.
 enum class Overage : std::uint8_t { kHard, kGrace, kCap };
 
+// The period a quota counts in: the UTC day, or the UTC calendar month (Phase 2, P1).
+enum class QuotaPeriod : std::uint8_t { kDay, kMonth };
+
 struct Rule {
   std::string name;
   Algorithm algorithm{Algorithm::kTokenBucket};
@@ -33,6 +36,9 @@ struct Rule {
   FailurePolicy failure_policy{FailurePolicy::kFailClosed};
   Overage overage{Overage::kHard};   // quota rules: filled from the plan like the limit
   std::uint32_t overage_extra{0};    // grace amount (kGrace) or overage cap (kCap)
+  QuotaPeriod quota_period{QuotaPeriod::kDay};  // quota rules, from the plan: the limit is per day or per month
+  std::uint32_t boost{0};            // quota rules, from the plan: extra units until boost_until_ms
+  std::int64_t boost_until_ms{0};    // Unix ms by the Redis clock; 0 = no boost
   bool quota_auto{false};            // quota_mode: auto: plans of kLeasedQuotaFrom a day or more are leased
   std::uint32_t lease_chunk_pct{10};  // leased token buckets: chunk cap C in % of the limit (bound limit + N x C)
   // A customer rule (Week 4) has no algorithm of its own: it names a token-bucket rule checked

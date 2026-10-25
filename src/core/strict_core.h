@@ -74,6 +74,9 @@ class StrictCore final : public RateLimiterCore {
       numbers.limit = plan.daily;
       numbers.overage = plan.overage;
       numbers.overage_extra = plan.extra;
+      numbers.quota_period = plan.period;
+      numbers.boost = plan.boost;
+      numbers.boost_until_ms = plan.boost_until_ms;
     } else if (rule.limit_from == PlanLimit::kBurst) {
       numbers.limit = plan.burst;
       numbers.refill_per_sec = plan.refill;
@@ -95,7 +98,7 @@ class StrictCore final : public RateLimiterCore {
       r.allowed = s.allowed;
       if (!s.allowed) r.reason = rule.algorithm == Algorithm::kQuota ? Reason::kQuotaExhausted : Reason::kRateLimited;
       if (s.overage) r.reason = Reason::kOverage;
-      r.limit = limit;
+      r.limit = s.limit != 0 ? s.limit : limit;  // a quota reports its limit in force, a boost included
       r.remaining = s.remaining;
       r.retry_after_ms = s.retry_after_ms;
       r.reset_after_ms = s.reset_after_ms;

@@ -101,6 +101,22 @@ class LuaTest : public ::testing::Test {
     if (!req_key.empty()) keys.push_back(req_key);
     return RunKeys(quota_sha_, keys, {std::to_string(limit), std::to_string(cost), policy, std::to_string(extra)});
   }
+  // quota.lua with a period ("day" | "month") and a boost of `boost` units until `boost_until_ms`.
+  Reply QuotaV3(const std::string& key, int limit, const std::string& period, int boost = 0,
+                long long boost_until_ms = 0) {
+    return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", period, std::to_string(boost),
+                                 std::to_string(boost_until_ms)});
+  }
+  // The UTC calendar month of `ms` as the script numbers it, year * 12 + month - 1, and the ms from
+  // `ms` to the first day of the next month.
+  static std::pair<long long, long long> MonthOf(long long ms) {
+    using namespace std::chrono;
+    const sys_days day{floor<days>(sys_time<milliseconds>(milliseconds(ms)))};
+    const year_month_day ymd{day};
+    const sys_days next{year_month_day{(ymd.year() / ymd.month() / 1) + months(1)}};
+    return {static_cast<int>(ymd.year()) * 12LL + static_cast<unsigned>(ymd.month()) - 1,
+            duration_cast<milliseconds>(next.time_since_epoch()).count() - ms};
+  }
   // Today's quota state, as if `used` units were already consumed (request used + 1 comes next).
   void SetUsedToday(const std::string& key, int used) {
     const std::string day = std::to_string(RedisNowMs() / 86400000);
@@ -324,6 +340,48 @@ TEST_F(LuaTest, QuotaKeyExpiresAfterDayEnds) {
   EXPECT_LE(ttl, 86400000 + 3600000);
 }
 
+// ---- quota v3: monthly periods and boosts (Phase 2, P1) ----
+
+TEST_F(LuaTest, MonthlyQuotaCountsAcrossDaysAndStartsAgainInANewMonth) {
+  const std::string k = "{qm1}:quota";
+  Del(k);
+  const auto [month, until_next] = MonthOf(RedisNowMs());
+  // 4 used earlier this month, on other days: a monthly quota of 5 has one left.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s month %lld used 4", k.c_str(), month));
+  const auto r = QuotaV3(k, 5, "month");
+  ASSERT_EQ(r.ints.size(), 7u);
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[2], 0);
+  EXPECT_NEAR(static_cast<double>(r.ints[3]), static_cast<double>(until_next), 2000.0);  // to the 1st, 00:00 UTC
+  EXPECT_EQ(QuotaV3(k, 5, "month").ints[0], 0);
+  EXPECT_EQ(HGet(k, "month"), std::to_string(month));
+  EXPECT_EQ(HGet(k, "day"), "");
+  EXPECT_GT(Pttl(k), until_next - 2000);  // kept past the month's end, for the invoice
+
+  // Last month full: this month starts at zero.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s month %lld used 5", k.c_str(), month - 1));
+  const auto fresh = QuotaV3(k, 5, "month");
+  EXPECT_EQ(fresh.ints[0], 1);
+  EXPECT_EQ(fresh.ints[1], 1);
+}
+
+TEST_F(LuaTest, ABoostRaisesTheLimitUntilItEnds) {
+  const std::string k = "{qb1}:quota", ended = "{qb2}:quota";
+  Del(k);
+  Del(ended);
+  const long long now = RedisNowMs();
+  for (int i = 1; i <= 3; ++i) {  // a limit of 1, plus 2 for the next minute
+    const auto r = QuotaV3(k, 1, "day", 2, now + 60000);
+    EXPECT_EQ(r.ints[0], 1) << "call " << i;
+    EXPECT_EQ(r.ints[6], 3);
+  }
+  EXPECT_EQ(QuotaV3(k, 1, "day", 2, now + 60000).ints[0], 0);
+  const auto r = QuotaV3(ended, 1, "day", 2, now - 1000);  // the boost ended a second ago
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[6], 1);
+  EXPECT_EQ(QuotaV3(ended, 1, "day", 2, now - 1000).ints[0], 0);
+}
+
 // ---- quota v2: overage policies and request id (Week 4) ----
 
 // The Week 4 gate on the script: the same request 2,001 on three plans gives three answers.
@@ -336,7 +394,8 @@ TEST_F(LuaTest, Request2001OnHardGraceAndCapGivesThreeDifferentAnswers) {
   const auto h = QuotaV2(hard, 2000, 1, "hard", 0);
   const auto g = QuotaV2(grace, 2000, 1, "grace", 200);
   const auto c = QuotaV2(cap, 2000, 1, "cap", 1000);
-  ASSERT_EQ(h.ints.size(), 6u);
+  ASSERT_EQ(h.ints.size(), 7u);
+  EXPECT_EQ(h.ints[6], 2000);  // the limit in force
   EXPECT_EQ(h.ints[0], 0);  // hard: denied
   EXPECT_EQ(h.ints[4], 0);
   EXPECT_EQ(g.ints[0], 1);  // grace: allowed, free
