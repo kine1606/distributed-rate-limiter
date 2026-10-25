@@ -118,10 +118,10 @@ void CompositeCore::Check(const CheckRequest& request, CheckCallback done) {
         }
         done(q);
       };
-      // Monthly and boosted quotas take the exact path: only the script sees the Redis clock that ends
-      // a month or a boost. shortcut: a large monthly or boosted plan pays a script per check; lease
-      // them per period if such plans become common.
-      const bool plain_daily = plan.period == QuotaPeriod::kDay && plan.boost == 0;
+      // Monthly, boosted and topped-up quotas take the exact path: only the script sees the Redis clock
+      // that ends a month, a boost or a top-up's period. shortcut: a large plan of that kind pays a
+      // script per check; lease them per period if such plans become common.
+      const bool plain_daily = plan.period == QuotaPeriod::kDay && plan.boost == 0 && plan.topup == 0;
       const Rule* leased = quota_leases_ != nullptr && quota.quota_auto && plan.daily >= kLeasedQuotaFrom && plain_daily
                                ? LeasedQuotaRule(quota, plan.daily)
                                : nullptr;

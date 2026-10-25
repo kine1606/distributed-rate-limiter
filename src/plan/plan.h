@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 
@@ -22,6 +23,8 @@ struct Plan {
   QuotaPeriod period{QuotaPeriod::kDay};  // `daily` is the quota per day, or per month (field "period")
   std::uint32_t boost{0};                 // extra quota until boost_until_ms (Unix ms, Redis clock)
   std::int64_t boost_until_ms{0};
+  std::uint32_t topup{0};                 // prepaid units for the period topup_period (P2), "d<day>" or
+  std::string topup_period{};             // "m<year * 12 + month - 1>"; another period ignores them
 };
 
 // Identifies a plan's quota terms, so a denial recorded under them (DenyCache) is ignored once the
@@ -31,7 +34,8 @@ inline std::uint64_t QuotaStamp(const Plan& p) {
   std::uint64_t h = (std::uint64_t{p.daily} << 32) | p.extra;
   for (const std::uint64_t v : {std::uint64_t{static_cast<std::uint8_t>(p.overage)},
                                 std::uint64_t{static_cast<std::uint8_t>(p.period)}, std::uint64_t{p.boost},
-                                static_cast<std::uint64_t>(p.boost_until_ms)}) {
+                                static_cast<std::uint64_t>(p.boost_until_ms), std::uint64_t{p.topup},
+                                std::uint64_t{std::hash<std::string>{}(p.topup_period)}}) {
     h = (h ^ (v + kMix + (h << 6) + (h >> 2))) * kMix;
   }
   return h;
@@ -59,6 +63,14 @@ inline Plan ParsePlan(const std::unordered_map<std::string, std::string>& fields
     if (ec == std::errc{} && end == it->second.data() + it->second.size() && v >= 0) p.boost_until_ms = v;
   }
   if (const auto it = fields.find("period"); it != fields.end() && it->second == "month") p.period = QuotaPeriod::kMonth;
+  read("topup", p.topup);
+  if (const auto it = fields.find("topup_period"); it != fields.end()) {  // "d" or "m", then 1 to 9 digits
+    const std::string& v = it->second;
+    const bool ok = v.size() >= 2 && v.size() <= 10 && (v[0] == 'd' || v[0] == 'm') &&
+                    v.find_first_not_of("0123456789", 1) == std::string::npos;
+    if (ok) p.topup_period = v;
+  }
+  if (p.topup_period.empty()) p.topup = 0;  // units without a period apply to none
   if (const auto it = fields.find("overage"); it != fields.end()) {
     if (it->second == "grace") p.overage = Overage::kGrace;
     if (it->second == "cap") p.overage = Overage::kCap;

@@ -40,6 +40,8 @@ class LuaTest : public ::testing::Test {
       host = a.substr(0, c);
       if (c != std::string::npos) port = std::stoi(a.substr(c + 1));
     }
+    host_ = host;
+    port_ = port;
     ctx_.reset(redisConnect(host.c_str(), port));
     if (!ctx_ || ctx_->err) GTEST_SKIP() << "Redis not reachable at " << host << ":" << port;
     tb_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/token_bucket.lua");
@@ -106,6 +108,11 @@ class LuaTest : public ::testing::Test {
                 long long boost_until_ms = 0) {
     return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", period, std::to_string(boost),
                                  std::to_string(boost_until_ms)});
+  }
+  // quota.lua with a prepaid top-up of `topup` units bought for `topup_period` ("d<day>" or "m<month>").
+  Reply QuotaTopUp(const std::string& key, int limit, int topup, const std::string& topup_period) {
+    return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", "day", "0", "0", std::to_string(topup),
+                                 topup_period});
   }
   // The UTC calendar month of `ms` as the script numbers it, year * 12 + month - 1, and the ms from
   // `ms` to the first day of the next month.
@@ -177,6 +184,8 @@ class LuaTest : public ::testing::Test {
 
   struct Closer { void operator()(redisContext* c) const { redisFree(c); } };
   std::unique_ptr<redisContext, Closer> ctx_;
+  std::string host_;
+  int port_ = 0;
   std::string tb_sha_, quota_sha_, fw_sha_, sw_sha_, return_sha_;
   std::chrono::steady_clock::time_point mono_start_;
   long long wall_start_ = 0;
@@ -380,6 +389,69 @@ TEST_F(LuaTest, ABoostRaisesTheLimitUntilItEnds) {
   EXPECT_EQ(r.ints[0], 1);
   EXPECT_EQ(r.ints[6], 1);
   EXPECT_EQ(QuotaV3(ended, 1, "day", 2, now - 1000).ints[0], 0);
+}
+
+// ---- quota v4: prepaid top-ups and alerts (Phase 2, P2) ----
+
+TEST_F(LuaTest, ATopUpCountsOnlyInThePeriodItWasBoughtFor) {
+  const std::string k = "{qt1}:quota", old = "{qt2}:quota";
+  Del(k);
+  Del(old);
+  const std::string today = "d" + std::to_string(RedisNowMs() / 86400000);
+  for (int i = 1; i <= 3; ++i) EXPECT_EQ(QuotaTopUp(k, 1, 2, today).ints[0], 1) << "call " << i;
+  const auto denied = QuotaTopUp(k, 1, 2, today);
+  EXPECT_EQ(denied.ints[0], 0);
+  EXPECT_EQ(denied.ints[6], 3);  // 1 + the top-up
+  const std::string yesterday = "d" + std::to_string(RedisNowMs() / 86400000 - 1);
+  const auto r = QuotaTopUp(old, 1, 2, yesterday);
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[6], 1);  // bought for another period: no effect
+  EXPECT_EQ(QuotaTopUp(old, 1, 2, yesterday).ints[0], 0);
+}
+
+TEST_F(LuaTest, EachAlertIsPublishedOncePerPeriodAndNeverForAReplay) {
+  std::unique_ptr<redisContext, Closer> sub(redisConnect(host_.c_str(), port_));
+  ASSERT_TRUE(sub && !sub->err);
+  freeReplyObject(redisCommand(sub.get(), "SUBSCRIBE rl-alerts"));
+  redisSetTimeout(sub.get(), timeval{2, 0});
+  const auto next = [&sub]() -> std::string {  // the next message on rl-alerts
+    void* reply = nullptr;
+    if (redisGetReply(sub.get(), &reply) != REDIS_OK || reply == nullptr) return "(none)";
+    auto* r = static_cast<redisReply*>(reply);
+    std::string payload = r->type == REDIS_REPLY_ARRAY && r->elements == 3 ? r->element[2]->str : "(other)";
+    freeReplyObject(r);
+    return payload;
+  };
+  const std::string k = "{acme|ca1}:daily_quota:q", req = "{acme|ca1}:daily_quota:req:x";
+  Del(k);
+  Del(req);
+  std::vector<int> allowed;
+  for (int i = 1; i <= 7; ++i) allowed.push_back(static_cast<int>(QuotaV2(k, 5, 1, "cap", 2).ints[0]));
+  EXPECT_EQ(allowed, (std::vector<int>{1, 1, 1, 1, 1, 1, 1}));  // 5 in the plan, 2 billed
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2, req).ints[0], 0);      // the first denial
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2, req).ints[5], 1);      // its replay
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2).ints[0], 0);           // a second denial
+  freeReplyObject(redisCommand(ctx_.get(), "PUBLISH rl-alerts end"));
+
+  const std::vector<std::pair<std::string, std::string>> want{
+      {"quota.80", "\"used\":4"}, {"quota.100", "\"used\":5"}, {"overage.started", "\"overage_used\":1"},
+      {"quota.denied", "\"overage_used\":2"}};
+  for (const auto& [event, detail] : want) {
+    const std::string m = next();
+    EXPECT_NE(m.find("\"event\":\"" + event + "\""), std::string::npos) << m;
+    EXPECT_NE(m.find(detail), std::string::npos) << m;
+    EXPECT_NE(m.find("\"customer\":\"acme|ca1\""), std::string::npos) << m;
+    EXPECT_NE(m.find("\"limit\":5"), std::string::npos) << m;
+  }
+  EXPECT_EQ(next(), "end");  // nothing more: not for the replay, not for the second denial
+
+  // A new period starts the alerts again.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s day %lld", k.c_str(), RedisNowMs() / 86400000 - 1));
+  for (int i = 1; i <= 4; ++i) QuotaV2(k, 5, 1, "cap", 2);
+  freeReplyObject(redisCommand(ctx_.get(), "PUBLISH rl-alerts end"));
+  const std::string again = next();
+  EXPECT_NE(again.find("\"event\":\"quota.80\""), std::string::npos) << again;
+  EXPECT_EQ(next(), "end");
 }
 
 // ---- quota v2: overage policies and request id (Week 4) ----

@@ -11,9 +11,15 @@
 -- ARGV[5]  period: "day" (default) | "month" (UTC calendar month; the limit is per month)
 -- ARGV[6]  boost: extra units on top of the limit while it lasts; default 0
 -- ARGV[7]  boost end, Unix ms by the Redis clock (the same clock as the reset); default 0 = none
+-- ARGV[8]  prepaid top-up: extra units for one period (P2); default 0
+-- ARGV[9]  the period the top-up was bought for, "d<day>" or "m<year * 12 + month - 1>"
 -- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1), replayed (0|1), limit }
 --          replayed = 1: the stored answer of a retried request ID, not counted again
---          limit = the limit in force, the boost included
+--          limit = the limit in force, the boost and a top-up for this period included
+-- Alerts (P2): the first time in a period that used reaches 80% of the limit, reaches the limit, goes
+-- into billed overage, or is denied, the script publishes one JSON message on the channel rl-alerts
+-- (tools: control/notifier.py). Bits in the counter's `alerts` field make each one once a period;
+-- a replayed answer sends none.
 --
 -- State stores `used` (not remaining) so a plan change never rewrites history.
 -- The day number comes from Redis TIME, so all instances agree on rollover.
@@ -28,6 +34,8 @@ local extra  = tonumber(ARGV[4]) or 0
 local monthly = ARGV[5] == 'month'
 local boost = tonumber(ARGV[6]) or 0
 local boost_until = tonumber(ARGV[7]) or 0
+local topup = tonumber(ARGV[8]) or 0
+local topup_period = ARGV[9] or ''
 
 local t = redis.call('TIME')
 local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -58,6 +66,8 @@ if monthly then
   local ndoe = nyoe * 365 + math.floor(nyoe / 4) - math.floor(nyoe / 100) + math.floor((153 * nmp + 2) / 5)
   reset_after = (nera * 146097 + ndoe - 719468) * day_ms - now_ms
 end
+local period_name = (monthly and 'm' or 'd') .. period
+if topup > 0 and topup_period == period_name then limit = limit + topup end
 
 -- 1. A retry of a request already decided gets the stored answer and is not counted again.
 if KEYS[2] then
@@ -70,12 +80,14 @@ end
 
 -- 2. Load this period's counters; a new period (or first use) starts both at zero. A customer moved
 -- between daily and monthly plans starts the new kind of period at zero.
-local st = redis.call('HMGET', KEYS[1], field, 'used', 'overage_used')
+local st = redis.call('HMGET', KEYS[1], field, 'used', 'overage_used', 'alerts')
 local used = tonumber(st[2]) or 0
 local over_used = tonumber(st[3]) or 0
+local alerts = tonumber(st[4]) or 0
 if tonumber(st[1]) ~= period then
   used = 0
   over_used = 0
+  alerts = 0
 end
 
 -- 3. Decide. Within the limit the policy does not matter.
@@ -103,15 +115,35 @@ if monthly then
 else
   redis.call('HDEL', KEYS[1], 'month')
 end
-redis.call('HSET', KEYS[1], field, period, 'used', used, 'overage_used', over_used)
+-- 4. Alerts: each threshold once a period, against the limit in force.
+local sent = {}
+local function alert(b, event)
+  if bit.band(alerts, b) == 0 then
+    alerts = bit.bor(alerts, b)
+    sent[#sent + 1] = event
+  end
+end
+if limit > 0 and used * 5 >= limit * 4 then alert(1, 'quota.80') end
+if limit > 0 and used >= limit then alert(2, 'quota.100') end
+if over_used > 0 then alert(4, 'overage.started') end
+if allowed == 0 then alert(8, 'quota.denied') end
+
+redis.call('HSET', KEYS[1], field, period, 'used', used, 'overage_used', over_used, 'alerts', alerts)
 -- Keep the key until the period ends plus a margin, then Redis cleans it up.
 redis.call('PEXPIRE', KEYS[1], reset_after + 3600000)
 
 local remaining = limit - used
 if remaining < 0 then remaining = 0 end   -- after a downgrade, or in grace, used can exceed limit
 
--- 4. Store the answer, denials too, so a retry within 5 minutes gets exactly this result.
+-- 5. Store the answer, denials too, so a retry within 5 minutes gets exactly this result.
 if KEYS[2] then
   redis.call('SET', KEYS[2], allowed .. ',' .. used .. ',' .. remaining .. ',' .. overage, 'PX', 300000)
+end
+if #sent > 0 then
+  local customer = string.match(KEYS[1], '^{(.*)}:') or KEYS[1]  -- the hash tag: the customer
+  for _, event in ipairs(sent) do
+    redis.call('PUBLISH', 'rl-alerts', cjson.encode({customer = customer, event = event, used = used,
+      overage_used = over_used, limit = limit, period = period_name, at_ms = now_ms}))
+  end
 end
 return { allowed, used, remaining, reset_after, overage, 0, limit }

@@ -87,5 +87,23 @@ TEST(Plan, QuotaStampChangesWithABoostOrThePeriod) {
   EXPECT_EQ(QuotaStamp(base), QuotaStamp(ParsePlan({{"daily", "2000"}})));
 }
 
+TEST(Plan, TopUpNeedsAWellFormedPeriod) {  // Phase 2, P2
+  const Plan p = ParsePlan({{"topup", "500"}, {"topup_period", "d20751"}});
+  EXPECT_EQ(p.topup, 500u);
+  EXPECT_EQ(p.topup_period, "d20751");
+  EXPECT_EQ(ParsePlan({{"topup", "500"}, {"topup_period", "m24321"}}).topup_period, "m24321");
+  for (const char* bad : {"x20751", "d", "d12a", "m12345678901"}) {
+    const Plan b = ParsePlan({{"topup", "500"}, {"topup_period", bad}});
+    EXPECT_EQ(b.topup, 0u) << bad;  // units for no period apply to none
+    EXPECT_EQ(b.topup_period, "") << bad;
+  }
+  EXPECT_EQ(ParsePlan({{"topup", "500"}}).topup, 0u);
+  Plan topped = ParsePlan({{"daily", "2000"}});
+  const std::uint64_t before = QuotaStamp(topped);
+  topped.topup = 500;
+  topped.topup_period = "d20751";
+  EXPECT_NE(QuotaStamp(topped), before);
+}
+
 }  // namespace
 }  // namespace ratelimiter

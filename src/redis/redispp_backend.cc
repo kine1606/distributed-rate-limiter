@@ -51,7 +51,8 @@ std::vector<std::string> Args(const Rule& rule, std::uint32_t requested) {
       static constexpr std::array<const char*, 3> kPolicy{"hard", "grace", "cap"};  // indexed by Overage
       return {std::to_string(rule.limit), std::to_string(requested), kPolicy[static_cast<std::size_t>(rule.overage)],
               std::to_string(rule.overage_extra), rule.quota_period == QuotaPeriod::kMonth ? "month" : "day",
-              std::to_string(rule.boost), std::to_string(rule.boost_until_ms)};
+              std::to_string(rule.boost), std::to_string(rule.boost_until_ms), std::to_string(rule.topup),
+              rule.topup_period};
     }
   }
   return {};

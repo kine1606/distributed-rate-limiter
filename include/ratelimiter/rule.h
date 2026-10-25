@@ -39,6 +39,8 @@ struct Rule {
   QuotaPeriod quota_period{QuotaPeriod::kDay};  // quota rules, from the plan: the limit is per day or per month
   std::uint32_t boost{0};            // quota rules, from the plan: extra units until boost_until_ms
   std::int64_t boost_until_ms{0};    // Unix ms by the Redis clock; 0 = no boost
+  std::uint32_t topup{0};            // quota rules, from the plan: prepaid units for one period (P2)
+  std::string topup_period{};        // the period they were bought for: "d<day>" or "m<month>"
   bool quota_auto{false};            // quota_mode: auto: plans of kLeasedQuotaFrom a day or more are leased
   std::uint32_t lease_chunk_pct{10};  // leased token buckets: chunk cap C in % of the limit (bound limit + N x C)
   // A customer rule (Week 4) has no algorithm of its own: it names a token-bucket rule checked
