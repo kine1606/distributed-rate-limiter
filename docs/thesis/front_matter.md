@@ -40,6 +40,10 @@ problem in two.
   N instances and a chunk cap C; the bound is proved and measured.
 - **Around both:** a deny cache answers customers out of quota without Redis, a plan cache is kept
   fresh by Pub/Sub, and each plan has a policy for when Redis fails.
+- **For many API owners (merchants):** each merchant's customers are named apart from an API key
+  resolved in memory. A management API and a web portal change limits at run time. The quota script keeps
+  each month's billable totals in the same atomic step as its decision, and invoices are made from them.
+  A merchant's backend capacity is a leased bucket with a reserve for paying customers.
 
 The evaluation tests the two halves of the claim separately, on one laptop.
 - **Exactness:** quotas were exact in 20 of 20 adversarial runs on four instances, and 22.6 million
@@ -51,6 +55,13 @@ The evaluation tests the two halves of the claim separately, on one laptop.
   makes two Redis round trips: 26,000 to 42,000 per second per instance.
 - **Failures:** a slow, silent or killed Redis master affected only its own customers, and no call
   failed.
+- **Merchants:**
+  - Merchants were isolated, and floods refused by their own limits or by the operator's check rate cost
+    the others almost nothing.
+  - Limit changes applied on two instances within 16 ms.
+  - Invoices equalled the metered usage for every customer, also with a master killed.
+  - Tenancy cost less than the measurement noise, and 10,000 merchants of 100 customers needed 193 bytes
+    of Redis memory per customer.
 
 From these measurements, 1,000,000 checks per second is estimated to need 15 to 50 instances and 17
 Redis masters; it was not measured.
@@ -75,6 +86,11 @@ toán làm hai phần.
   cận này được chứng minh và đo đạc.
 - **Xung quanh hai phần trên:** bộ nhớ đệm từ chối trả lời khách hàng đã hết hạn mức mà không cần hỏi
   Redis, bộ nhớ đệm gói được cập nhật qua Pub/Sub, và mỗi gói có chính sách riêng khi Redis gặp sự cố.
+- **Cho nhiều chủ API (merchant):** khách hàng của mỗi merchant được đặt tên riêng, nhờ khóa API được
+  tra cứu ngay trong bộ nhớ. Một API quản trị và một cổng web thay đổi giới hạn khi hệ thống đang chạy.
+  Script hạn mức lưu tổng số cần tính tiền của mỗi tháng trong cùng bước nguyên tử với quyết định, và
+  hóa đơn được lập từ đó. Năng lực xử lý của backend mỗi merchant là một bucket qua lease, có phần dự
+  trữ cho khách hàng trả phí.
 
 Phần đánh giá kiểm tra riêng từng nửa của luận điểm, trên một máy tính xách tay.
 - **Độ chính xác:** hạn mức chính xác trong 20/20 lần chạy với bốn máy chủ, và 22,6 triệu lượt kiểm
@@ -86,6 +102,13 @@ Phần đánh giá kiểm tra riêng từng nửa của luận điểm, trên m�
   lượt kiểm tra hạn mức đầy đủ cần hai lần hỏi Redis: 26.000 đến 42.000 lượt/giây mỗi máy chủ.
 - **Sự cố:** một nút Redis chậm, im lặng hoặc bị tắt chỉ ảnh hưởng đến khách hàng của chính nút đó,
   và không lời gọi nào thất bại.
+- **Merchant:**
+  - Các merchant được cô lập với nhau, và những đợt gọi dồn dập bị chặn bởi giới hạn của chính merchant
+    hay bởi giới hạn số lượt kiểm tra do nhà vận hành đặt gần như không ảnh hưởng đến merchant khác.
+  - Thay đổi giới hạn có hiệu lực trên hai máy chủ trong vòng 16 ms.
+  - Hóa đơn khớp với lượng sử dụng đo được của mọi khách hàng, kể cả khi một nút Redis chính bị tắt.
+  - Chi phí của cơ chế đa merchant nhỏ hơn độ nhiễu của phép đo, và 10.000 merchant mỗi merchant 100
+    khách hàng cần 193 byte bộ nhớ Redis cho mỗi khách hàng.
 
 Từ các số đo này, mức 1.000.000 lượt/giây được ước tính cần 15 đến 50 máy chủ và 17 nút Redis chính;
 con số này là ước tính, chưa được đo.

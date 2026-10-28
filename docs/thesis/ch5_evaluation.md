@@ -3,7 +3,8 @@
 This chapter tests the two halves of the thesis claim separately, as Chapter 1 set out. First
 correctness: quotas are exact under concurrency, retries, plan changes and failures (5.2 to 5.4).
 Then cost: what the leased design buys in throughput and latency, and what it costs in accuracy and
-isolation (5.5 to 5.10). Every number comes from a script in the repository, and every table names
+isolation (5.5 to 5.10). Then merchants: isolation, changes, billing, the spending cap, capacity, scale
+and the cost of tenancy (5.12). Every number comes from a script in the repository, and every table names
 its evidence file in `docs/thesis/evidence/`.
 
 ## 5.1 Setup
@@ -26,7 +27,7 @@ between runs, so the method follows from it.
 - **Comparisons:** builds or settings are compared in alternating runs within one session, never
   against a number from another day.
 - **Isolation:** for the matrix, the servers and load generators are pinned to separate cores (`taskset`).
-- **Extrapolation:** cluster-wide figures are labelled as estimates (5.12), never as measurements.
+- **Extrapolation:** cluster-wide figures are labelled as estimates (5.13), never as measurements.
 
 ## 5.2 Quota accuracy (evaluation test 1)
 
@@ -426,7 +427,171 @@ core did, are further assumptions.
 - *A master absorbs 120,000 script calls a second.* Redis Functions ran the same script at the same
   rate as `EVALSHA` (5.10), so the choice of command does not change it.
 
-## 5.12 Discussion and threats to validity
+## 5.12 Merchants (G10 to G14)
+
+The service was then evaluated with merchants (3.9), on the real limiter (`RL_TENANCY=merchants`, engine
+`leased`) and the management API, on the development cluster unless stated (`p4_merchants_2026-10-28.md`).
+
+**Isolation (G10).** Two merchants each had a customer named `cust-1`, on a plan of 5 calls a day. All
+nine checks passed:
+- *Separate customers:* A's customer was refused after its 5 calls, while B's was untouched.
+- *Separate management:* each merchant's API showed only its own usage, and A's management key could
+  neither see nor change B's customers.
+- *No naming trick:* calls naming `shop-b|cust-1` under A's API key did not reach B's customer.
+- *Keys:* an unknown key, and a revoked one, were refused at once.
+
+With a planted bug that put every merchant's customers in one namespace, four of the nine failed. The
+other five are decided by the API and the key index, which the bug does not touch.
+
+**A noisy merchant (G10).** Evaluation test 11 (5.8) was repeated with merchants:
+- *The others:* another merchant's 1,000 Pay customers at 5,000 checks a second.
+- *The noisy merchant:* 20,000 calls a second to one customer.
+- *Redis calls:* counted over all three masters. The others' own checks cost about 10,000 a second.
+
+*Table 5.14: A noisy merchant and another merchant's customers (medians of 3 runs).*
+
+| Noisy merchant's flood | Others' p50 | Others' p99 | Redis calls a second |
+| --- | --- | --- | --- |
+| none | 1.12 ms | 4.66 ms | 10,135 |
+| unknown API key | 2.14 ms | 14.39 ms | 10,115 |
+| over the operator's check rate | 1.65 ms | 3.76 ms | 10,281 |
+| over its own capacity | 1.65 ms | 3.44 ms | 11,575 |
+| over its customer's daily quota | 1.72 ms | 6.32 ms | 10,136 |
+| over its customer's burst, within quota | 2.23 ms | 16.38 ms | 30,144 |
+
+The others' calls were all answered and allowed, 50,000 of 50,000 in every run.
+- **Four floods cost Redis little or nothing:** an unknown key, a flood over the check rate, over the
+  capacity, or over the quota. The most was 1,440 calls a second above the baseline for 20,000 calls a
+  second of flood, from lease refills of the capacity. The others' latency rose only where the limiter's
+  CPU, shared with the load generators, answered 20,000 more calls a second.
+- **A flood over a customer's burst still costs Redis:** one script per call, the gap of 5.8.
+  - *The effect:* in one of three runs, 75 of the others' calls were answered by their plan's failure
+    policy instead of a counted decision.
+  - *The fix:* the operator's check rate, which holds Redis at its baseline.
+
+**Fixed by this test: a flood over the capacity.**
+- *What the first runs found:* each call over the capacity ran the customer's burst script, then
+  returned its token. That was two Redis calls per refused call, and up to 277 of the other merchant's
+  calls in a run were answered by their failure policy.
+- *The change:* while Redis says the capacity is out, the call is refused from the lease alone, before
+  the burst script (4.7).
+- *Measured in alternating runs* (Table 5.15).
+  - *Its cost on every check of a merchant with a capacity* (one more lease lookup): 32,567 checks a
+    second before and 30,141 after. The ranges overlap, so no difference is shown within the laptop's
+    noise.
+  - *Its effect on the result:* nothing is admitted that was refused before, since the early refusal
+    denies only what the lease would. The capacity property test gives the same totals with it.
+
+*Table 5.15: A flood over a merchant's capacity, before and after the early refusal (3 alternating runs each).*
+
+| Build | Redis calls a second | Others' p50 | Others' p99 |
+| --- | --- | --- | --- |
+| before | 41,655, 42,539, 42,342 | 5.09, 5.09, 4.47 ms | 44.38, 42.50, 44.38 ms |
+| after | 12,489, 12,721, 12,072 | 2.44, 2.54, 2.05 ms | 12.63, 27.55, 14.39 ms |
+
+**The latency of a change (G11).**
+- *Setup:* two limiters and a background load of 10,000 checks a second.
+- *Each change:* made through the management API. Then both limiters were checked in turn until each
+  answered with it.
+- *The customers:* a customer with a leased quota of 1,000,000 a day, and one held by the deny cache.
+
+*Table 5.16: From the API's answer to both limiters enforcing a change (30 trials each).*
+
+| Change | p50 | max | API call and propagation, max |
+| --- | --- | --- | --- |
+| suspend, resume | 2.19, 3.16 ms | 2.86, 4.02 ms | 13.3 ms |
+| quota down (a leased quota), up | 3.74, 3.21 ms | 5.82, 4.92 ms | 15.9 ms |
+| boost on (a customer denied), off | 4.09, 4.02 ms | 6.57, 5.52 ms | 14.9 ms |
+| the merchant's capacity on, off | 1.20, 2.24 ms | 5.77, 4.93 ms | 14.6 ms |
+
+- **Every change applied within 16 ms,** the API call included, against a goal of 1 s.
+- **Plan changes left no stale answers:** once the API answered, neither limiter answered under the
+  old terms, for a lowered leased quota too. The cached plan and denial are dropped on the message, and
+  a lowered quota leaves the leased path (3.4.5).
+- **A capacity change gave 1 or 2 old answers** in 10 of 60 trials, since it reaches the limiters by a
+  reload of the merchant table rather than a cache drop.
+
+**Billing exactness (G12).** The P3 gate was rerun on the final code: one merchant, 40 postpaid
+customers, 1,500 calls a second for 20 s over two limiters, on the fault cluster (replicas, AOF). The
+gateway retried with the same request id, and a master was killed 8 s in.
+
+*Table 5.17: Invoices against the counters and the gateway's view (`tests/eval/billing_gate.py`).*
+
+| Run | Calls | Told: in plan / overage | No decision after 6 tries | Counters and invoice: overage | Customers with a difference |
+| --- | --- | --- | --- | --- | --- |
+| no kill | 29,997 | 6,000 / 23,997 | 0 | 23,997 ($772.03 in all) | 0 |
+| master 7106 killed | 29,999 | 6,000 / 23,184 | 815 | 23,184 ($771.60) | 0 |
+| master 7105 killed | 29,996 | 6,000 / 23,744 | 252 | 23,744 ($771.90) | 0 |
+
+**Every invoice equalled the counters, and the counters equalled what the gateway was told,** for
+every customer in every run. Both limiters' usage events agreed too.
+- *Lost calls:* a call that got no decision after 6 attempts was neither counted nor billed.
+- *Not shown:* a killed master can still lose acknowledged increments that had not reached its replica
+  (3.9.6). These runs did not catch such a write, which is not evidence that none can be lost.
+
+**The spending cap (G13).**
+- *The test:* the property tests ran 2,000 seeds per configuration, 571,482 checks each, every answer
+  equal to a model of the rules. That included about 10,030 answers of billed overage and 2,661 customer
+  months with billed overage per configuration.
+- *Leases too:* the leased quota test found Redis granting nothing beyond the cap in 8,146 days.
+- *It can fail:* a bug planted in the script's transcription, letting billed overage go one call past
+  the cap, failed all four model tests at seed 2.
+
+**Capacity and priority (G14).**
+- *The merchant's capacity:* 1,000 calls a second, 30% reserved for plans with a fee.
+- *The load:* a Free flood at 5,000 a second, and paying customers asking for 100 to 600 a second.
+
+*Table 5.18: Calls admitted a second under a Free flood (medians of 3 runs, 10 s each).*
+
+| Load | Free | Paid admitted / asked | Total |
+| --- | --- | --- | --- |
+| 1 limiter, paid 100 a second | 686.6 | 100.0 / 100 | 786.6 |
+| 1 limiter, paid 300 a second | 656.4 | 300.0 / 300 | 956.4 |
+| 1 limiter, paid 600 a second | 624.7 | 378.5 / 600 | 1,003.2 |
+| 2 limiters, paid 300 a second | 654.9 | 300.0 / 300 | 954.9 |
+
+- **The capacity held:** at most 1,003.2 calls a second over 10 s. The property test checks every window
+  from 1 ms to 4 s against the capacity plus N × C, over 2,000 seeds; the fullest window reached 91% of
+  its bound.
+- **Free calls never took the reserve:** at most 687 a second of their 700.
+- **Paying customers kept the reserve, and no more.** Asking for at most the reserve, they lost no call.
+  Asking for 600, they got the 300 of the reserve plus about 78 from the shared part, where they compete
+  with the Free calls.
+
+**Many merchants.**
+- *The setup:* 10,000 merchants of 100 customers each, a million plans, written as the API writes them.
+- *Redis:* 193 bytes a customer, the merchant's key, catalogue and customer index included.
+- *A limiter:* loaded the 10,000 keys and answered within 0.10 s of starting, and used 118 MiB after
+  the load.
+- *Throughput:* 25,749 calls a second with a random merchant and customer on each call. Nearly every call
+  met a customer whose plan was not cached, so it paid a plan read besides its two scripts.
+- *A new merchant:* its key worked 36.7 ms after it was announced.
+
+**The cost of tenancy.** The customer cell of `bench/ab_compare.sh` was run in alternating runs of one
+build: the customer rule over Zipf 10,000 Pay customers, without tenancy, with it, and with a capacity
+and a check rate set too high to refuse.
+
+*Table 5.19: The cost of tenancy (5 alternating runs each).*
+
+| Variant | Checks a second, median (range) | Difference | p99 |
+| --- | --- | --- | --- |
+| without tenancy | 36,009 (31,631 to 38,240) | | 13.78 ms |
+| with tenancy | 36,760 (25,243 to 37,483) | +2.1% | 11.59 ms |
+| with tenancy, a capacity and a check rate | 34,614 (30,529 to 37,383) | −3.9% | 14.39 ms |
+
+**Tenancy costs less than this setup can measure.** The differences are inside the laptop's noise,
+and the last two runs were slower for every variant.
+- *Per call:* the API key costs a hash-map lookup in the thread's cache.
+- *Per check of a merchant with limits:* each of the merchant's buckets costs a lease hit.
+
+**The portal and the demo.**
+- *The portal:* a headless browser drove every action of the portal against the API, 22 of 22 checks
+  (4.7).
+- *Demo v2:* a Pay customer 30 calls past its quota was admitted as billed overage, and the invoice
+  preview showed the charge. A Free flood at 800 calls a second was held to the merchant's capacity,
+  while a paying customer kept all of its calls.
+
+## 5.13 Discussion and threats to validity
 
 **What the numbers support.**
 - Quotas are exact: 20 of 20 adversarial runs on four instances, and 22.6 million checks equal to a
@@ -436,12 +601,21 @@ core did, are further assumptions.
 - Where keys repeat, a lease hit costs about 2% over gRPC with no limiter. Where keys almost never
   repeat, a lease gains nothing over strict (5.6).
 - Failures degrade per plan, as documented, without failed calls.
+- Merchants are isolated by name, and a flood that a merchant's own limits or the operator's check rate
+  refuse costs the others almost nothing in Redis (5.12).
+- A change made through the management API applies on two instances within 16 ms, and invoices equal
+  the counters, also with a master killed (5.12).
+- Tenancy costs less than the laptop's noise of ±10% (5.12).
 
 **What they do not support yet.**
 - **Absolute throughput on server hardware.** The load generator shares the laptop.
 - **Scaling with instances.** On one laptop the instances share the CPUs, so the matrix shows only
   that no engine degrades with N (5.6).
 - **Behaviour under real network latency.** The 20 ms test is a proxy for it.
+- **Billing through any failover.** Three runs with a master killed lost nothing, but asynchronous
+  replication can lose an acknowledged increment, and these runs show only that it was rare there.
+- **Many instances for merchants.** The latency of a change and the capacity were measured on two; the
+  bound for N instances rests on the property test.
 
 **Threats to validity.**
 - **One laptop.** Client, limiter and Redis compete for the same cores, so throughput is a lower bound

@@ -903,6 +903,9 @@ a merchant before any engine work, and refuses a call without a known key with `
 - **No lock and no round trip per call.** Each instance loads the hash at start and again on a control
   message (`!merchants` on `plan-changes`). Each gRPC thread keeps the keys it has resolved, and drops
   them when a new index is published, so a revoked key stops at its next call.
+- **Encrypted on the way.** A key is a bearer credential: whoever reads it can use it. When gateways
+  reach the limiter over a network the platform does not own, the server runs with TLS (a certificate
+  and key in `RL_TLS_CERT` and `RL_TLS_KEY`). Plain text remains for a limiter beside its gateway.
 
 Rejected alternatives:
 - *A merchant field in the request:* any caller could claim to be any merchant.
@@ -948,13 +951,14 @@ exact path; plain daily plans keep the leased path of 3.4.5.
 | --- | --- | --- | --- |
 | Block | `hard` | an outage at the worst moment | yes (3.4.2) |
 | A bounded grace | `grace`, e.g. +10% | survives small spikes, free | yes (3.4.2) |
-| Allow now, bill later | `cap` (`postpaid` in the API): counted exactly as billable overage, up to a spending cap | no outage; pays for the overage | yes, per plan and per customer (3.9.5); the invoice is next |
+| Allow now, bill later | `cap` (`postpaid` in the API): counted exactly as billable overage, up to a spending cap | no outage; pays for the overage | yes, per plan and per customer (3.9.5), invoiced monthly (3.9.6) |
 | A boost | granted by the merchant, until a time | no outage, on the merchant's terms | yes (3.9.3) |
 | A prepaid top-up | bought by the customer, for this period | no outage; paid in advance | yes (3.9.5) |
 
 The recommended default:
 - *Free plans:* block.
-- *Paid plans:* a small grace, then billable overage up to a spending cap. The cap is what keeps a
+- *Paid plans:* a small grace, then billable overage up to a spending cap per quota period (a day on
+  a daily plan, so a month's bill holds at most the cap times its days). The cap is what keeps a
   faulty client from running up an unbounded bill.
 
 Billing a card later never means storing card numbers. A payment provider keeps the card; the service
@@ -996,5 +1000,124 @@ plan-change message of 3.4.4. The API's main choices, each against the alternati
   - *Why:* a webhook URL is chosen by the merchant, so it could point the platform at its own
     internal network.
   - *How:* URLs that resolve to private, loopback, link-local or reserved addresses are refused, when
-    registered and again before every delivery, and redirects are not followed.
+    registered and again before every delivery, and redirects are not followed. A delivery connects
+    to the very address that was checked, with the name kept for the `Host` header and the
+    certificate, so a name that answers a public address first and a private one next (DNS
+    rebinding) cannot redirect it.
 
+### 3.9.6 Metering and invoices
+
+A merchant bills its customers for what the service admitted, so the numbers on an invoice must be the
+numbers the quota decided with. The service keeps them where they are made.
+- **Counted in the decision.** The quota script (3.4.2) also keeps the calendar month's totals in the
+  customer's counter, in the same atomic step as the decision: units within the plan (free grace
+  included) and billed overage units. This holds for a daily quota too, since invoices are monthly.
+- **Kept until invoiced.**
+  - *Filing:* when a new month begins, the script files the last month's totals, if it had billed
+    overage, as a field of its own.
+  - *Retention:* a counter holding billed overage is kept 35 days past its month, so the billing job
+    finds it even if the customer never calls again.
+  - *Cleanup:* the billing job removes the filed month once it is invoiced.
+  - *What stays as before:* a counter with nothing to bill expires after its period. So a flood of
+    unknown customer ids costs no more memory than before.
+- **One invoice per customer and month.**
+  - *Contents:* the plan's monthly fee, the billed overage at the plan's price, and each top-up bought
+    in the month at the price recorded when it was bought.
+  - *Amounts:* integers in cents, each line rounded half up once.
+  - *Once:* the invoice id names the customer and the month, so closing a month again writes nothing
+    twice.
+- **Charged without a card number.**
+  - *How:* the card is typed into the payment provider's form, which returns a token. The service keeps
+    only the provider's customer id and charges it when the month closes, with the invoice as the
+    idempotency key.
+  - *Outcomes:* a declined charge suspends the customer (the `suspended` plan of 3.3.2). A customer without a card keeps an open
+    invoice for the merchant to collect.
+  - *Not stored:* a card number sent to the API is refused.
+  - *The provider:* a sandbox here, which takes the test tokens of a real provider.
+- **Persistence.** Redis appends every write to a file and syncs it once a second, so a restarted node
+  keeps its counters, less at most the last second. Replication stays asynchronous, so a killed master
+  can still lose writes it had not passed on; the evaluation measures this rather than hiding it
+  (Chapter 5).
+
+Rejected alternatives:
+- *Invoices from usage events* (3.3.4): exact enough for reports, but best effort, written per instance
+  and dropped when a buffer is full. Reconciling them against the counters is kept as a check.
+- *A billing database written on every call:* a second write on the request path, and a second record
+  that could disagree with the decision.
+- *Waiting for a replica on every quota write (`WAIT`):* closes the failover gap, but adds a replication
+  round trip to every exact check.
+
+### 3.9.7 Protecting the merchant's backend
+
+A quota is a count per day or month; a backend fails on calls per second. Quotas can be sold beyond
+what a backend takes at once, because not every customer uses its quota at the same moment.
+- **A capacity per merchant.**
+  - *The setting:* the merchant sets how many calls a second its backend takes from all its customers.
+  - *Where it is taken:* after the customer's own burst and before its quota, so a call it refuses is
+    never counted or billed. While Redis says the capacity is out, a call is refused before the burst
+    check too, from the lease alone. Otherwise a flood over the capacity would cost Redis a burst script
+    and a token return per refused call, which the evaluation found slowing other merchants (5.12).
+  - *How:* a token bucket keyed by the merchant, served from leases (3.5) like any other bucket. One
+    merchant's capacity is one hot key, the case leases serve best. N instances admit at most the
+    capacity plus N times one lease chunk.
+- **A reserve for paying customers.**
+  - *The split:* a share of the capacity (for example 20%) is a second bucket, which only plans with a
+    fee may use.
+  - *Under a flood:* Free calls exhaust the first bucket and are refused, while paying customers still
+    get the reserve.
+  - *Measured:* a property test floods Free calls at three times the capacity over 2 to 4 instances,
+    and checks every window from 1 ms to 4 s against the bound. Paying customers asking for 70% of the
+    reserve kept every call.
+- **A check rate per merchant.**
+  - *Why:* the platform protects itself too. The operator sets how many checks a second it takes from
+    each merchant, so one merchant's flood costs the others nothing.
+  - *Where it is taken:* first, before any other step, for any rule.
+  - *The cost:* a lease hit is one atomic instruction, with no allocation.
+- **Endpoint weights** need no new mechanism. A gateway already sends a cost per check (F1, 3.1.1), so an
+  expensive endpoint takes more of the capacity.
+
+Rejected alternatives:
+- *An exact check of the capacity on every call:* one hot key per merchant on one master serialises
+  every call of that merchant (3.5.1).
+- *A priority queue in the limiter:* queueing would hold calls the limiter must answer at once; the
+  reserve gives the same guarantee with a refusal instead of a wait.
+- *A reserve taken from the same bucket by a threshold* (Free refused below 20% of tokens): a lease
+  cannot see how many tokens the shared bucket holds, so the threshold would leak by N × C.
+
+### 3.9.8 The merchant portal
+
+A merchant runs its business from one page, served by the management API at `/portal`. It has no
+state of its own: every value it shows is read from the API, and every button is one API call, so the
+portal can do exactly what the API allows and nothing more.
+- **What a merchant sees.**
+  - *The month:* calls admitted and billed overage, summed from the quota counters (3.9.6). The
+    counters are where every instance's calls are counted, so the numbers cover all instances. Two
+    readings a few seconds apart give the calls a second, timed by the Redis clock.
+  - *Customers:* a page at a time, each with its use of the period as a bar, its billed overage and the
+    alerts sent. The customers of a merchant are listed from an index kept in the merchant's slot,
+    so a page never scans the cluster.
+  - *One customer:* its terms, its boost and top-up, and the invoice so far this month, made by the
+    same function that closes a month (3.9.6).
+  - *Actions:* move to a plan, set custom limits, grant or end a boost, add a top-up, suspend and
+    resume, define plans, set the capacity and its reserve (3.9.7), read a month's invoices and
+    download them, set the webhook.
+- **Signed in with the management key,** sent as a bearer token to the same server and kept only in
+  the browser tab's session storage. The API decides who the merchant is from the key alone (3.9.5).
+- **Built against the usual attacks on a web page.**
+  - *A strict Content Security Policy:* the page may load scripts, styles and data only from its own
+    server, may not be framed, and runs no inline script. Code injected into the page through a
+    customer id or a plan name would not run.
+  - *Text, never markup:* every value from the server is written into the page as text, so a customer
+    named `<img onerror=…>` is shown, not run.
+  - *Retries buy once:* a top-up from the page carries a new idempotency key, and a button is
+    disabled while its call runs, so a double click does not buy twice.
+
+Rejected alternatives:
+- *A separate web application:* a second deployment and a build step, for a page that only calls the
+  API.
+- *A session cookie:* the browser would send it on requests that other sites start, which needs
+  protection against cross-site request forgery. A bearer token is sent only by the page's own code.
+- *A live count of refusals:* the counters hold admitted calls, which is what is billed. Counting
+  refusals per merchant would add work to every refused call on the limiter, the calls a flood makes.
+  The portal shows admitted calls, and a customer's first refusal at its quota in a period reaches
+  the merchant as an alert; refusals for capacity are not shown.

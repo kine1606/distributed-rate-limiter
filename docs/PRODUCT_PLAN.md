@@ -253,36 +253,207 @@ Tests: 4 new in C++ (257 pass in release, ASan and TSan; the property tests exte
 
 ### Week P3 (Nov 9 to 15): metering, billing, backend protection
 
-- [ ] Durable metering: AOF on the cluster; counters kept until invoiced; reconciliation of counters
+Done 2026-10-25 on branch `feat/merchants` (not committed yet):
+
+- [x] Durable metering: AOF on the cluster; counters kept until invoiced; reconciliation of counters
       against usage events (6 h).
-- [ ] Billing job at period close: base fee plus overage times unit price, one invoice per customer and
+  - *AOF:* `appendfsync everysec` in `docker/docker-compose.yml` and the fault cluster; the dev
+    cluster, which benchmarks flush, stays without.
+  - *Counters:* `lua/quota.lua` keeps the calendar month's totals in each quota counter, atomically
+    with the decision: units within the plan and billed overage, whatever the quota period.
+    - A month with billed overage is filed as `closed:m<month>` when the next begins.
+    - Its counter is kept 35 days past the month, until invoiced. A counter with nothing to bill
+      still expires after its period, so a flood of unknown ids costs no more memory than before.
+  - *Reconciliation:* `python -m rlcontrol.billing reconcile` compares usage events with the counters
+    and reports every difference.
+  - *Tests:* 5 new script tests against Redis. The property tests' model now states the billing totals:
+    2,000 seeds per configuration, 2,661 customer months with billed overage, 585 filed by a new month.
+    Five planted bugs are caught (two in the script, three in its transcription).
+- [x] Billing job at period close: base fee plus overage times unit price, one invoice per customer and
       period, with an idempotent id; JSON and CSV export (10 h).
-- [ ] Payment sandbox: provider customer and card token, charge at close, suspend on a failed payment.
+  - *Billing period:* the calendar month, for daily quotas too.
+  - *Prices:* terms of the plan, in cents, overridable per customer: `fee`, `overage_price` and
+    `topup_price` per 1,000 calls. A top-up is billed at the price recorded when it was bought.
+  - *Running it:* `control/rlcontrol/billing.py`, from cron or `POST /v1/billing/close`.
+  - *Output:* JSON and CSV. A cell that could run as a spreadsheet formula is quoted.
+- [x] Payment sandbox: provider customer and card token, charge at close, suspend on a failed payment.
       No card number stored (6 h; becomes invoices only if short of time).
-- [ ] Merchant capacity bucket (leased), the paid-plan reserve, endpoint weights, and a check-rate limit
+  - *Provider:* `control/rlcontrol/payments.py`, a sandbox that takes Stripe's test tokens. Stripe test
+    mode or VNPay can replace it once settled with the advisor.
+  - *Card numbers:* refused by the API. The platform keeps only the provider's customer id.
+  - *Charging:* at close, idempotent by invoice. A decline suspends the customer; a customer without a
+    card keeps an open invoice for the merchant to collect.
+  - *Tests:* 7 new (`control/tests/test_billing.py`); five planted bugs are caught.
+- [x] Merchant capacity bucket (leased), the paid-plan reserve, endpoint weights, and a check-rate limit
       per merchant (10 h).
+  - *Settings:* the merchant sets its capacity (`PUT /v1/capacity`, rate, burst and the reserve
+    percentage); the operator sets each merchant's check rate. Every limiter reloads both at once on
+    `!merchants`.
+  - *Where it is decided:* `CompositeCore`, from leased token buckets keyed by the merchant.
+    - The check rate is taken first, for any rule. A lease hit is one CAS, with no allocation.
+    - The capacity is taken after the customer's burst and before its quota, so a refused call is
+      never counted or billed.
+    - A plan with a fee may take the reserve; a Free plan never may.
+  - *Endpoint weights:* the check's `cost`, which the gateway sets per endpoint; capacity is taken by
+    cost. No new code.
+  - *Tests:*
+    - 8 engine tests, 3 for merchant loading and 1 for plans.
+    - A property harness: 2 to 4 instances, a Free flood at 3 times the capacity, and paying customers
+      asking for 70% of the reserve.
+    - An end-to-end test through the real limiter.
+    - Five planted bugs are caught: a Free plan taking the reserve, a refusal keeping the burst token,
+      a check rate that never refuses, capacity switched off, and the reserve lost in the split.
+    - One planted lease bug (a refill past one chunk) is caught by the existing leased-quota harness,
+      not this one: its bound sums both buckets' lease slack.
 
 Gate: one simulated month with retries and a killed master, where invoices equal the counters (any
 difference reported, not hidden); the merchant capacity never exceeded beyond N × C; under a Free flood,
 paying customers keep their reserve.
 
+Gate status: met (`docs/thesis/evidence/p3_gate_2026-10-25.md`).
+- *Billing:* `tests/eval/billing_gate.py`, 1,500 calls a second for 20 s over two limiters, with gateway
+  retries by request id; one run with no kill and four with a master killed.
+  - *Invoices:* equal the counters for every customer in every run, and the counters equal what the
+    gateway was told. No increment was lost to a failover in these runs; the asynchronous gap remains
+    possible and would show as a difference.
+  - *Usage events:* 3 to 17 overage calls short in three of the kill runs, explained call by call: a
+    script that answered after its deadline was logged as unavailable, and its retry was replayed.
+    This is why billing reads the counters.
+  - *The month:* it cannot end during a test, so the invoice is this month's preview, from the same
+    function that closes a month.
+- *Capacity:* 2,000 seeds, 2 to 4 instances, Free calls at 3 times the capacity. No window exceeded
+  its bound (the fullest reached 91%), no Free call reached the reserve, and paying customers kept
+  all 303,203 calls they asked for. Repeated through the real limiter in `control/tests/test_e2e.py`.
+
+Tests: 277 in C++, all passing in release, ASan and TSan (20 new: 5 script, 8 engine, 5 merchant, 1
+plan, 1 property); 30 in `control/run_tests.sh` (12 new).
+
+A review of P1 to P3 then fixed:
+- *Merchant tables leaked (P1, worse with P3's settings):* every reload kept its table until exit,
+  about 3 MB per change at 10,000 merchants. Merchants are now made once per set of limits, and a
+  replaced table is freed when no lookup reads it.
+- *Reload order (P1):* an older reload finishing after a newer one could bring back a revoked key; the
+  one started last now wins.
+- *DNS rebinding (P2):* a delivery resolved the webhook's name again after the check; it now connects
+  to the address checked.
+- *Allocation (P3):* a merchant over its check rate cost an allocation per refused check; the lease
+  now refuses it alone.
+- *`tools/rlctl` (P1, P3):* it refused the price fields, and its merchants were missing from the list
+  billing reads.
+- *Wording (P2):* the postpaid allowance is a cap per quota period, so a daily plan's month holds up
+  to the cap times its days. Prices are those in force at close (a `shortcut:` until proration, P5).
+- *A test depending on timing (P3):* the end-to-end capacity bounds now follow the measured time.
+Three fixes have a test shown to fail without them: merchants made once per set of limits, the
+reload order, and DNS rebinding. Freeing a replaced table rests on `std::shared_ptr`, not a test. The
+`rlctl` fix was checked by hand on the dev cluster. The allocation fix has no test of its own: the
+behaviour it keeps is tested, the absence of an allocation is not.
+
+A Phase 1 audit (`ponytail-audit`, Weeks 1 to 8 as they stand now) then fixed:
+- *Shutdown (P1 in `main.cc`):* Redis was stopped while the plan-change listener still ran, and a
+  `!merchants` message in that window reloaded merchant keys through the freed client. The listener
+  now stops first.
+- *Plain-text API keys (P1):* the server now takes TLS from `RL_TLS_CERT` and `RL_TLS_KEY`, and warns at
+  start when tenancy runs without it. Tested with the real server (`control/tests/test_tls.py`), shown
+  to fail when the server ignores the certificate.
+- *Two stale comments:* `std::function` callbacks stay, as the Week 7 profile decided; `AllowAllCore`
+  is the benchmark baseline, not a stand-in.
+
+A security pass over Weeks 1 to 4 then fixed:
+- *The example gateway trusted a client header (`X-User-Id`) as the user:* any client could escape its
+  limit with a new id each time, or spend another user's quota. It now limits the user of an API key
+  it knows (unknown key: 401) and a request without a key by its address
+  (`control/tests/test_gateway.py`, shown to fail on the old code).
+- *Docker published Redis, which has no password, on every interface:* the dev and fault clusters and
+  the three test limiters now listen on `127.0.0.1` only (checked from Windows; WSL still reaches them).
+- *The rule name had no length limit:* now 128 bytes, like the key and the request id.
+- *The gateway sent internal gRPC errors (with addresses) to clients:* they now go to its log.
+
+Known and left as documented: a limiter without tenancy trusts whoever reaches its port, by design
+beside its gateway; and an over-burst flood costs Redis one script per call (the noisy-neighbour
+test, Chapter 5), whose local fix was left out at the feature freeze.
+
+The same pass over Weeks 5 to 8 then fixed:
+- *Bug planting erased uncommitted work:* `tests/eval/planted_bugs.py` restored each file with
+  `git checkout`, dropping every uncommitted change in it (the P3 engine changes, on this run). It now
+  writes back the file as it was; a run on the uncommitted tree left it byte for byte unchanged.
+- *A planted bug had stopped running:* one mutation's text drifted from the code on Oct 24, so the
+  script skipped it in silence; the thesis's ten, measured on Oct 23, were right. The text is fixed,
+  all ten are caught again, and the script now fails when one is not planted or not caught.
+- *Two benchmarks took a Redis port from the environment and flushed it:* `bench/redis_functions.sh`
+  and `bench/ceiling_compare.sh` now refuse any Redis that saves its data (the system Redis on 6379
+  does; the throwaway instances run with `save ""`). The others find their masters through `cluster
+  nodes`, which a plain Redis refuses.
+- *Downloads were not checked:* `scripts/setup.sh` checks ghz and grpcurl against their projects'
+  SHA-256 and redis-plus-plus against its commit; `control/setup.sh` gets a pinned pip checked against
+  its SHA-256 instead of the latest `get-pip.py`; `control/requirements.txt` pins every package pip
+  installs, dependencies too.
+Checked and fine: the metrics endpoint and the live view listen on loopback, the live page writes
+fetched text only as text, and `dashboard/data.js` is JSON-encoded.
+
 ### Week P4 (Nov 16 to 22): portal, evaluation, thesis v2
 
-- [ ] Merchant portal: one page on the management API. Plans, customers, adjust a limit or grant a boost,
+- [x] Merchant portal: one page on the management API. Plans, customers, adjust a limit or grant a boost,
       usage bars, invoice preview, and the live view filtered to one merchant (8 h).
-- [ ] Evaluation (10 h):
-  - isolation, and a noisy merchant;
-  - billing exactness;
-  - limit-change latency;
-  - capacity and priority;
-  - 10,000 merchants of 100 customers each: throughput and Redis memory;
-  - the cost of tenancy against today's numbers.
-- [ ] Thesis v2: Ch1, Ch3, Ch4, Ch5 and Ch6 updated; G10 to G14 in the goal tables; rebuilt with
-      `docs/thesis/build.sh` (12 h).
-- [ ] Demo v2: merchant A defines Free and Pay; a Pay customer in an emergency goes over, into postpaid,
+  - *Done (2026-10-27 and 28):*
+    - A customer list per merchant, kept by the API and `tools/rlctl`, rebuilt by
+      `POST /v1/customers/reindex`, and read a page at a time by `GET /v1/customers`.
+    - `GET /v1/usage`: the merchant's calls admitted this month, summed from the quota counters, so
+      every limiter's calls are in it; polled twice it gives calls a second (the live view).
+    - The page at `/portal`, served by the API under a strict CSP: the month's numbers, the customer
+      table, one customer's terms and invoice so far with every action (plan, custom limits, boost,
+      top-up, suspend after a confirmation, resume), plans, the capacity, invoices with a CSV download,
+      the webhook. `tests/eval/portal_ui.mjs` drives all of it in headless Chrome: 22 of 22 checks.
+  - *Not done:* a live count of refusals, which needs a per-merchant count in the limiter (the counters
+    hold admitted calls); `/v1/usage` reads every customer's counter, marked as a shortcut.
+- [x] Evaluation (10 h), `docs/thesis/evidence/p4_merchants_2026-10-28.md`, Chapter 5.12:
+  - isolation: 9 of 9 checks; a planted shared namespace fails 4;
+  - a noisy merchant: floods of unknown keys, or over the check rate, capacity or quota, cost Redis at
+    most 1,440 calls a second; a burst flood still costs one script a call unless the check rate is set;
+  - billing exactness: the P3 gate rerun, 3 runs (2 with a master killed), no customer with a difference;
+  - limit-change latency: in force on both of two limiters within 6.6 ms of the API's answer;
+  - capacity and priority: at most 1,003 a second against 1,000; paying customers keep the reserve;
+  - 10,000 merchants of 100 customers: 193 bytes of Redis a customer, 25,749 calls a second, a new
+    merchant's key working in 37 ms;
+  - the cost of tenancy: within the noise (+2.1% and −3.9% medians, alternating runs).
+  - *Found and fixed:* a flood over a merchant's capacity cost Redis two calls per refused call and
+    slowed other merchants; it is now refused from the lease before the burst script (42,000 Redis calls
+    a second down to 12,400, before and after in alternating runs). Also fixed: `billing_gate.py` waited
+    on the seed node when that was the master it killed.
+- [x] Thesis v2: Ch1 (roles, the merchant problem, G10 to G14, scope), Ch3 (3.9.8 the portal), Ch4 (4.7
+      merchants and the control plane), Ch5 (5.12), Ch6 (G10 to G14, limitations, future work), both
+      abstracts; rebuilt with `docs/thesis/build.sh` (12 h).
+- [x] Demo v2: merchant A defines Free and Pay; a Pay customer in an emergency goes over, into postpaid,
       and the invoice preview shows it; a Free flood is shed while paying customers are unaffected (3 h).
+      `scripts/demo_v2.py` (`KEEP=1` leaves the portal running).
+
+- [x] Reviews of the P4 code (2026-10-28): ponytail-review, security-review, simplify and code-review.
+  - *Fixed:*
+    - a flood over a merchant's capacity cost Redis two calls per refused call (the noisy-merchant test);
+    - a wholly reserved capacity still ran the burst script for every Free call;
+    - a capacity whose burst leaves no whole call outside its reserve made the limiter refuse every Free
+      call; the API now refuses it (422) with the least burst that works;
+    - in the portal: paging errors were swallowed, the CSV download skipped the sign-out on a rejected
+      key and revoked its link at once, and Suspend and Delete acted on one click;
+    - `demo_v2.py` left its servers running on SIGTERM;
+    - the portal check's seeder lived in `/tmp`, now `tests/eval/portal_seed.py`;
+    - duplicated code in the lease denial, the load generator's key reading and the evaluation's seeding.
+  - *Kept, with a `shortcut:` comment:*
+    - a call the quota refuses keeps its capacity token, about one per customer, instance and period;
+    - merchant rules are never freed, so ~10^6 capacity changes by one merchant would fill the lease
+      table;
+    - `/v1/usage` reads every customer's counter.
+  - *Kept, judged not worth the change:*
+    - check-rate refusals are not usage events (they are counted in the service's metrics);
+    - a check naming an unknown rule spends a check-rate token before it is refused;
+    - a check-rate lease miss probes the lease table twice;
+    - the capacity step allocates closures, as the customer rule's other steps already do; the lease hot
+      path of leased rules is unchanged.
+  - *Security review:* nothing found in the P4 changes.
 
 Gate: every new claim has an evidence file in `docs/thesis/evidence/`; thesis v2 assembled.
+*Gate met (2026-10-28):* the new claims of Chapter 5.12 are in `p4_merchants_2026-10-28.md` (and the P3
+gate's file); `thesis.docx` and `thesis.pdf` rebuilt (85 pages). 279 C++ tests pass in release, ASan and
+TSan, the 39 of the control plane pass, and the property tests pass at 2,000 seeds. Not committed yet.
 
 ### Optional Week P5 (Nov 23 to 29): if the business layer runs long
 

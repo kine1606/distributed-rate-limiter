@@ -19,6 +19,15 @@ every API call, its answer has two properties that pull in opposite directions. 
 because the quota is the thing being sold. And it must be cheap, because it is paid on every call,
 including the vast majority of calls from customers who are nowhere near their limit.
 
+Most API owners do not want to build that component, so it can itself be sold as a service. Three
+parties then meet in it:
+- **The platform** runs the service and its Redis cluster, and admits API owners.
+- **A merchant** is an API owner that buys the service. It defines its own plans (Free, Pay,
+  Enterprise, with its own numbers and prices), signs up its own customers, and calls the service from
+  its API gateway before serving each call.
+- **A customer** is one of the merchant's users, identified by an id the merchant chooses. It never
+  calls the service directly; its calls reach it through the merchant's gateway.
+
 ## 1.2 Problem
 
 **Correctness.** A quota is a promise in both directions. If the limiter admits more calls than the
@@ -47,13 +56,23 @@ call and the cost of running the limiter. The store becomes the bottleneck, and 
 make most of the traffic, those far below their limits, pay the full price of exactness they do not
 need on most of their calls.
 
+**Many merchants.** Selling the limiter to many API owners adds four demands. One merchant must not
+see, change or slow down another's customers, though they share the cluster. A merchant changes
+limits while its customers are calling: an upgrade, a boost in an emergency, a suspension. It bills
+its customers for what they used, so the numbers on an invoice must be the numbers the limiter
+decided with, also when a Redis master fails. And a merchant's backend has a capacity of its own:
+quotas sold per day can arrive in the same second, and when they do, the merchant would rather turn
+away its free users than its paying ones.
+
 The problem this thesis addresses is how to be **exact where it matters, the daily quota, while
 being fast where it matters, the high-volume burst check**, and how to make the price of the speed,
-a bounded inaccuracy, explicit and measured rather than unknown.
+a bounded inaccuracy, explicit and measured rather than unknown. Then, how to offer that limiter to
+many merchants as a service, isolated from each other, with invoices that equal the metered usage.
 
 ## 1.3 Goals
 
-The goals come from the two halves of the problem (`docs/DESIGN.md`, section 1).
+The goals come from the two halves of the problem (`docs/DESIGN.md`, section 1); G10 to G14 come from
+selling the service to many merchants (`docs/PRODUCT_PLAN.md`, section 7).
 
 *Table 1.1: The goals of this thesis.*
 
@@ -68,12 +87,20 @@ The goals come from the two halves of the problem (`docs/DESIGN.md`, section 1).
 | G7 | Over-admission of the burst limit bounded by N × C per refill interval (N instances, lease chunk C), and measured. |
 | G8 | Over-quota floods refused locally; an overloaded instance sheds load explicitly. |
 | G9 | Documented behaviour when Redis is slow or unavailable, per plan. |
+| G10 | One merchant cannot read, change or slow another's limits. |
+| G11 | A limit change or boost applies on every instance within 1 s. |
+| G12 | An invoice equals the metered usage exactly, retries included. |
+| G13 | Billed overage never exceeds the spending cap. |
+| G14 | A merchant's backend never receives more than its capacity plus N × C, and paying customers keep their reserve under a flood of Free calls. |
 
 G5 is a cluster-wide figure that a single laptop cannot produce. It is reached in this thesis by
 measuring the throughput of one instance and of one Redis master, and extrapolating with every
-assumption stated (Chapter 5); it is never reported as a measurement. Billing, account management,
-user interfaces and multi-region deployment are out of scope: the limiter enforces plans, it does
-not sell them.
+assumption stated (Chapter 5); it is never reported as a measurement.
+
+In scope for merchants are the management API, the merchant portal, invoices made from the metered
+usage, and charging them through a payment provider's sandbox. Out of scope are a payment business
+(taxes, refunds, collecting debts), multi-region deployment, and a customer-facing sign-up: the
+merchant signs up its own customers.
 
 ## 1.4 Approach
 
@@ -102,6 +129,14 @@ already known to be over quota are refused locally, the burst limit is checked n
 that pass the burst check reach the strict quota script. In the version built, a customer's burst
 limit is still one script per check; leasing it per customer is future work (Section 3.2).
 
+**Merchants** are a layer around this core, not a change to it. A call carries its merchant's API
+key; the service resolves it to the merchant from an in-memory index and names the customer
+`<merchant>|<customer>` before the engines see it, so every key, lease and cached denial below is the
+merchant's own. A control plane writes merchants' plans, limits and boosts to Redis and announces each
+change, as the plan change above does. The quota script keeps each month's billable totals in the same
+atomic step as the decision, and invoices are made from them. A merchant's capacity is one more token
+bucket served from leases, split into a share for every plan and a reserve for plans with a fee.
+
 ## 1.5 Contributions
 
 1. **A quota design that is exact under concurrency, retries and plan changes.** Daily counters keyed
@@ -122,6 +157,12 @@ limit is still one script per check; leasing it per customer is future work (Sec
    reproducible scripts and raw results. Every table of Chapter 5 is generated by a script from the
    raw results, and the estimate for 1,000,000 checks per second is derived from measured
    per-instance figures with every assumption written out (5.11).
+4. **A multi-tenant service around the limiter, with metering in the decision.** Merchants isolated by
+   name rather than by deployment; limits, boosts and capacities changed at run time; invoices made from
+   totals the quota script keeps atomically with each decision; and a merchant's capacity with a reserve
+   for paying customers, served from leases. Each is evaluated on the real limiter: isolation and a
+   noisy merchant, the latency of a change, invoices against the counters with a master killed, the
+   capacity under a Free flood, 10,000 merchants, and the cost of tenancy (5.12).
 
 ## 1.6 Structure of the thesis
 
@@ -130,7 +171,8 @@ relies on (single-threaded atomic scripts, cluster hash slots, failover), gRPC a
 and existing rate limiting systems compared in one table. Chapter 3 presents the design:
 requirements, architecture, data model, quota and overage logic, the lease protocol with the
 derivation of its accuracy bound, failure policies, and the capacity estimate for one million
-checks per second. Chapter 4 describes the implementation: the Lua scripts, the Redis client and
-its measured selection, the lease table, the gRPC server and the test approach. Chapter 5 evaluates
-the system against each goal with measured results and their limitations. Chapter 6 concludes with
+checks per second, then merchants (3.9). Chapter 4 describes the implementation: the Lua scripts,
+the Redis client and its measured selection, the lease table, the gRPC server, merchants and the
+control plane, and the test approach. Chapter 5 evaluates the system against each goal with measured
+results and their limitations, merchants in 5.12. Chapter 6 concludes with
 the results against the goals, the limitations, and future work.
