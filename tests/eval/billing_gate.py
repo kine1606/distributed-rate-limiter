@@ -59,9 +59,9 @@ def sh(*cmd):
     return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
 
-def cluster_ok():
+def cluster_ok(port=SEED_PORT):
     try:
-        return "cluster_state:ok" in sh("redis-cli", "-p", str(SEED_PORT), "cluster", "info")
+        return "cluster_state:ok" in sh("redis-cli", "-p", str(port), "cluster", "info")
     except subprocess.CalledProcessError:
         return False
 
@@ -73,6 +73,10 @@ def wait(predicate, seconds, what):
             return
         time.sleep(0.2)
     sys.exit(f"timed out waiting for {what}")
+
+
+def settled():  # no node marked failing: a node killed by an earlier run has rejoined
+    return cluster_ok() and "fail" not in sh("redis-cli", "-p", str(SEED_PORT), "cluster", "nodes")
 
 
 def masters():
@@ -165,6 +169,7 @@ def main():
         subprocess.run(["docker", "compose", "-p", "ratelimiter-faults", "-f", str(ROOT / "docker/docker-compose.faults.yml"),
                         "up", "-d"], check=True, capture_output=True)
         wait(cluster_ok, 60, "the fault cluster")
+    wait(settled, 60, "every node of the fault cluster")
     for port in masters():
         sh("redis-cli", "-p", str(port), "FLUSHALL")
     r = RedisCluster(host="127.0.0.1", port=SEED_PORT, decode_responses=True)
@@ -201,14 +206,16 @@ def main():
         victim["container"] = f"ratelimiter-faults-redis-{port - 7100}-1"
         sh("docker", "kill", victim["container"])
 
-    final, log = asyncio.run(load(pb, pb_grpc, targets, [store.customer_id(merchant, c) for c in customers], seconds,
-                                  rate, (kill_at, kill_master) if kill_at > 0 else None))
+    # The gateway names its own customers; the limiter prefixes the merchant from the API key.
+    final, log = asyncio.run(load(pb, pb_grpc, targets, customers, seconds, rate,
+                                  (kill_at, kill_master) if kill_at > 0 else None))
     for p in procs:
         p.terminate()  # flushes the usage events
     for p in procs:
         p.wait(timeout=15)
     if victim:
-        wait(cluster_ok, 30, "the cluster after the kill")
+        alive = SEED_PORT + 1 if victim["port"] == SEED_PORT else SEED_PORT  # the seed may be the one killed
+        wait(lambda: cluster_ok(alive), 30, "the cluster after the kill")
         sh("docker", "start", victim["container"])  # rejoins as a replica
 
     events = defaultdict(Counter)
@@ -222,11 +229,12 @@ def main():
     rows, totals = [], Counter()
     for c in customers:
         cid = store.customer_id(merchant, c)
-        told = final[cid]
+        told = final[c]
         in_plan, billed = billing.month_totals(r, cid, periods.month_of(store.now_ms(r)))
         invoice = billing.preview(r, merchant, c)
         inv_units = sum(line["units"] for line in invoice["lines"] if line["item"] == "overage")
         row = {"customer": c, "told_ok": told["ok"], "told_overage": told["overage"], "gave_up": told["gave_up"],
+               "told_other": sum(n for k, n in told.items() if k not in ("ok", "overage", "gave_up")),
                "counter_in_plan": in_plan, "counter_overage": billed, "invoice_overage": inv_units,
                "invoice_total_cents": invoice["total"], "events_allowed": events[cid]["allowed"],
                "events_overage": events[cid]["overage"]}

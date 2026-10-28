@@ -7,8 +7,8 @@ exactness, the sixth measurement, is tests/eval/billing_gate.py.
              never reach the other's (pass or fail, one line each)
   noisy      a merchant flooding at 20,000 calls a second, by kind of flood, against another
              merchant's 1,000 customers at 5,000 a second (as tests/eval/noisy_neighbour.sh)
-  latency    from the management API's answer to the limiter enforcing it: suspend, resume, quota
-             down and up, boost on and off, capacity on and off; under background load
+  latency    from the management API's answer to both of two limiters enforcing it: suspend, resume,
+             quota down and up, boost on and off, capacity on and off; under background load
   capacity   a merchant's capacity (1,000 calls a second, 30% reserved for plans with a fee) under a
              Free flood: what Free and paying customers get, on one limiter and on two
   scale      10,000 merchants of 100 customers: seeding, Redis memory, the limiter's memory and
@@ -19,6 +19,8 @@ exactness, the sixth measurement, is tests/eval/billing_gate.py.
 
     control/.venv/bin/python tests/eval/tenancy_eval.py [section ...]     env: RUNS=3 (cost: 5)
                                                                           SERVER_CPUS=0-5 CLIENT_CPUS=6-11
+        RL_SERVER=<binary> runs another build (for a before and after); ONLY=a,b runs only those noisy
+        scenarios or cost variants.
 Needs build/release (rate_limiter_server, loadgen) and the dev cluster. Output: results/<date>_tenancy/,
 one <section>.json each, and a summary on stdout.
 """
@@ -45,7 +47,9 @@ from redis.cluster import RedisCluster  # noqa: E402
 from rlcontrol import store  # noqa: E402
 from rlcontrol.api import create_app  # noqa: E402
 
-SERVER, LOADGEN = ROOT / "build/release/rate_limiter_server", ROOT / "build/release/bench/loadgen"
+SERVER = pathlib.Path(os.environ.get("RL_SERVER", ROOT / "build/release/rate_limiter_server"))
+LOADGEN = ROOT / "build/release/bench/loadgen"
+ONLY = set(filter(None, os.environ.get("ONLY", "").split(",")))
 PORT, LPORT = 7001, 30081  # the dev cluster; the limiter below Linux's ephemeral range
 SCPUS, CCPUS = os.environ.get("SERVER_CPUS", "0-5"), os.environ.get("CLIENT_CPUS", "6-11")
 ADMIN = "tenancy-eval-operator-token"
@@ -97,11 +101,8 @@ def seed(lines):
         port = slots.get(slot) or slots.setdefault(slot, rc.nodes_manager.get_node_from_slot(slot).port)
         by_master.setdefault(port, []).append(line)
     for port, cmds in by_master.items():
-        with tempfile.NamedTemporaryFile("w", suffix=".redis") as f:
-            f.write("\n".join(cmds) + "\n")
-            f.flush()
-            with open(f.name) as data:
-                done = subprocess.run(["redis-cli", "-p", str(port), "--pipe"], stdin=data, capture_output=True, text=True)
+        done = subprocess.run(["redis-cli", "-p", str(port), "--pipe"], input="\n".join(cmds) + "\n",
+                              capture_output=True, text=True)
         if "errors: 0," not in done.stdout:
             sys.exit(f"seeding {port} failed: {done.stdout[-300:]} {done.stderr[-300:]}")
 
@@ -130,7 +131,7 @@ def new_key():
 
 class Limiter:
     def __init__(self, port=LPORT, tenancy=True, cpus=SCPUS):
-        env = {**os.environ, "RL_METRICS_ADDR": "off", "RL_TENANCY": "merchants" if tenancy else "off"}
+        env = {**os.environ, "RL_METRICS_ADDR": "off", "RL_TENANCY": "merchants" if tenancy else ""}
         self.started = time.perf_counter()
         self.proc = subprocess.Popen(["taskset", "-c", cpus, str(SERVER), f"127.0.0.1:{port}", str(ROOT / "config/rules.yaml"),
                                       f"127.0.0.1:{PORT}", str(ROOT / "lua"), "leased"],
@@ -198,7 +199,7 @@ def save(name, data):
                                      text=True).stdout.strip(),
             "dirty": bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True,
                                          text=True).stdout.strip()),
-            "server_cpus": SCPUS, "client_cpus": CCPUS, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+            "server": str(SERVER), "server_cpus": SCPUS, "client_cpus": CCPUS, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     (OUT / f"{name}.json").write_text(json.dumps({"meta": meta, **data}, indent=1))
 
 
@@ -258,7 +259,7 @@ NOISY = ("none", "bad_key", "over_check_rate", "over_capacity", "over_quota", "o
 def noisy(runs):
     rows = []
     for run in range(1, runs + 1):
-        for scenario in NOISY:
+        for scenario in [s for s in NOISY if not ONLY or s in ONLY]:
             flushall()
             good, bad = new_key(), new_key()
             plan = {"over_quota": "free_wide", "over_burst": "narrow"}.get(scenario, "roomy")
@@ -289,7 +290,8 @@ def noisy(runs):
     save("noisy", {"rows": rows})
     say("\n  | Noisy merchant | Others' p50 ms | p99 ms | p999 ms | Others allowed / answered | Redis calls/s |")
     for s in NOISY:
-        rs = [r for r in rows if r["scenario"] == s]
+        if not (rs := [r for r in rows if r["scenario"] == s]):
+            continue
         say(f"  | {s} | {median([r['others']['p50_ms'] for r in rs]):.3f} | {median([r['others']['p99_ms'] for r in rs]):.3f} | "
             f"{median([r['others']['p999_ms'] for r in rs]):.3f} | {min(r['others']['allowed'] for r in rs)} / "
             f"{min(r['others']['ok'] for r in rs)} (worst run) | {median([r['redis_calls_per_s'] for r in rs]):.0f} |")
@@ -307,11 +309,12 @@ def latency(trials):
     api.put("/v1/plans/small", json={"daily": 3, **roomy}, headers=auth)        # the exact path
     for cid, plan in (("c-big", "big"), ("c-small", "small")):
         api.post("/v1/customers", json={"id": cid, "plan": plan}, headers=auth)
-    lim = Limiter()
-    lim.ready("c-big", key)
-    for _ in range(5):
-        lim.check("c-small", key)  # past its quota of 3: the deny cache holds it
-    rate = int(os.environ.get("LOAD", "20000"))
+    lims = [Limiter(LPORT), Limiter(LPORT + 1)]
+    for lim in lims:
+        lim.ready("c-big", key)
+        for _ in range(5):
+            lim.check("c-small", key)  # past its quota of 3: each deny cache holds it
+    rate = int(os.environ.get("LOAD", "10000"))
     bg = loadgen(LPORT, 3600, 4, 2000, 1000, 0, rate, "pay:", api_keys=[load_key], background=True) if rate else None
     time.sleep(2)
     # (name, customer, request, the answer that shows it is in force)
@@ -333,9 +336,13 @@ def latency(trials):
             for name, cid, request, want in changes:
                 t0 = time.perf_counter()
                 request().raise_for_status()
-                t1, stale = time.perf_counter(), 0
-                while (answer := lim.check(cid, key)) not in want:
-                    stale += 1
+                t1, stale, pending = time.perf_counter(), 0, set(lims)
+                while pending:  # in force once every instance has answered with it
+                    for lim in list(pending):
+                        if (answer := lim.check(cid, key)) in want:
+                            pending.discard(lim)
+                        else:
+                            stale += 1
                     if time.perf_counter() - t1 > 10:
                         sys.exit(f"{name}: still {answer} after 10 s")
                 t2 = time.perf_counter()
@@ -344,10 +351,11 @@ def latency(trials):
         if bg:
             bg.terminate()
             bg.wait()
-        lim.stop()
-    save("latency", {"trials": trials, "background_load_per_s": rate, "rows": rows})
+        for lim in lims:
+            lim.stop()
+    save("latency", {"trials": trials, "limiters": len(lims), "background_load_per_s": rate, "rows": rows})
     say(f"\n  {trials} trials each, background load {rate} calls a second")
-    say("  | Change | API call ms (p50) | Enforced after the API answered, ms: p50 / p99 / max | Old answers after it (max) |")
+    say("  | Change | API call ms (p50) | Enforced on both limiters after the API answered, ms: p50 / p99 / max | Old answers after it (max) |")
     for name, rs in rows.items():
         after = sorted(r["after_api_ms"] for r in rs)
         say(f"  | {name} | {median([r['api_ms'] for r in rs]):.1f} | {median(after):.2f} / "
@@ -440,7 +448,7 @@ def scale(merchants=10_000, per=100, runs=3):
 
 
 def cost(runs):
-    variants = ("plain", "tenancy", "tenancy+limits")
+    variants = [v for v in ("plain", "tenancy", "tenancy+limits") if not ONLY or v in ONLY]
     rows = []
     for run in range(1, runs + 1):
         for v in variants:
@@ -461,7 +469,7 @@ def cost(runs):
             say(f"  run {run} {v:15} {r['calls_per_s']:.0f} calls/s, p50 {r['p50_ms']:.3f} p99 {r['p99_ms']:.3f} ms, "
                 f"allowed {r['allowed']} of {r['ok']}, errors {r['errors']}")
     save("cost", {"rows": rows})
-    base = median([r["result"]["calls_per_s"] for r in rows if r["variant"] == "plain"])
+    base = median([r["result"]["calls_per_s"] for r in rows if r["variant"] == variants[0]])  # plain, unless ONLY
     say("\n  | Variant | calls/s, median (range) | vs plain | p50 ms | p99 ms |")
     for v in variants:
         rs = [r["result"] for r in rows if r["variant"] == v]

@@ -9,6 +9,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 runs=${RUNS:-5} port=${PORT:-6380}
+# A port from the environment could be a real Redis: refuse any that saves its data (the throwaway
+# instances run with save ""), before loading, benchmarking or flushing anything there.
+[ "$(redis-cli -p "$port" config get save | tail -1)" = "" ] ||
+  { echo "Redis on port $port saves its data: not a throwaway instance, refusing to touch it" >&2; exit 1; }
 out="results/$(date +%F)_functions"
 mkdir -p "$out"
 sum="$out/summary.txt"
