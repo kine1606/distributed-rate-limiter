@@ -40,9 +40,9 @@ class ApiTest(unittest.TestCase):
 
     def tearDown(self):
         for m in self.merchants:
-            for key in (store.catalog_key(m), store.webhook_key(m), store.purchases_key(m)):
+            for key in (store.catalog_key(m), store.webhook_key(m), store.purchases_key(m), store.customers_key(m)):
                 self.r.delete(key)
-            for c in ("u1", "u2", "ghost"):
+            for c in ("u1", "u2", "u3", "u4", "u5", "ghost"):
                 self.r.delete(store.plan_key(m, c))
                 self.r.delete(store.quota_key(m, c))
             for h in (store.KEYS_HASH, store.ADMIN_HASH):
@@ -50,6 +50,8 @@ class ApiTest(unittest.TestCase):
                 if mine:
                     self.r.hdel(h, *mine)
             self.r.hdel(store.MERCHANTS, m)
+            self.r.hdel(store.CAPACITY_HASH, m)
+            self.r.hdel(store.CHECK_RATE_HASH, m)
         for key in getattr(self, "idem_keys", []):
             self.r.delete(key)
 
@@ -115,13 +117,16 @@ class ApiTest(unittest.TestCase):
     def test_plans_are_validated_and_listed(self):
         _, auth, _ = self.new_merchant()
         bad = [("Bad", PLAN), ("suspended", PLAN), ("ok", {**PLAN, "overage": "unlimited"}), ("ok", {**PLAN, "daily": -1}),
-               ("ok", {**PLAN, "daily": 2 ** 32}), ("ok", {**PLAN, "colour": "red"}), ("ok", {"daily": 5})]
+               ("ok", {**PLAN, "daily": 2 ** 32}), ("ok", {**PLAN, "colour": "red"}), ("ok", {"daily": 5}),
+               ("ok", {**PLAN, "fee": -1}), ("ok", {**PLAN, "overage_price": 1.5})]
         for name, body in bad:
             self.assertEqual(self.client.put(f"/v1/plans/{name}", json=body, headers=auth).status_code, 422, (name, body))
-        self.with_plan(auth, "pro", daily=5000, period="month", overage="postpaid", allowance=500, failure="open")
+        self.with_plan(auth, "pro", daily=5000, period="month", overage="postpaid", allowance=500, failure="open",
+                       fee=1900, overage_price=50, topup_price=40)
         listed = self.client.get("/v1/plans", headers=auth).json()
         self.assertEqual(listed["pro"], {"daily": 5000, "burst": 100, "refill": 100, "period": "month",
-                                         "overage": "postpaid", "allowance": 500, "failure": "open"})
+                                         "overage": "postpaid", "allowance": 500, "failure": "open",
+                                         "fee": 1900, "overage_price": 50, "topup_price": 40})
         self.assertEqual(self.client.delete("/v1/plans/pro", headers=auth).status_code, 204)
         self.assertEqual(self.client.delete("/v1/plans/pro", headers=auth).status_code, 404)
 
@@ -202,6 +207,94 @@ class ApiTest(unittest.TestCase):
         self.assertFalse(view["suspended"])
         self.assertEqual(view["plan"], "basic")
         self.assertEqual(view["terms"]["daily"], 77)
+
+    # ---- capacity and check rate (P3) ----
+
+    def test_a_merchant_sets_its_capacity_and_the_operator_its_check_rate(self):
+        m, auth, _ = self.new_merchant()
+        for bad in ({"rate": 0}, {"rate": 10, "reserve": 101}, {"rate": 10, "burst": 0}, {"rate": 10, "colour": 1},
+                    {"rate": 1, "reserve": 30}):  # a burst of 1 leaves Free calls no whole call: the limiter would refuse all
+            self.assertEqual(self.client.put("/v1/capacity", json=bad, headers=auth).status_code, 422, bad)
+        self.assertEqual(self.client.get("/v1/capacity", headers=auth).status_code, 404)
+        pubsub = self.r.pubsub()
+        pubsub.subscribe(store.CHANNEL)
+        pubsub.get_message(timeout=1)  # the subscription's confirmation
+        res = self.client.put("/v1/capacity", json={"rate": 1000, "reserve": 20}, headers=auth)
+        self.assertEqual(res.json(), {"rate": 1000, "burst": 1000, "reserve": 20})
+        self.assertEqual(self.r.hget(store.CAPACITY_HASH, m), "rate 1000 burst 1000 reserve 20")  # as the limiter reads it
+        message = pubsub.get_message(timeout=2)
+        self.assertEqual(message and message["data"], store.MERCHANTS_CHANGED)  # every limiter reloads
+        pubsub.close()
+        self.assertEqual(self.client.get("/v1/capacity", headers=auth).json()["reserve"], 20)
+
+        path = f"/v1/merchants/{m}/check-rate"
+        self.assertEqual(self.client.put(path, json={"rate": 5000}, headers=auth).status_code, 401)  # not a merchant's to set
+        self.assertEqual(self.client.put("/v1/merchants/nobody-here/check-rate", json={"rate": 5}, headers=self.op()).status_code, 404)
+        self.assertEqual(self.client.put(path, json={"rate": 5000, "burst": 8000}, headers=self.op()).json(),
+                         {"id": m, "rate": 5000, "burst": 8000})
+        self.assertEqual(self.r.hget(store.CHECK_RATE_HASH, m), "rate 5000 burst 8000")
+        self.assertEqual(self.client.delete(path, headers=self.op()).status_code, 204)
+        self.assertEqual(self.client.get(path, headers=self.op()).status_code, 404)
+        self.assertEqual(self.client.delete("/v1/capacity", headers=auth).status_code, 204)
+        self.assertIsNone(self.r.hget(store.CAPACITY_HASH, m))
+
+    # ---- the customer list, usage and the portal (the portal's prerequisites) ----
+
+    def test_customers_are_listed_a_page_at_a_time_and_only_ones_own(self):
+        _, auth, _ = self.new_merchant()
+        _, other_auth, _ = self.new_merchant()
+        self.with_plan(auth)
+        for cid in ("u3", "u1", "u5", "u2", "u4"):
+            self.with_customer(auth, cid)
+        seen, after = [], ""
+        while True:
+            page = self.client.get(f"/v1/customers?limit=2&after={after}", headers=auth).json()
+            seen.append([c["id"] for c in page["customers"]])
+            if page["next"] is None:
+                break
+            after = page["next"]
+        self.assertEqual(seen, [["u1", "u2"], ["u3", "u4"], ["u5"]])  # id order, every one once
+        self.assertEqual(self.client.get("/v1/customers?limit=1", headers=auth).json()["customers"][0]["usage"]["limit"], 10)
+        self.assertEqual(self.client.get("/v1/customers", headers=other_auth).json(), {"customers": [], "next": None})
+        for bad in ("after=a%7Cb", "limit=0", "limit=201"):
+            self.assertEqual(self.client.get(f"/v1/customers?{bad}", headers=auth).status_code, 422, bad)
+
+    def test_a_customer_missing_from_the_index_comes_back(self):
+        m, auth, _ = self.new_merchant()
+        self.with_plan(auth)
+        self.with_customer(auth, "u1")
+        self.r.hset(store.plan_key(m, "u2"), mapping={"plan": "basic", "daily": 10})  # as tools/rlctl wrote it before
+        self.r.delete(store.customers_key(m))  # as if a crash fell between the two writes
+        listed = lambda: [c["id"] for c in self.client.get("/v1/customers", headers=auth).json()["customers"]]
+        self.assertEqual(listed(), [])
+        self.assertEqual(self.client.post("/v1/customers/reindex", headers=auth).status_code, 401)  # the operator's
+        self.assertEqual(self.client.post("/v1/customers/reindex", headers=self.op()).json()[m], 2)
+        self.assertEqual(listed(), ["u1", "u2"])
+        self.r.delete(store.customers_key(m))
+        self.assertEqual(self.client.post("/v1/customers", json={"id": "u1", "plan": "basic"}, headers=auth).status_code, 409)
+        self.assertEqual(listed(), ["u1"])  # creating it again puts it back too
+
+    def test_usage_adds_up_what_the_script_counted_this_month(self):
+        m, auth, _ = self.new_merchant()
+        self.with_plan(auth, overage="postpaid", allowance=100)
+        quota = self.r.register_script((ROOT / "lua/quota.lua").read_text())
+        for cid, calls in (("u1", 12), ("u2", 3)):  # u1: 10 in the plan, 2 billed
+            self.with_customer(auth, cid)
+            for _ in range(calls):
+                quota(keys=[store.quota_key(m, cid)], args=[10, 1, "cap", 100, "day", 0, 0, 0, ""])
+        u = self.client.get("/v1/usage", headers=auth).json()
+        self.assertEqual((u["customers"], u["admitted"], u["billed_overage"]), (2, 15, 2))
+        self.assertEqual(u["month"], periods.month_label(periods.month_of(store.now_ms(self.r))))
+        self.assertGreater(u["at_ms"], 0)
+
+    def test_the_portal_is_served_with_a_strict_policy(self):
+        page = self.client.get("/portal")
+        self.assertEqual((page.status_code, page.headers["content-type"]), (200, "text/html; charset=utf-8"))
+        self.assertIn("default-src 'none'", page.headers["content-security-policy"])
+        self.assertIn('<script src="/portal/portal.js">', page.text)
+        self.assertEqual(self.client.get("/portal/portal.js").headers["content-type"].split(";")[0], "text/javascript")
+        for name in ("api.py", "store.py", "..%2Fapi.py"):
+            self.assertEqual(self.client.get(f"/portal/{name}").status_code, 404, name)
 
     def test_webhooks_refuse_unsafe_urls(self):
         _, auth, _ = self.new_merchant()

@@ -87,7 +87,9 @@ def main():
         run(admin, api_port, grpc_port)
         if os.environ.get("KEEP") == "1":
             say("\nRunning until Ctrl-C.")
-            signal.sigwait({signal.SIGINT, signal.SIGTERM})
+            stop = {signal.SIGINT, signal.SIGTERM}
+            signal.pthread_sigmask(signal.SIG_BLOCK, stop)  # else SIGTERM ends Python before `finally` stops the servers
+            signal.sigwait(stop)
     finally:
         for p in procs:
             p.terminate()
@@ -143,17 +145,18 @@ def run(admin, api_port, grpc_port):
     api.put("/v1/capacity", json={"rate": 100, "reserve": 30}, headers=auth).raise_for_status()
     time.sleep(0.5)  # every limiter reloads it on the plan-changes message
     say("   Free customers flood at 800 calls a second; paid-1 sends its usual 10 a second, for 8 s")
-    env = {**os.environ, "RL_API_KEYS": check_key}
-    load = lambda prefix, keys, rate: subprocess.Popen(  # noqa: E731
-        [str(LOADGEN), f"127.0.0.1:{grpc_port}", "customer", "8", "4", "512", str(keys), "0", "1", str(rate), prefix],
-        env=env, stdout=subprocess.PIPE, text=True)
+    def load(prefix, keys, rate):  # bench/loadgen, open loop for 8 s, with the merchant's key
+        return subprocess.Popen([str(LOADGEN), f"127.0.0.1:{grpc_port}", "customer", "8", "4", "512", str(keys), "0", "1",
+                                 str(rate), prefix], env={**os.environ, "RL_API_KEYS": check_key},
+                                stdout=subprocess.PIPE, text=True)
+
     flood, paid = load("free-", 20, 800), load("paid-", 1, 10)
     results = {name: json.loads(p.communicate()[0].strip().splitlines()[-1]) for name, p in (("free", flood), ("paid", paid))}
     for name, r in results.items():
         o = r["outcomes"]
         say(f"   {name}: sent {r['ok']} ({r['sent_per_s']:.0f} a second); admitted {r['allowed']} "
             f"({r['allowed'] / 8:.0f} a second); refused for capacity {o.get('rate_limited', 0)}")
-    say("   Free gets about the 70 a second left outside the reserve; paid-1 loses nothing.")
+    say("   Free gets the 70 a second outside the reserve (plus the first second's full bucket); paid-1 loses nothing.")
 
     say(f"\n== The merchant portal: http://127.0.0.1:{api_port}/portal")
     say(f"   management key: {created['management_key']}")

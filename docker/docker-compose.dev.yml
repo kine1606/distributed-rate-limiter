@@ -15,12 +15,12 @@ x-node: &node
 services:
   redis-test:
     image: redis:7
-    ports: ["6380:6379"]
+    ports: ["127.0.0.1:6380:6379"]  # this machine only: Redis here has no password
     command: redis-server --appendonly no --save ""
 
   redis-1:
     image: redis:7
-    ports: ["7001-7003:7001-7003"]
+    ports: ["127.0.0.1:7001-7003:7001-7003"]
     command: redis-server --port 7001 --cluster-enabled yes --cluster-node-timeout 5000 --appendonly no --save ""
   redis-2:
     <<: *node

@@ -7,7 +7,9 @@
 # master about 2 to 3 s after it stops answering. cluster-require-full-coverage no: the healthy
 # masters keep answering while a dead master's slots are uncovered; with Redis's default (yes) every
 # node answers CLUSTERDOWN from the failure until the promotion (measured in
-# docs/thesis/evidence/fault_kill_master_2026-10-21.md). No persistence: test data only.
+# docs/thesis/evidence/fault_kill_master_2026-10-21.md). AOF with fsync every second, as deployed
+# (docker-compose.yml), since P3's billing gate kills a master here; the Week 5 and 6 fault runs
+# were measured without persistence.
 name: ratelimiter-faults
 
 x-node: &node
@@ -17,27 +19,27 @@ x-node: &node
 services:
   net:
     image: redis:7
-    ports: ["7101-7106:7101-7106"]
+    ports: ["127.0.0.1:7101-7106:7101-7106"]  # this machine only: Redis here has no password
     entrypoint: ["sleep", "infinity"]
 
   redis-1:
     <<: *node
-    command: redis-server --port 7101 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7101 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
   redis-2:
     <<: *node
-    command: redis-server --port 7102 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7102 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
   redis-3:
     <<: *node
-    command: redis-server --port 7103 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7103 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
   redis-4:
     <<: *node
-    command: redis-server --port 7104 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7104 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
   redis-5:
     <<: *node
-    command: redis-server --port 7105 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7105 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
   redis-6:
     <<: *node
-    command: redis-server --port 7106 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly no --save ""
+    command: redis-server --port 7106 --cluster-enabled yes --cluster-node-timeout 2000 --cluster-require-full-coverage no --appendonly yes --appendfsync everysec --save ""
 
   init:
     <<: *node

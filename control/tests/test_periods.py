@@ -25,6 +25,16 @@ class KnownDates(unittest.TestCase):
         self.assertEqual(periods.period_name(ms(2026, 12, 31, 23, 59), True), f"m{2026 * 12 + 11}")
         self.assertEqual(periods.period_name(ms(2027, 1, 1), True), f"m{2027 * 12}")
 
+    def test_billing_months(self):
+        self.assertEqual(periods.month_id("2026-11"), 2026 * 12 + 10)
+        self.assertEqual(periods.month_label(2026 * 12 + 11), "2026-12")
+        self.assertEqual(periods.month_of(ms(2026, 12, 31, 23, 59)), periods.month_id("2026-12"))
+        self.assertEqual(periods.month_bounds_ms(periods.month_id("2026-12")), (ms(2026, 12, 1), ms(2027, 1, 1)))
+        self.assertEqual(periods.month_bounds_ms(periods.month_id("2028-02")), (ms(2028, 2, 1), ms(2028, 3, 1)))
+        for bad in ("2026-13", "2026-1", "26-11", "2026/11", "", "2026-00"):
+            with self.assertRaises(ValueError, msg=bad):
+                periods.month_id(bad)
+
     def test_reset(self):
         self.assertEqual(periods.reset_after_ms(ms(2026, 10, 25, 23, 0), False), 3_600_000)
         self.assertEqual(periods.reset_after_ms(ms(2026, 12, 31, 23, 0), True), 3_600_000)  # into January

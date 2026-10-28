@@ -70,6 +70,8 @@ system Redis on 6379 is never touched.
 | Add a Prometheus container and `prometheus.yml` | Metrics during load tests | 5 |
 | Add toxiproxy (or use `tc netem`) in front of Redis | Latency and connection-drop tests | 5 |
 | Scale limiters (`limiter-4`, or `--scale` with a port range) | Scaling and accuracy tests | 6 |
+| Published ports bound to `127.0.0.1` (dev and fault Redis, the three limiters) | These Redis instances have no password, and the limiters no TLS or API key unless configured: on all interfaces, anyone on the same network could rewrite plans or flush the data. WSL still reaches them | security pass |
+| AOF with `appendfsync everysec` in `docker-compose.yml` and the fault cluster (not the dev cluster, which benchmarks flush) | The quota counters are what customers are billed for: a restarted node keeps them, less at most the last second. Replication stays asynchronous, so a killed master can still lose what it had not passed on; the P3 gate measures that | P3 |
 
 ## Fault injection commands
 

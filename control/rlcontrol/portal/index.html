@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Merchant portal</title>
+  <link rel="stylesheet" href="/portal/portal.css">
+</head>
+<body>
+  <header>
+    <h1>Merchant portal</h1>
+    <button id="signout" type="button" class="quiet" hidden>Sign out</button>
+  </header>
+
+  <form id="signin" class="card">
+    <label for="key">Management key</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" required>
+    <button type="submit">Sign in</button>
+    <p id="signin-msg" class="error" role="alert"></p>
+    <p class="hint">The key stays in this browser tab only and is sent to this server alone.</p>
+  </form>
+
+  <main id="main" hidden>
+    <nav class="sections" aria-label="Sections">
+      <a href="#overview">Overview</a><a href="#customers">Customers</a><a href="#plans">Plans</a>
+      <a href="#capacity">Capacity</a><a href="#invoices">Invoices</a><a href="#webhook">Webhook</a>
+    </nav>
+
+    <section id="overview" aria-labelledby="h-overview">
+      <h2 id="h-overview">This month <span id="month"></span></h2>
+      <dl class="tiles">
+        <div><dt>Calls a second, now</dt><dd id="rate">–</dd></div>
+        <div><dt>Calls admitted</dt><dd id="admitted">–</dd></div>
+        <div><dt>Billed overage calls</dt><dd id="billed">–</dd></div>
+        <div><dt>Customers</dt><dd id="count">–</dd></div>
+      </dl>
+      <p id="status" class="hint" role="status"></p>
+    </section>
+
+    <section id="customers" aria-labelledby="h-customers">
+      <h2 id="h-customers">Customers</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Customer</th><th scope="col">Plan</th><th scope="col">This period</th>
+                <th scope="col">Billed overage</th><th scope="col">Alerts</th><th scope="col"><span class="sr">Actions</span></th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <nav class="pager" aria-label="Customer pages">
+        <button id="prev" type="button" class="quiet">Previous</button>
+        <button id="next" type="button" class="quiet">Next</button>
+      </nav>
+
+      <form id="add-customer" class="inline">
+        <h3>Add a customer</h3>
+        <label>Customer id <input name="id" required pattern="[A-Za-z0-9._:@\-]{1,128}"></label>
+        <label>Plan <select name="plan" class="plan-choice" required></select></label>
+        <button type="submit">Add</button>
+      </form>
+
+      <section id="customer" class="card" aria-labelledby="h-customer" hidden tabindex="-1">
+        <h3 id="h-customer">Customer <span id="c-id"></span></h3>
+        <dl id="c-terms" class="terms"></dl>
+        <div class="actions">
+          <form id="c-plan" class="inline">
+            <label>Plan <select name="plan" class="plan-choice" required></select></label>
+            <button type="submit">Move to plan</button>
+          </form>
+          <form id="c-limits" class="inline">
+            <label>Quota <input name="daily" type="number" min="0" placeholder="unchanged"></label>
+            <label>At the quota <select name="overage">
+              <option value="">unchanged</option><option value="hard">block</option>
+              <option value="grace">free grace</option><option value="postpaid">bill overage</option>
+            </select></label>
+            <label>Allowance <input name="allowance" type="number" min="0" placeholder="unchanged"></label>
+            <button type="submit">Set custom limits</button>
+          </form>
+          <form id="c-boost" class="inline">
+            <label>Boost, calls <input name="units" type="number" min="1" required></label>
+            <label>for minutes <input name="minutes" type="number" min="1" value="60" required></label>
+            <button type="submit">Grant boost</button>
+            <button id="c-boost-end" type="button" class="quiet">End boost</button>
+          </form>
+          <form id="c-topup" class="inline">
+            <label>Top-up, calls <input name="units" type="number" min="1" required></label>
+            <button type="submit">Buy top-up</button>
+          </form>
+          <div class="inline">
+            <button id="c-suspend" type="button" class="danger">Suspend</button>
+            <button id="c-resume" type="button" class="quiet">Resume</button>
+          </div>
+        </div>
+        <h4>Invoice so far this month</h4>
+        <div class="scroll">
+          <table>
+            <thead><tr><th scope="col">Item</th><th scope="col">Calls</th><th scope="col">Amount</th></tr></thead>
+            <tbody id="c-invoice"></tbody>
+          </table>
+        </div>
+        <p id="c-status" class="hint" role="status"></p>
+      </section>
+    </section>
+
+    <section id="plans" aria-labelledby="h-plans">
+      <h2 id="h-plans">Plans</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th scope="col">Plan</th><th scope="col">Quota</th><th scope="col">Burst</th><th scope="col">At the quota</th>
+                <th scope="col">Fee</th><th scope="col">Overage per 1,000</th><th scope="col">Top-up per 1,000</th>
+                <th scope="col"><span class="sr">Actions</span></th></tr>
+          </thead>
+          <tbody id="plan-rows"></tbody>
+        </table>
+      </div>
+      <form id="plan-form" class="grid">
+        <h3>Define or change a plan</h3>
+        <label>Name <input name="name" required pattern="[a-z0-9_\-]{1,32}"></label>
+        <label>Quota <input name="daily" type="number" min="0" required></label>
+        <label>Per <select name="period"><option value="day">day</option><option value="month">month</option></select></label>
+        <label>Burst, calls <input name="burst" type="number" min="0" required></label>
+        <label>Refill, calls a second <input name="refill" type="number" min="0" required></label>
+        <label>At the quota <select name="overage">
+          <option value="hard">block</option><option value="grace">free grace</option><option value="postpaid">bill overage</option>
+        </select></label>
+        <label>Allowance, calls <input name="allowance" type="number" min="0" value="0"></label>
+        <label>If Redis fails <select name="failure"><option value="closed">refuse</option><option value="open">admit</option></select></label>
+        <label>Fee a month, cents <input name="fee" type="number" min="0" value="0"></label>
+        <label>Overage per 1,000, cents <input name="overage_price" type="number" min="0" value="0"></label>
+        <label>Top-up per 1,000, cents <input name="topup_price" type="number" min="0" value="0"></label>
+        <button type="submit">Save plan</button>
+      </form>
+      <p id="plan-status" class="hint" role="status"></p>
+    </section>
+
+    <section id="capacity" aria-labelledby="h-capacity">
+      <h2 id="h-capacity">Capacity of your backend</h2>
+      <p class="hint">Calls a second your servers take from all your customers together. Beyond it calls are refused
+        before their quota, so nothing refused is billed; the reserve is kept for plans with a fee.</p>
+      <form id="capacity-form" class="inline">
+        <label>Calls a second <input name="rate" type="number" min="1" required></label>
+        <label>Burst <input name="burst" type="number" min="1" placeholder="one second"></label>
+        <label>Reserve, % <input name="reserve" type="number" min="0" max="100" value="0"></label>
+        <button type="submit">Save</button>
+        <button id="capacity-off" type="button" class="quiet">Remove</button>
+      </form>
+      <p id="capacity-status" class="hint" role="status"></p>
+    </section>
+
+    <section id="invoices" aria-labelledby="h-invoices">
+      <h2 id="h-invoices">Invoices</h2>
+      <form id="invoice-form" class="inline">
+        <label>Month <input name="month" type="month" required></label>
+        <button type="submit">Show</button>
+        <button id="invoice-csv" type="button" class="quiet">Download CSV</button>
+      </form>
+      <div class="scroll">
+        <table>
+          <thead><tr><th scope="col">Invoice</th><th scope="col">Customer</th><th scope="col">Plan</th>
+                     <th scope="col">Total</th><th scope="col">Status</th></tr></thead>
+          <tbody id="invoice-rows"></tbody>
+        </table>
+      </div>
+      <p id="invoice-status" class="hint" role="status"></p>
+    </section>
+
+    <section id="webhook" aria-labelledby="h-webhook">
+      <h2 id="h-webhook">Webhook</h2>
+      <p class="hint">Where alerts go (80% of a quota, the quota, overage started, a denial), signed with a secret.</p>
+      <form id="webhook-form" class="inline">
+        <label>URL <input name="url" type="url" required placeholder="https://"></label>
+        <button type="submit">Save</button>
+        <button id="webhook-off" type="button" class="quiet">Remove</button>
+      </form>
+      <p id="webhook-status" class="hint" role="status"></p>
+    </section>
+  </main>
+
+  <script src="/portal/portal.js"></script>
+</body>
+</html>

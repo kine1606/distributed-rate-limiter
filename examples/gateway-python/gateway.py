@@ -31,6 +31,11 @@ ROUTES = {
 }
 LIMITER_TIMEOUT_S = 0.2  # explicit deadline on every call to the limiter
 
+# Who is limited comes from a credential the gateway checks, never from a header the client may set
+# freely: such a header would let a client escape its limit (a new id, a fresh bucket) or spend
+# someone else's quota. A real gateway looks the key up in its own user store.
+API_KEYS = {"demo-alice": "alice", "demo-bob": "bob"}
+
 
 def load_stubs():
     GEN_DIR.mkdir(exist_ok=True)
@@ -58,14 +63,17 @@ class Gateway(BaseHTTPRequestHandler):
         if rule is None:
             return self.reply(404, {"error": "no such route", "routes": list(ROUTES)})
 
-        # Who is being limited: the X-User-Id header, else the caller's IP.
-        user = self.headers.get("X-User-Id")
-        key = f"user:{user}" if user else f"ip:{self.client_address[0]}"
+        # Who is being limited: the user whose API key this is, else (no key) the caller's IP.
+        api_key = self.headers.get("X-Api-Key")
+        if api_key is not None and api_key not in API_KEYS:
+            return self.reply(401, {"error": "unknown API key"})
+        key = f"user:{API_KEYS[api_key]}" if api_key else f"ip:{self.client_address[0]}"
 
         try:
             resp = self.limiter.Check(pb.CheckRequest(key=key, rule=rule, cost=1), timeout=LIMITER_TIMEOUT_S)
-        except grpc.RpcError as e:
-            return self.reply(503, {"error": "rate limiter unavailable", "detail": f"{e.code().name}: {e.details()}"})
+        except grpc.RpcError as e:  # the detail names internal addresses: the log gets it, the client does not
+            self.log_error("rate limiter call failed: %s: %s", e.code().name, e.details())
+            return self.reply(503, {"error": "rate limiter unavailable"})
 
         headers = {"X-RateLimit-Limit": resp.limit, "X-RateLimit-Remaining": resp.remaining}
         if resp.reset_after_ms:

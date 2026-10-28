@@ -14,7 +14,8 @@
 #   tools/rlctl merchant-add    <merchant>                          prints a new API key, once
 #   tools/rlctl merchant-revoke <merchant>                          all of its API keys stop working
 # Fields: daily (the quota per period), burst, refill, extra (numbers), overage hard|grace|cap,
-# failure open|closed, period day|month. Applying a plan replaces the customer's hash, so custom limits
+# failure open|closed, period day|month; prices in cents (P3, read only by billing): fee (a month),
+# overage_price and topup_price (per 1,000 calls). Applying a plan replaces the customer's hash, so custom limits
 # and boosts end with it; a top-up already paid for is kept. Plans: M's catalogue, then tools/plans.sh.
 # env: REDIS_HOST=127.0.0.1 REDIS_PORT=7001 (any cluster node).
 set -euo pipefail
@@ -42,11 +43,12 @@ check_fields() {
   [ $# -gt 0 ] && [ $(($# % 2)) = 0 ] || die "fields come in <field> <value> pairs"
   while [ $# -gt 0 ]; do
     case $1 in
-      daily | burst | refill | extra) [[ $2 =~ ^[0-9]{1,10}$ ]] && [ "$2" -le 4294967295 ] || die "$1 must be a whole number" ;;
+      daily | burst | refill | extra | fee | overage_price | topup_price)
+        [[ $2 =~ ^[0-9]{1,10}$ ]] && [ "$2" -le 4294967295 ] || die "$1 must be a whole number" ;;
       overage) [[ $2 =~ ^(hard|grace|cap)$ ]] || die "overage is hard, grace or cap" ;;
       failure) [[ $2 =~ ^(open|closed)$ ]] || die "failure is open or closed" ;;
       period) [[ $2 =~ ^(day|month)$ ]] || die "period is day or month" ;;
-      *) die "unknown field '$1' (daily burst refill extra overage failure period)" ;;
+      *) die "unknown field '$1' (daily burst refill extra overage failure period fee overage_price topup_price)" ;;
     esac
     shift 2
   done
@@ -59,6 +61,9 @@ case $cmd in
     key="rl_$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
     hash=$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)  # only the hash is stored
     cli hset "{rl:merchants}:keys" "$hash" "$m" >/dev/null
+    # Known to the management API and to billing too (control/rlcontrol/store.py MERCHANTS).
+    now_ms=$(cli time | { read -r s; read -r us; echo $((s * 1000 + us / 1000)); })
+    cli hsetnx "{rl:merchants}:list" "$m" "$now_ms" >/dev/null
     cli publish plan-changes '!merchants' >/dev/null
     echo "$m: API key $key (shown once; send it as the x-api-key metadata)"
     exit 0
@@ -115,6 +120,8 @@ case $cmd in
       redis.call('HSET', KEYS[1], unpack(ARGV));
       if keep[1] and keep[2] then redis.call('HSET', KEYS[1], 'topup', keep[1], 'topup_period', keep[2]) end
       return 1" 1 "$key" plan "$plan" $fields >/dev/null || die "writing $key failed"
+    # In the merchant's customer list too (the management API's GET /v1/customers).
+    [ -z "$merchant" ] || cli zadd "{rl:m:$merchant}:customers" 0 "$customer" >/dev/null
     announce
     echo "$id: $plan"
     ;;

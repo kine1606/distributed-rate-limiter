@@ -5,9 +5,12 @@ merchant or no webhook go nowhere."""
 import http.server
 import json
 import secrets
+import socket
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisClusterException
@@ -123,6 +126,45 @@ class NotifierTest(unittest.TestCase):
         self.publish(customer="nobody-here|u1")
         time.sleep(0.8)
         self.assertEqual(receiver.requests, [])
+
+
+class PinnedDeliveryTest(unittest.TestCase):
+    """DNS rebinding: a name that answers a public address for the check and a private one afterwards.
+    The delivery goes to the address checked, with the name in its Host header and as the server name
+    its certificate is checked against; the name is resolved once."""
+
+    def test_a_delivery_goes_to_the_address_checked(self):
+        answers = [[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443))],
+                   [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 8443))]]
+        sent = []
+
+        class Client:
+            def __init__(self, **_):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def post(self, url, content, headers, extensions):
+                sent.append((url, headers["Host"], extensions))
+                return types.SimpleNamespace(status_code=200)
+
+        with mock.patch("socket.getaddrinfo", side_effect=lambda *a, **k: answers.pop(0)), mock.patch("httpx.Client", Client):
+            notifier = Notifier(None, attempts=1, allow_private=False)
+            status = notifier.send("https://hooks.example.com:8443/rl", "whsec_x", {"type": "quota.80"}, "d1")
+            notifier.close()
+        self.assertEqual(status, 200)
+        self.assertEqual(sent, [("https://93.184.216.34:8443/rl", "hooks.example.com:8443",
+                                 {"sni_hostname": "hooks.example.com"})])
+        self.assertEqual(len(answers), 1)  # resolved once
+
+    def test_an_ipv6_address_is_bracketed(self):
+        self.assertEqual(webhooks.pinned("http://h.example/x", "2606:2800:220:1::1"),
+                         ("http://[2606:2800:220:1::1]/x", {"Host": "h.example"}, {}))
+        self.assertEqual(webhooks.pinned("http://h.example/x", None), ("http://h.example/x", {}, {}))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ RL_TENANCY=merchants), the management API, the notifier and a webhook receiver, 
 4. Another merchant's customer with the same id is someone else; a wrong key is refused; revoking the
    merchant's check keys locks its gateway out."""
 import json
+import math
 import os
 import pathlib
 import secrets
@@ -91,8 +92,12 @@ class GateTest(unittest.TestCase):
         for m in self.merchants:
             for key in (store.catalog_key(m), store.webhook_key(m), store.purchases_key(m)):
                 self.r.delete(key)
-            for c in ("hard1", "grace1", "post1"):
+            for c in ("hard1", "grace1", "post1", "f1", "p1"):
                 self.r.delete(store.plan_key(m, c), store.quota_key(m, c))
+            for rule in ("merchant_capacity", "merchant_reserve", "merchant_checks"):
+                self.r.delete(f"{{{m}}}:{rule}:tb")
+            self.r.hdel(store.CAPACITY_HASH, m)
+            self.r.hdel(store.CHECK_RATE_HASH, m)
             for h in (store.KEYS_HASH, store.ADMIN_HASH):
                 mine = [k for k, owner in self.r.hgetall(h).items() if owner == m]
                 if mine:
@@ -126,6 +131,38 @@ class GateTest(unittest.TestCase):
                 return got
             time.sleep(0.02)
         return got
+
+    def test_capacity_keeps_its_reserve_for_paying_customers(self):
+        """P3: the merchant's capacity refuses Free calls beyond its shared part while a paying customer
+        still gets the reserve; the operator's check rate refuses checks beyond it."""
+        m, auth, key = self.merchant()
+        base = {"daily": 100_000, "burst": 1000, "refill": 1000}
+        self.api.put("/v1/plans/free", json=base, headers=auth)
+        self.api.put("/v1/plans/pay", json={**base, "fee": 1900}, headers=auth)
+        for cid, plan in (("f1", "free"), ("p1", "pay")):
+            self.assertEqual(self.api.post("/v1/customers", json={"id": cid, "plan": plan}, headers=auth).status_code, 201)
+        self.until(key, "f1", "REASON_OK", timeout=2.0)  # the limiter has loaded the merchant's key
+
+        self.api.put("/v1/capacity", json={"rate": 10, "reserve": 50}, headers=auth)  # 5 a second each part
+        time.sleep(0.5)  # the reload, announced on plan-changes
+        # Admitted: the bucket, plus what refilled during the calls, plus one lease chunk (1 here).
+        start = time.monotonic()
+        free = [self.reason(key, "f1") for _ in range(20)]
+        refilled = math.ceil(5 * (time.monotonic() - start))
+        self.assertGreaterEqual(free.count("REASON_OK"), 5)  # the shared part
+        self.assertLessEqual(free.count("REASON_OK"), 5 + refilled + 1)
+        self.assertEqual(free.count("REASON_RATE_LIMITED"), 20 - free.count("REASON_OK"))
+        self.assertEqual([self.reason(key, "p1") for _ in range(5)], ["REASON_OK"] * 5)  # the reserve
+
+        self.api.delete("/v1/capacity", headers=auth)
+        self.api.put(f"/v1/merchants/{m}/check-rate", json={"rate": 20}, headers={"Authorization": f"Bearer {ADMIN}"})
+        time.sleep(0.5)
+        start = time.monotonic()
+        answers = [self.reason(key, "f1") for _ in range(40)]
+        refilled = math.ceil(20 * (time.monotonic() - start))
+        self.assertGreaterEqual(answers.count("REASON_OK"), 20)
+        self.assertLessEqual(answers.count("REASON_OK"), 20 + refilled + 2)  # a lease chunk is 2 here
+        self.assertEqual(answers.count("REASON_RATE_LIMITED"), 40 - answers.count("REASON_OK"))
 
     def test_the_three_answers_changed_live_with_alerts(self):
         m, auth, key = self.merchant()

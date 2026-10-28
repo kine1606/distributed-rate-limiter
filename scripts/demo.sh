@@ -46,7 +46,7 @@ wait_port 8080 gateway
 
 hit() {  # hit <user> <path>
   local code
-  code=$(curl -s -o "$tmp/body" -D "$tmp/headers" -w '%{http_code}' -H "X-User-Id: $1" "http://127.0.0.1:8080$2")
+  code=$(curl -s -o "$tmp/body" -D "$tmp/headers" -w '%{http_code}' -H "X-Api-Key: demo-$1" "http://127.0.0.1:8080$2")
   printf '%-6s %-11s -> %s  remaining=%-3s retry-after=%-2s %s\n' "$1" "$2" "$code" \
     "$(grep -i '^x-ratelimit-remaining' "$tmp/headers" | tr -dc 0-9)" \
     "$(grep -i '^retry-after' "$tmp/headers" | tr -dc 0-9)" "$(cat "$tmp/body")"

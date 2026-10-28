@@ -10,6 +10,8 @@ import time
 KEYS_HASH = "{rl:merchants}:keys"    # sha256(check key) -> merchant (read by src/server/merchants.h)
 ADMIN_HASH = "{rl:merchants}:admin"  # sha256(management key) -> merchant
 MERCHANTS = "{rl:merchants}:list"    # merchant -> created at, Unix ms
+CAPACITY_HASH = "{rl:merchants}:capacity"      # merchant -> "rate R burst B reserve P" (src/server/merchants.h)
+CHECK_RATE_HASH = "{rl:merchants}:check_rate"  # merchant -> "rate R burst B", set by the operator
 CHANNEL = "plan-changes"
 MERCHANTS_CHANGED = "!merchants"
 ALERTS = "rl-alerts"                 # published by lua/quota.lua
@@ -21,6 +23,9 @@ PLAN_RE = re.compile(r"[a-z0-9_-]{1,32}")
 UINT32 = 4_294_967_295
 
 PLAN_FIELDS = ("daily", "burst", "refill", "period", "overage", "extra", "failure")
+# Prices (P3), read only by the billing job: the plan's monthly fee, and 1,000 billed overage units
+# or 1,000 top-up units, each in the currency's minor unit (cents). The limiter ignores them.
+PRICE_FIELDS = ("fee", "overage_price", "topup_price")
 OVERAGE_TO_API = {"hard": "hard", "grace": "grace", "cap": "postpaid"}
 OVERAGE_FROM_API = {v: k for k, v in OVERAGE_TO_API.items()}
 ALERT_BITS = ((1, "quota.80"), (2, "quota.100"), (4, "overage.started"), (8, "quota.denied"))
@@ -38,6 +43,18 @@ def purchases_key(merchant):  # a stream of top-ups, for the invoice (P3)
     return f"{{rl:m:{merchant}}}:purchases"
 
 
+def customers_key(merchant):  # a sorted set of the merchant's customer ids (score 0: ordered by id)
+    return f"{{rl:m:{merchant}}}:customers"
+
+
+def invoices_key(merchant):  # invoice id -> invoice (JSON), written by rlcontrol.billing
+    return f"{{rl:m:{merchant}}}:invoices"
+
+
+def payers_key(merchant):  # customer -> the payment provider's customer id; never a card
+    return f"{{rl:m:{merchant}}}:payers"
+
+
 def idempotency_key(merchant, key):
     return f"{{rl:m:{merchant}}}:idem:{hashlib.sha256(key.encode()).hexdigest()}"
 
@@ -51,7 +68,11 @@ def plan_key(merchant, customer):
 
 
 def quota_key(merchant, customer):  # src/redis/keys.h, RedisKey
-    return f"{{{customer_id(merchant, customer)}}}:{QUOTA_RULE}:q"
+    return counter_key(customer_id(merchant, customer))
+
+
+def counter_key(limiter_id):  # the quota counter of a customer as the limiter names it ("acme|u42")
+    return f"{{{limiter_id}}}:{QUOTA_RULE}:q"
 
 
 def sha256_hex(s):
@@ -103,7 +124,8 @@ return until_ms
 """
 
 # Adds ARGV[1] prepaid units for the current period: ARGV[2] if the plan counts per day, ARGV[3] if
-# per month. A top-up for an earlier period is replaced. Returns the period's total, or -1.
+# per month. A top-up for an earlier period is replaced. Returns the period's total, the period and the
+# plan's price of 1,000 top-up units (for the invoice), or -1.
 TOPUP = """
 if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
 local period = redis.call('HGET', KEYS[1], 'period') == 'month' and ARGV[3] or ARGV[2]
@@ -111,7 +133,7 @@ local cur = redis.call('HMGET', KEYS[1], 'topup', 'topup_period')
 local units = tonumber(ARGV[1])
 if cur[2] == period then units = units + (tonumber(cur[1]) or 0) end
 redis.call('HSET', KEYS[1], 'topup', units, 'topup_period', period)
-return {units, period}
+return {units, period, redis.call('HGET', KEYS[1], 'topup_price') or '0'}
 """
 
 # Suspends, remembering the plan, or resumes it; the numbers are kept either way.
@@ -140,6 +162,19 @@ def flatten(fields):
 
 def announce(redis, merchant, customer):
     redis.publish(CHANNEL, customer_id(merchant, customer))
+
+
+def bucket_text(rate, burst=None, reserve=None):
+    """A merchant bucket's terms as the limiter reads them (ParseBucketTerms in src/server/merchants.h)."""
+    words = ["rate", rate, "burst", burst or rate] + (["reserve", reserve] if reserve is not None else [])
+    return " ".join(str(w) for w in words)
+
+
+def bucket_view(text):
+    words = text.split()
+    terms = {k: int(v) for k, v in zip(words[::2], words[1::2]) if v.isdigit()}
+    return {"rate": terms.get("rate", 0), "burst": terms.get("burst", terms.get("rate", 0)),
+            **({"reserve": terms["reserve"]} if "reserve" in terms else {})}
 
 
 def decode_alerts(bits):

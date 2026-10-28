@@ -1,13 +1,16 @@
 # Local test environment: 3-master Redis Cluster + 3 limiter instances (each seeds from redis-1).
 # Usage (from repo root): docker compose -f docker/docker-compose.yml up --build
 # Metrics: each limiter serves /metrics on port 9100 inside the network; Prometheus on localhost:9090.
+# Redis keeps an append-only file (AOF, fsync every second): the quota counters are what customers are
+# billed for (P3), so a restarted node keeps them, less at most the last second. It lives in the
+# container, so it survives a restart, not `docker compose down`.
 name: ratelimiter
 
 x-redis-node: &redis-node
   image: redis:7
   command: >
     redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf
-    --cluster-node-timeout 5000 --appendonly no --save ""
+    --cluster-node-timeout 5000 --appendonly yes --appendfsync everysec --save ""
   networks: [rl]
 
 x-limiter: &limiter
@@ -41,13 +44,13 @@ services:
 
   limiter-1:
     <<: *limiter
-    ports: ["50051:50051"]
+    ports: ["127.0.0.1:50051:50051"]  # this machine only: no TLS or API key unless configured
   limiter-2:
     <<: *limiter
-    ports: ["50052:50051"]
+    ports: ["127.0.0.1:50052:50051"]
   limiter-3:
     <<: *limiter
-    ports: ["50053:50051"]
+    ports: ["127.0.0.1:50053:50051"]
 
   prometheus:  # http://localhost:9090, e.g. sum by (reason) (rate(rl_checks_total[1m]))
     image: prom/prometheus:v2.53.2

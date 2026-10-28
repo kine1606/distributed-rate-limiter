@@ -59,11 +59,13 @@ class Notifier:
         body = json.dumps(payload, separators=(",", ":")).encode()
         for attempt in range(1, self.attempts + 1):
             try:
-                webhooks.check_url(url, self.allow_private)  # again: DNS may have changed since registration
+                # Again (DNS may have changed since registration), and to the address checked, never
+                # to a second resolution of the name.
+                target, host, extensions = webhooks.pinned(url, webhooks.check_url(url, self.allow_private))
                 headers = {"Content-Type": "application/json", "X-RL-Event": payload["type"], "X-RL-Delivery": did,
-                           "X-RL-Signature": webhooks.sign(secret, body)}
+                           "X-RL-Signature": webhooks.sign(secret, body), **host}
                 with httpx.Client(timeout=self.timeout_s, follow_redirects=False) as client:
-                    status = client.post(url, content=body, headers=headers).status_code
+                    status = client.post(target, content=body, headers=headers, extensions=extensions).status_code
                 if 200 <= status < 300:
                     self.delivered.append((did, status))
                     log.info("delivered %s %s to %s", payload["type"], did, url)

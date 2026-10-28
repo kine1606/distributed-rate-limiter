@@ -1,11 +1,13 @@
-"""The management API (Phase 2, P2; docs/PRODUCT_PLAN.md section 8). REST over HTTP, documented by its
-OpenAPI page (/docs).
+"""The management API (Phase 2, P2 and P3; docs/PRODUCT_PLAN.md section 8). REST over HTTP, documented
+by its OpenAPI page (/docs).
 
 Two kinds of caller, each with its own credential (Authorization: Bearer ...):
-- the platform operator, with RL_ADMIN_TOKEN: creates merchants and rotates or revokes their keys;
-- a merchant, with its management key: defines its plans, creates customers, sets their limits,
-  grants boosts and top-ups, suspends, reads usage, registers its webhook. The merchant always comes
-  from the key, never from the URL, so no request can reach another merchant's customers.
+- the platform operator, with RL_ADMIN_TOKEN: creates merchants, rotates or revokes their keys, and
+  closes a month for billing;
+- a merchant, with its management key: defines its plans and their prices, creates customers, sets
+  their limits, grants boosts and top-ups, suspends, reads usage, keeps its customers' payment methods
+  (as the provider's tokens), reads invoices, registers its webhook. The merchant always comes from the
+  key, never from the URL, so no request can reach another merchant's customers.
 
 A merchant's check key (for its gateway's calls to the limiter) and its management key are separate:
 a gateway that leaks its key cannot change plans.
@@ -15,15 +17,26 @@ a gateway that leaks its key cannot change plans.
 import hmac
 import json
 import os
+import pathlib
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from redis.cluster import RedisCluster
 
-from . import periods, store, webhooks
+from . import billing, payments, periods, store, webhooks
 
 MERCHANT = r"^[A-Za-z0-9_-]{1,64}$"
+# The merchant portal, served by the API so it needs no cross-origin access. Its CSP lets it load and call
+# nothing but this server, so neither an injected script nor a stolen page can send the key elsewhere.
+PORTAL = pathlib.Path(__file__).with_name("portal")
+PORTAL_FILES = {"": ("index.html", "text/html; charset=utf-8"), "portal.js": ("portal.js", "text/javascript"),
+                "portal.css": ("portal.css", "text/css")}
+PORTAL_HEADERS = {"Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; "
+                                             "connect-src 'self'; base-uri 'none'; form-action 'self'; "
+                                             "frame-ancestors 'none'",
+                  "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
 CUSTOMER = r"^[A-Za-z0-9._:@-]{1,128}$"
 PLAN = r"^[a-z0-9_-]{1,32}$"
 
@@ -39,13 +52,18 @@ class PlanTerms(Strict):
     period: Literal["day", "month"] = "day"
     overage: Literal["hard", "grace", "postpaid"] = Field(
         "hard", description="at the quota: hard blocks; grace admits `allowance` more, free; postpaid admits "
-                            "`allowance` more as billed overage (the spending cap, in calls)")
+                            "`allowance` more as billed overage (the spending cap, in calls per quota period: per day on a "
+                            "daily plan)")
     allowance: int = Field(0, ge=0, le=store.UINT32)
     failure: Literal["open", "closed"] = Field("closed", description="when Redis cannot be asked: admit (paid) or refuse")
+    fee: int = Field(0, ge=0, le=store.UINT32, description="the monthly fee, in cents")
+    overage_price: int = Field(0, ge=0, le=store.UINT32, description="the price of 1,000 billed overage calls, in cents")
+    topup_price: int = Field(0, ge=0, le=store.UINT32, description="the price of 1,000 prepaid top-up calls, in cents")
 
     def fields(self):
         return {"daily": self.daily, "burst": self.burst, "refill": self.refill, "period": self.period,
-                "overage": store.OVERAGE_FROM_API[self.overage], "extra": self.allowance, "failure": self.failure}
+                "overage": store.OVERAGE_FROM_API[self.overage], "extra": self.allowance, "failure": self.failure,
+                "fee": self.fee, "overage_price": self.overage_price, "topup_price": self.topup_price}
 
 
 class LimitsPatch(Strict):
@@ -56,6 +74,9 @@ class LimitsPatch(Strict):
     overage: Optional[Literal["hard", "grace", "postpaid"]] = None
     allowance: Optional[int] = Field(None, ge=0, le=store.UINT32)
     failure: Optional[Literal["open", "closed"]] = None
+    fee: Optional[int] = Field(None, ge=0, le=store.UINT32)
+    overage_price: Optional[int] = Field(None, ge=0, le=store.UINT32)
+    topup_price: Optional[int] = Field(None, ge=0, le=store.UINT32)
 
     def fields(self):
         out = {}
@@ -91,6 +112,23 @@ class TopUp(Strict):
     units: int = Field(ge=1, le=1_000_000_000)
 
 
+class Capacity(Strict):
+    rate: int = Field(ge=1, le=store.UINT32, description="calls a second the merchant's backend takes from all its customers")
+    burst: Optional[int] = Field(None, ge=1, le=store.UINT32,
+                                 description="calls it takes at once; default one second's worth. At least the largest cost a "
+                                             "check sends, or such a check is always refused")
+    reserve: int = Field(0, ge=0, le=100, description="percent of rate and burst only plans with a fee may use")
+
+
+class CheckRate(Strict):
+    rate: int = Field(ge=1, le=store.UINT32, description="checks a second the platform takes from the merchant")
+    burst: Optional[int] = Field(None, ge=1, le=store.UINT32, description="checks at once; default one second's worth")
+
+
+class PaymentMethod(Strict):
+    token: str = Field(max_length=128, description="the payment provider's token for the card (never a card number)")
+
+
 class Webhook(Strict):
     url: str = Field(max_length=2048)
     secret: Optional[str] = Field(None, min_length=16, max_length=128)
@@ -107,10 +145,11 @@ def terms_view(fields):
     return {"daily": int(fields.get("daily", 200)), "burst": int(fields.get("burst", 2)),
             "refill": int(fields.get("refill", 2)), "period": "month" if fields.get("period") == "month" else "day",
             "overage": store.OVERAGE_TO_API.get(fields.get("overage", "hard"), "hard"),
-            "allowance": int(fields.get("extra", 0)), "failure": "open" if fields.get("failure") == "open" else "closed"}
+            "allowance": int(fields.get("extra", 0)), "failure": "open" if fields.get("failure") == "open" else "closed",
+            **{name: int(fields.get(name, 0)) for name in store.PRICE_FIELDS}}
 
 
-def create_app(redis=None, admin_token=None):
+def create_app(redis=None, admin_token=None, provider=None):
     admin_token = admin_token if admin_token is not None else os.environ.get("RL_ADMIN_TOKEN", "")
     if len(admin_token) < 16:
         raise RuntimeError("RL_ADMIN_TOKEN must be set, at least 16 characters")
@@ -118,6 +157,7 @@ def create_app(redis=None, admin_token=None):
         host, port = os.environ.get("RL_REDIS", "127.0.0.1:7001").rsplit(":", 1)
         redis = RedisCluster(host=host, port=int(port), decode_responses=True)
     r = redis
+    provider = provider if provider is not None else payments.SandboxProvider(r)
     scripts = {name: r.register_script(getattr(store, name))
                for name in ("CREATE", "APPLY", "UPDATE", "BOOST", "TOPUP", "SUSPEND", "RESUME")}
 
@@ -170,6 +210,16 @@ def create_app(redis=None, admin_token=None):
                       "alerts": store.decode_alerts(counter.get("alerts", 0)) if current else []},
         }
 
+    # ---- the merchant portal ----
+
+    @app.get("/portal", include_in_schema=False)
+    @app.get("/portal/{name}", include_in_schema=False)
+    def portal(name: str = ""):
+        if name not in PORTAL_FILES:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        file, media_type = PORTAL_FILES[name]
+        return FileResponse(PORTAL / file, media_type=media_type, headers=PORTAL_HEADERS)
+
     # ---- the operator ----
 
     @app.post("/v1/merchants", status_code=201, dependencies=[Depends(operator)])
@@ -195,6 +245,29 @@ def create_app(redis=None, admin_token=None):
         r.hset(store.KEYS_HASH, store.sha256_hex(check), mid)
         r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
         return {"id": mid, "check_key": check}
+
+    @app.put("/v1/merchants/{mid}/check-rate", dependencies=[Depends(operator)])
+    def put_check_rate(body: CheckRate, mid: str = Path(pattern=MERCHANT)):
+        """How many checks a second the platform takes from this merchant, so its flood cannot slow the
+        others; beyond it every limiter answers RATE_LIMITED at once."""
+        if not r.hexists(store.MERCHANTS, mid):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such merchant")
+        r.hset(store.CHECK_RATE_HASH, mid, store.bucket_text(body.rate, body.burst))
+        r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
+        return {"id": mid, **store.bucket_view(r.hget(store.CHECK_RATE_HASH, mid))}
+
+    @app.get("/v1/merchants/{mid}/check-rate", dependencies=[Depends(operator)])
+    def get_check_rate(mid: str = Path(pattern=MERCHANT)):
+        text = r.hget(store.CHECK_RATE_HASH, mid)
+        if text is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no check rate")
+        return {"id": mid, **store.bucket_view(text)}
+
+    @app.delete("/v1/merchants/{mid}/check-rate", status_code=204, dependencies=[Depends(operator)])
+    def delete_check_rate(mid: str = Path(pattern=MERCHANT)):
+        r.hdel(store.CHECK_RATE_HASH, mid)
+        r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
+        return Response(status_code=204)
 
     @app.delete("/v1/merchants/{mid}/check-keys", dependencies=[Depends(operator)])
     def revoke_check_keys(mid: str = Path(pattern=MERCHANT)):
@@ -233,10 +306,50 @@ def create_app(redis=None, admin_token=None):
 
     @app.post("/v1/customers", status_code=201)
     def create_customer(body: CustomerCreate, m: str = Depends(merchant)):
-        if not run("CREATE", m, body.id, store.flatten(plan_fields(m, body.plan))):
+        created = run("CREATE", m, body.id, store.flatten(plan_fields(m, body.plan)))
+        # The index lives in the merchant's slot, the hash in the customer's: two writes. If a crash
+        # falls between them, POST /v1/customers/reindex (or creating it again) puts it back.
+        r.zadd(store.customers_key(m), {body.id: 0})
+        if not created:
             raise HTTPException(status.HTTP_409_CONFLICT, "customer exists")
         store.announce(r, m, body.id)
         return customer_view(m, body.id)
+
+    @app.get("/v1/customers")
+    def list_customers(after: str = Query("", pattern=r"^[A-Za-z0-9._:@-]{0,128}$",
+                                          description="the last id of the previous page"),
+                       limit: int = Query(50, ge=1, le=200), m: str = Depends(merchant)):
+        """The merchant's customers in id order, a page at a time, each as GET /v1/customers/{id} shows it."""
+        ids = r.zrange(store.customers_key(m), f"({after}" if after else "-", "+", bylex=True, offset=0, num=limit)
+        rows = []
+        for cid in ids:
+            try:
+                rows.append(customer_view(m, cid))
+            except HTTPException:  # in the index, but its hash is gone
+                continue
+        return {"customers": rows, "next": ids[-1] if len(ids) == limit else None}
+
+    @app.get("/v1/usage")
+    def usage(m: str = Depends(merchant)):
+        """The merchant's calls admitted this calendar month over all its customers, from the counters the
+        limiters' quota script keeps (every instance's calls). Polled twice, the change of `admitted`
+        over the change of `at_ms` (Redis's clock) is its calls a second. Refused calls are not counted;
+        a large plain daily plan, served from leases, counts the units its leases took."""
+        # shortcut: one read per customer on every call (the portal polls every 5 s); keep a running
+        # total per merchant, sharded to avoid a hot key, once a merchant has more than ~10,000 customers.
+        now = store.now_ms(r)
+        month = periods.month_of(now)
+        ids = r.zrange(store.customers_key(m), 0, -1)
+        pipe = r.pipeline()
+        for cid in ids:
+            pipe.hmget(store.quota_key(m, cid), "bm", "bu", "bo")
+        admitted = billed = 0
+        for bm, bu, bo in pipe.execute() if ids else []:
+            if bm is not None and int(bm) == month:
+                admitted += int(bu or 0) + int(bo or 0)
+                billed += int(bo or 0)
+        return {"month": periods.month_label(month), "at_ms": now, "customers": len(ids), "admitted": admitted,
+                "billed_overage": billed}
 
     @app.get("/v1/customers/{cid}")
     def get_customer(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
@@ -289,13 +402,15 @@ def create_app(redis=None, admin_token=None):
             if idem:
                 r.delete(idem)
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no such customer")
-        total, period = int(result[0]), result[1]
-        # The purchase, for the invoice (P3). shortcut: written after the units, so a crash between the
-        # two gives units away unbilled, never bills units not given; make both one record if needed.
+        total, period, price = int(result[0]), result[1], int(result[2])
+        # The purchase, at the plan's price now, for the invoice (P3). shortcut: written after the units,
+        # so a crash between the two gives units away unbilled, never bills units not given; make both
+        # one record if needed.
         r.xadd(store.purchases_key(m), {"customer": cid, "units": body.units, "period": period, "at_ms": now,
-                                        "idempotency_key": idempotency_key or ""})
+                                        "price": price, "idempotency_key": idempotency_key or ""})
         store.announce(r, m, cid)
-        answer = {"customer": cid, "units": body.units, "period": period, "period_total": total}
+        answer = {"customer": cid, "units": body.units, "period": period, "period_total": total,
+                  "price_per_1000": price, "amount": billing.line_amount(body.units, price)}
         if idem:
             r.set(idem, json.dumps(answer), ex=86_400)
         return answer
@@ -307,6 +422,106 @@ def create_app(redis=None, admin_token=None):
     @app.post("/v1/customers/{cid}/resume")
     def resume(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
         return changed(m, cid, run("RESUME", m, cid))
+
+    # ---- a merchant: its backend's capacity (P3) ----
+
+    @app.put("/v1/capacity")
+    def put_capacity(body: Capacity, m: str = Depends(merchant)):
+        """How many calls a second the merchant's backend takes from all its customers together. Beyond it
+        calls are refused (RATE_LIMITED) before their quota, so nothing refused is counted or billed;
+        `reserve` percent of it is kept for plans with a fee, so a flood of Free calls cannot take it."""
+        burst = body.burst or body.rate
+        if body.reserve < 100 and burst * (100 - body.reserve) // 100 < 1:  # as the limiter splits it (merchants.h)
+            least = -(-100 // (100 - body.reserve))
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                f"a burst of {burst} leaves no whole call outside a {body.reserve}% reserve: at least {least}")
+        r.hset(store.CAPACITY_HASH, m, store.bucket_text(body.rate, body.burst, body.reserve))
+        r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)  # every limiter reloads it at once
+        return store.bucket_view(r.hget(store.CAPACITY_HASH, m))
+
+    @app.get("/v1/capacity")
+    def get_capacity(m: str = Depends(merchant)):
+        text = r.hget(store.CAPACITY_HASH, m)
+        if text is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no capacity set")
+        return store.bucket_view(text)
+
+    @app.delete("/v1/capacity", status_code=204)
+    def delete_capacity(m: str = Depends(merchant)):
+        r.hdel(store.CAPACITY_HASH, m)
+        r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
+        return Response(status_code=204)
+
+    # ---- a merchant: payment methods and invoices (P3) ----
+
+    @app.put("/v1/customers/{cid}/payment-method")
+    def put_payment_method(body: PaymentMethod, cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
+        """The card the customer's invoices are charged to when a month closes, as the payment provider's
+        token. A card number is refused: only the provider ever holds one."""
+        if not r.exists(store.plan_key(m, cid)):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such customer")
+        try:
+            payments.check_token(body.token)
+            payer = r.hget(store.payers_key(m), cid) or provider.create_customer(store.customer_id(m, cid))
+            card = provider.attach(payer, body.token)
+        except payments.PaymentError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, {"code": e.code, "message": str(e)}) from e
+        r.hset(store.payers_key(m), cid, payer)
+        return {"customer": cid, "provider": provider.name, "card": card}
+
+    @app.get("/v1/customers/{cid}/payment-method")
+    def get_payment_method(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
+        payer = r.hget(store.payers_key(m), cid)
+        if payer is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no payment method")
+        return {"customer": cid, "provider": provider.name, "card": provider.card(payer)}
+
+    @app.delete("/v1/customers/{cid}/payment-method", status_code=204)
+    def delete_payment_method(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
+        r.hdel(store.payers_key(m), cid)  # its invoices stay open for the merchant to collect
+        return Response(status_code=204)
+
+    @app.get("/v1/customers/{cid}/invoice-preview")
+    def invoice_preview(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
+        """This month's invoice so far: the fee, billed overage and top-ups, as it would close now."""
+        if not r.exists(store.plan_key(m, cid)):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such customer")
+        return billing.preview(r, m, cid)
+
+    def month_param(month):
+        try:
+            return periods.month_id(month)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+
+    @app.get("/v1/invoices")
+    def list_invoices(month: str = Query(description="YYYY-MM"), m: str = Depends(merchant)):
+        return billing.invoices(r, m, month_param(month))
+
+    @app.get("/v1/invoices.csv")
+    def invoices_csv(month: str = Query(description="YYYY-MM"), m: str = Depends(merchant)):
+        return Response(billing.to_csv(billing.invoices(r, m, month_param(month))), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="invoices-{month}.csv"'})
+
+    @app.post("/v1/customers/reindex", dependencies=[Depends(operator)])
+    def reindex_customers():
+        """Rebuilds every merchant's customer index from the plan hashes (a scan of the cluster): for
+        customers made before the index, by tools/rlctl, or across a crash between the two writes."""
+        found = billing.customers(r)
+        for m in r.hkeys(store.MERCHANTS):
+            if found.get(m):
+                r.zadd(store.customers_key(m), dict.fromkeys(found[m], 0))
+        return {m: len(c) for m, c in found.items()}
+
+    @app.post("/v1/billing/close", dependencies=[Depends(operator)])
+    def close_month(month: str = Query(description="YYYY-MM, a month that has ended"), charge: bool = True,
+                    merchant: Optional[list[str]] = Query(None, description="only these merchants; default all")):
+        """Invoices the merchants' customers for the month and charges those with a payment method; a
+        declined charge suspends the customer. Safe to repeat (rlcontrol.billing runs the same from cron)."""
+        try:
+            return billing.close(r, month_param(month), provider if charge else None, merchant)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
 
     # ---- a merchant: its webhook ----
 

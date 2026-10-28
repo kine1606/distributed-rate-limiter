@@ -1,5 +1,17 @@
-# The management API and the alert notifier (control/README.md). Pinned; installed by control/setup.sh.
+# The management API and the alert notifier (control/README.md), installed by control/setup.sh. Every
+# package pip installs is pinned, dependencies too, so a new release of one cannot arrive unseen; the
+# rest (grpcio and the like) come from the system's packages (--system-site-packages).
 fastapi==0.115.6
 uvicorn==0.32.1
 redis==5.2.1
 httpx==0.28.1
+# their dependencies, as tested
+annotated-types==0.8.0
+anyio==4.15.1
+h11==0.16.0
+httpcore==1.0.9
+pydantic==2.14.1
+pydantic_core==2.50.1
+starlette==0.41.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
