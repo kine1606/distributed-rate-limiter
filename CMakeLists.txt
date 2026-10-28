@@ -6,6 +6,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Parallel compiles by memory, not by cores, whatever -j says (Ninja job pools): one gRPC-heavy file
+# peaks at 0.7 GB to compile, 1.1 GB under ASan (src/server/main.cc), so 12 at once ran WSL's 7.6 GB
+# out of memory and its OOM killer took down the session. 1.25 GB a compile, 2.5 GB kept for Docker's
+# Redis, the editor and the rest.
+cmake_host_system_information(RESULT rl_mem_mib QUERY TOTAL_PHYSICAL_MEMORY)
+math(EXPR rl_compile_jobs "(${rl_mem_mib} - 2560) / 1280")
+if(rl_compile_jobs LESS 1)
+  set(rl_compile_jobs 1)
+endif()
+set_property(GLOBAL PROPERTY JOB_POOLS rl_compile=${rl_compile_jobs} rl_link=2)
+set(CMAKE_JOB_POOL_COMPILE rl_compile)
+set(CMAKE_JOB_POOL_LINK rl_link)
+
 option(RL_NATIVE "Compile with -march=native (do not use for portable binaries/Docker images)" ON)
 option(RL_BUILD_TESTS "Build unit tests" ON)
 option(RL_BUILD_BENCH "Build benchmarks" ON)

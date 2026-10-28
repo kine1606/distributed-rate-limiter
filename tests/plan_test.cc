@@ -105,5 +105,12 @@ TEST(Plan, TopUpNeedsAWellFormedPeriod) {  // Phase 2, P2
   EXPECT_NE(QuotaStamp(topped), before);
 }
 
+TEST(Plan, APlanWithAFeeIsPaid) {  // Phase 2, P3: it may use the merchant's reserve
+  EXPECT_FALSE(ParsePlan({}).paid);
+  EXPECT_FALSE(ParsePlan({{"plan", "free"}, {"fee", "0"}}).paid);
+  EXPECT_TRUE(ParsePlan({{"plan", "pay"}, {"fee", "1900"}}).paid);
+  EXPECT_FALSE(ParsePlan({{"fee", "-5"}}).paid);  // malformed: Free
+}
+
 }  // namespace
 }  // namespace ratelimiter

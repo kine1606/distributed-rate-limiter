@@ -25,6 +25,7 @@ struct Plan {
   std::int64_t boost_until_ms{0};
   std::uint32_t topup{0};                 // prepaid units for the period topup_period (P2), "d<day>" or
   std::string topup_period{};             // "m<year * 12 + month - 1>"; another period ignores them
+  bool paid{false};                       // the plan has a monthly fee (P3): it may use the merchant's reserve
 };
 
 // Identifies a plan's quota terms, so a denial recorded under them (DenyCache) is ignored once the
@@ -71,6 +72,9 @@ inline Plan ParsePlan(const std::unordered_map<std::string, std::string>& fields
     if (ok) p.topup_period = v;
   }
   if (p.topup_period.empty()) p.topup = 0;  // units without a period apply to none
+  std::uint32_t fee = 0;  // in cents; only whether there is one matters here (billing: control/rlcontrol)
+  read("fee", fee);
+  p.paid = fee > 0;
   if (const auto it = fields.find("overage"); it != fields.end()) {
     if (it->second == "grace") p.overage = Overage::kGrace;
     if (it->second == "cap") p.overage = Overage::kCap;

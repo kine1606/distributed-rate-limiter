@@ -58,33 +58,67 @@ void LeasedCore::CheckLease(const Rule& rule, const CheckRequest& request, Check
   // A check bigger than one chunk would make this instance hold more than a chunk, breaking the
   // bound limit + N x C (the seeded harness found it). Rare, so it asks Redis directly.
   if (request.cost > ChunkCap(rule)) {
-    strict_.Check(request, std::move(done));
+    Exact(rule, request, std::move(done));
     return;
   }
   Lease* lease = leases_.FindOrCreate(rule, request.key);
   if (lease == nullptr) {  // no room in the lease table around this key: exact path instead
-    strict_.Check(request, std::move(done));
+    Exact(rule, request, std::move(done));
     return;
   }
 
-  // Fast path: one CAS.
-  if (const std::int64_t left = TryTake(*lease, request.cost); left >= 0) {
-    // Refill before the lease runs dry, so under steady load nobody waits for Redis.
-    const std::uint32_t chunk = lease->chunk.load(std::memory_order_relaxed);
-    if (tuning_.early_refill && left < std::int64_t{chunk} * 3 / 10 &&
-        now_() >= lease->deny_until_ns.load(std::memory_order_relaxed)) {
-      StartRefill(*lease, chunk);
-    }
-    done(Allowed(rule, left));
-    return;
-  }
-
-  // Redis said no recently: answer locally until then instead of asking again.
-  if (const std::int64_t wait = lease->deny_until_ns.load(std::memory_order_relaxed) - now_(); wait > 0) {
-    done(Denied(rule, wait));
+  if (const auto local = Local(*lease, request.cost)) {
+    done(*local);
     return;
   }
   Park(*lease, request.cost, std::move(done));
+}
+
+std::optional<CheckResult> LeasedCore::TakeLocal(const Rule& rule, std::string_view key, std::uint32_t cost) {
+  if (cost > ChunkCap(rule)) return std::nullopt;
+  Lease* lease = leases_.FindOrCreate(rule, key);
+  if (lease == nullptr) return std::nullopt;
+  return Local(*lease, cost);
+}
+
+std::optional<CheckResult> LeasedCore::DeniedLocal(const Rule& rule, std::string_view key, std::uint32_t cost) {
+  if (cost > ChunkCap(rule)) return std::nullopt;
+  const Lease* lease = leases_.FindOrCreate(rule, key);
+  if (lease == nullptr || lease->tokens.load(std::memory_order_relaxed) >= std::int64_t{cost}) return std::nullopt;
+  return RecentDenial(*lease);
+}
+
+// Redis said no recently: answer locally until then instead of asking again.
+std::optional<CheckResult> LeasedCore::RecentDenial(const Lease& l) const {
+  if (const std::int64_t wait = l.deny_until_ns.load(std::memory_order_relaxed) - now_(); wait > 0) {
+    return Denied(l.rule, wait);
+  }
+  return std::nullopt;
+}
+
+std::optional<CheckResult> LeasedCore::Local(Lease& l, std::uint32_t cost) {
+  // Fast path: one CAS.
+  if (const std::int64_t left = TryTake(l, cost); left >= 0) {
+    RefillEarly(l, left);
+    return Allowed(l.rule, left);
+  }
+  return RecentDenial(l);
+}
+
+void LeasedCore::Exact(const Rule& rule, const CheckRequest& request, CheckCallback done) {
+  if (rule.limit_from == PlanLimit::kNone) {
+    strict_.Check(rule, Plan{}, request.key, request.cost, request.request_id, std::move(done));
+  } else {
+    strict_.Check(request, std::move(done));
+  }
+}
+
+// Refill before the lease runs dry, so under steady load nobody waits for Redis.
+void LeasedCore::RefillEarly(Lease& l, std::int64_t left) {
+  const std::uint32_t chunk = l.chunk.load(std::memory_order_relaxed);
+  if (tuning_.early_refill && left < std::int64_t{chunk} * 3 / 10 && now_() >= l.deny_until_ns.load(std::memory_order_relaxed)) {
+    StartRefill(l, chunk);
+  }
 }
 
 void LeasedCore::Park(Lease& l, std::uint32_t cost, CheckCallback done) {

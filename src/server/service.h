@@ -7,7 +7,6 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
-#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -72,15 +71,14 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       reactor->Finish(grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, bad));
       return reactor;
     }
-    std::string_view merchant;
+    const Merchant* merchant = nullptr;
     if (merchants_ != nullptr) {
-      const auto m = Merchant(ctx);
-      if (!m) {
+      merchant = CallerMerchant(ctx);
+      if (merchant == nullptr) {
         Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
         reactor->Finish(Unauthenticated());
         return reactor;
       }
-      merchant = *m;
     }
     if (!Admit(1)) {
       Count(metrics_ ? &metrics_->rejected_overload : nullptr);
@@ -89,7 +87,10 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     }
     const Started started = Start(req->rule());
     CheckRequest check = ToDomain(*req);
-    if (merchants_ != nullptr) check.key = TenantKey(merchant, check.key);
+    if (merchant != nullptr) {
+      check.key = TenantKey(merchant->id, check.key);
+      check.merchant = &merchant->limits;
+    }
     core_.load(std::memory_order_acquire)->Check(check, [this, reactor, resp, started](const CheckResult& r) {
       in_flight_.fetch_sub(1, std::memory_order_relaxed);
       Record(started, r);
@@ -122,15 +123,14 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
         return reactor;
       }
     }
-    std::string_view merchant;  // one merchant for the whole batch
+    const Merchant* merchant = nullptr;  // one merchant for the whole batch
     if (merchants_ != nullptr) {
-      const auto m = Merchant(ctx);
-      if (!m) {
+      merchant = CallerMerchant(ctx);
+      if (merchant == nullptr) {
         Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
         reactor->Finish(Unauthenticated());
         return reactor;
       }
-      merchant = *m;
     }
     if (n > max_in_flight_) {  // could never be admitted: not a transient overload to retry
       Count(metrics_ ? &metrics_->rejected_invalid : nullptr);
@@ -151,7 +151,10 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
       v1::CheckResponse* slot = resp->mutable_responses(i);  // distinct slot per sub-check
       const Started started = Start(req->requests(i).rule());
       CheckRequest check = ToDomain(req->requests(i));
-      if (merchants_ != nullptr) check.key = TenantKey(merchant, check.key);
+      if (merchant != nullptr) {
+        check.key = TenantKey(merchant->id, check.key);
+        check.merchant = &merchant->limits;
+      }
       core->Check(check, [this, state, slot, started](const CheckResult& r) {
         Record(started, r);
         if (r.reason == Reason::kUnknownRule) {
@@ -191,11 +194,11 @@ class RateLimiterService final : public v1::RateLimiter::CallbackService {
     if (c != nullptr) c->Add();
   }
 
-  // The merchant whose API key the call carries, or nullopt (tenancy on).
-  std::optional<std::string_view> Merchant(grpc::CallbackServerContext* ctx) {
+  // The merchant whose API key the call carries, or nullptr (tenancy on).
+  const Merchant* CallerMerchant(grpc::CallbackServerContext* ctx) {
     const auto& metadata = ctx->client_metadata();
     const auto it = metadata.find(grpc::string_ref(kApiKeyHeader.data(), kApiKeyHeader.size()));
-    if (it == metadata.end()) return std::nullopt;
+    if (it == metadata.end()) return nullptr;
     return merchants_->Resolve(std::string_view(it->second.data(), it->second.size()));
   }
 

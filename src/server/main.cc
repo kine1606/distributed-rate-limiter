@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -89,6 +90,7 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
+//        RL_TLS_CERT and RL_TLS_KEY (PEM files: TLS for every call; unset: plain text),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below), RL_ABLATE (ablation only)
 //   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
@@ -138,6 +140,34 @@ int main(int argc, char** argv) {
   // client on one connection with 192 calls in flight on the exact path, 28,251 to 22,957 checks/s.
   const auto max_streams = EnvNumber("RL_MAX_STREAMS", 100, 0, 1'000'000);
   if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight || !max_streams) return 1;
+  // TLS: needed once gateways call over a network the platform does not own, since with tenancy every
+  // call carries a merchant's API key. Plain text otherwise (local runs, a limiter beside its gateway).
+  std::shared_ptr<grpc::ServerCredentials> credentials = grpc::InsecureServerCredentials();
+  const char* tls_cert = std::getenv("RL_TLS_CERT");
+  const char* tls_key = std::getenv("RL_TLS_KEY");
+  if ((tls_cert == nullptr) != (tls_key == nullptr)) {
+    spdlog::critical("RL_TLS_CERT and RL_TLS_KEY go together");
+    return 1;
+  }
+  if (tls_cert != nullptr) {
+    const auto read = [](const char* path) -> std::optional<std::string> {
+      std::ifstream f(path);
+      std::stringstream ss;
+      ss << f.rdbuf();
+      if (!f) return std::nullopt;
+      return ss.str();
+    };
+    const auto cert = read(tls_cert), key = read(tls_key);
+    if (!cert || !key) {
+      spdlog::critical("cannot read the TLS certificate {} or key {}", tls_cert, tls_key);
+      return 1;
+    }
+    grpc::SslServerCredentialsOptions tls;
+    tls.pem_key_cert_pairs.push_back({*key, *cert});
+    credentials = grpc::SslServerCredentials(tls);
+  } else if (const char* tenancy = std::getenv("RL_TENANCY"); tenancy != nullptr && *tenancy != '\0') {
+    spdlog::warn("no TLS (RL_TLS_CERT): merchants' API keys travel in plain text");
+  }
   // RL_ABLATE=<a,b>: mechanisms switched off for the Week 7 ablation study (bench/ablation.sh), never in
   // production: early_refill, adaptive_chunk, deny_cache.
   LeaseTuning tuning;
@@ -379,7 +409,7 @@ int main(int argc, char** argv) {
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
   grpc::ServerBuilder builder;
-  builder.AddListeningPort(listen, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(listen, credentials);
   if (*max_streams > 0) builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, static_cast<int>(*max_streams));
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
@@ -388,7 +418,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   server->GetHealthCheckService()->SetServingStatus(true);
-  spdlog::info("rate limiter listening on {}", listen);
+  spdlog::info("rate limiter listening on {}{}", listen, tls_cert != nullptr ? " (TLS)" : "");
 
   // Readiness follows the breakers: NOT_SERVING while every slot group's breaker is open, that is
   // while this instance reaches no Redis master, so a load balancer prefers instances that do. One
@@ -447,6 +477,7 @@ int main(int argc, char** argv) {
                  r.tokens, r.leases, r.failed, r.refills_unfinished);
   }
   if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
+  listener.reset();  // its messages reload merchant keys through Redis, which stops below
   resilient.StopRetries();  // no retry may reach Redis after this
   batcher.reset();  // sends what it holds and waits for the replies, while Redis is still there
   redis.reset();    // stop Redis I/O while the core lives: an early refill may still be in flight

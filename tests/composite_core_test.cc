@@ -4,9 +4,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <deque>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -450,6 +452,156 @@ TEST_F(LeasedQuotaTest, AnUpgradeLeasesUnderTheNewLimit) {
   ASSERT_EQ(q.size(), 2u);
   EXPECT_EQ(q[1].limit, 2'000'000u);
   EXPECT_EQ(q[1].amount, 2000u);
+}
+
+// ---- a merchant's limits (Phase 2, P3): its check rate, its capacity and the reserve ----
+
+class MerchantLimitsTest : public CompositeCoreTest {
+ protected:
+  void SetUp() override {
+    CompositeCoreTest::SetUp();
+    for (const char* rule : {"merchant_checks", "merchant_capacity", "merchant_reserve"}) {
+      redis.replies[rule] = {.allowed = true, .remaining = 10};
+    }
+  }
+  CheckResult RunAs(RateLimiterCore& c, std::string_view rule = "customer", std::uint32_t cost = 1) {
+    CheckResult out;
+    bool called = false;
+    c.Check({"acme|cust:42", rule, cost, {}, &limits}, [&](const CheckResult& r) {
+      out = r;
+      called = true;
+    });
+    EXPECT_TRUE(called);
+    return out;
+  }
+  std::vector<std::string> Called() const {
+    std::vector<std::string> out;
+    for (const auto& c : redis.calls) out.push_back(c.rule);
+    return out;
+  }
+  long Count(const std::string& rule) const {
+    const auto called = Called();
+    return std::count(called.begin(), called.end(), rule);
+  }
+  void Paid() { redis.plan.fields["fee"] = "1900"; }
+
+  Rule checks{.name = "merchant_checks", .limit = 100, .refill_per_sec = 100, .failure_policy = FailurePolicy::kFailOpen};
+  Rule capacity{.name = "merchant_capacity", .limit = 80, .refill_per_sec = 80, .failure_policy = FailurePolicy::kFailOpen};
+  Rule reserve{.name = "merchant_reserve", .limit = 20, .refill_per_sec = 20, .failure_policy = FailurePolicy::kFailOpen};
+  MerchantLimits limits{"acme", &checks, &capacity, &reserve};
+  LeasedCore leased{redis, plans, Rules(), 1024, &FakeNow};
+  CompositeCore leased_core{inner, strict, plans, deny, Rules(), &FakeNow, {}, &leased};
+};
+
+TEST_F(MerchantLimitsTest, OverTheCheckRateAnyRuleIsRefusedFirst) {
+  redis.replies["merchant_checks"] = {.allowed = false, .retry_after_ms = 250};
+  for (const char* rule : {"api_default", "customer"}) {
+    const auto r = RunAs(core, rule);
+    EXPECT_EQ(r.reason, Reason::kRateLimited) << rule;
+    EXPECT_EQ(r.retry_after_ms, 250u);
+  }
+  EXPECT_TRUE(inner->rules.empty());
+  EXPECT_EQ(redis.plan_reads, 0);
+  EXPECT_EQ(Called(), (std::vector<std::string>{"merchant_checks", "merchant_checks"}));
+  EXPECT_EQ(redis.calls[0].key, "acme");  // one bucket for all of the merchant's calls
+}
+
+TEST_F(MerchantLimitsTest, WithinItsLimitsACallTakesCapacityBetweenBurstAndQuota) {
+  const auto r = RunAs(core, "customer", 3);
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kAllowed);
+  EXPECT_EQ(Called(), (std::vector<std::string>{"merchant_checks", "burst", "merchant_capacity", "daily_quota"}));
+  EXPECT_EQ(redis.calls[0].amount, 1u);  // a check is one check, whatever its cost
+  EXPECT_EQ(redis.calls[2].amount, 3u);  // capacity is taken by cost
+}
+
+TEST_F(MerchantLimitsTest, OverCapacityAFreePlanIsRefusedAndUsesNoQuota) {
+  redis.replies["merchant_capacity"] = {.allowed = false, .retry_after_ms = 40};
+  const auto r = RunAs(core, "customer", 2);
+  EXPECT_FALSE(r.allowed);
+  EXPECT_EQ(r.reason, Reason::kRateLimited);
+  EXPECT_EQ(r.retry_after_ms, 40u);
+  EXPECT_EQ(Called(), (std::vector<std::string>{"merchant_checks", "burst", "merchant_capacity"}));  // never the reserve
+  ASSERT_EQ(redis.returns.size(), 1u);
+  EXPECT_EQ((std::tuple{redis.returns[0].rule, redis.returns[0].amount}), (std::tuple{std::string("burst"), 2u}));
+}
+
+TEST_F(MerchantLimitsTest, APlanWithAFeeTakesTheReserveWhenTheRestIsOut) {
+  Paid();
+  redis.replies["merchant_capacity"] = {.allowed = false, .retry_after_ms = 40};
+  const auto r = RunAs(core);
+  EXPECT_TRUE(r.allowed);
+  EXPECT_EQ(Called(), (std::vector<std::string>{"merchant_checks", "burst", "merchant_capacity", "merchant_reserve",
+                                                "daily_quota"}));
+  redis.replies["merchant_reserve"] = {.allowed = false, .retry_after_ms = 70};
+  const auto out = RunAs(core);
+  EXPECT_EQ(out.reason, Reason::kRateLimited);
+  EXPECT_EQ(out.retry_after_ms, 70u);  // when the reserve has room again
+}
+
+TEST_F(MerchantLimitsTest, AnUnreachableCapacityDoesNotRefuse) {
+  redis.replies["merchant_capacity"] = {.redis_error = true};
+  EXPECT_TRUE(RunAs(core).allowed);
+  redis.replies["merchant_checks"] = {.redis_error = true};
+  EXPECT_TRUE(RunAs(core).allowed);
+}
+
+TEST_F(MerchantLimitsTest, AWhollyReservedCapacityServesOnlyPlansWithAFee) {
+  limits.capacity = nullptr;
+  EXPECT_EQ(RunAs(core).reason, Reason::kRateLimited);
+  EXPECT_EQ(Count("merchant_reserve"), 0);
+  Paid();
+  EXPECT_TRUE(RunAs(core).allowed);
+}
+
+TEST_F(MerchantLimitsTest, OnTheLeasedEngineTheCheckRateIsALocalHit) {
+  for (int i = 0; i < 5; ++i) EXPECT_TRUE(RunAs(leased_core, "api_default").allowed);
+  // One refill of a chunk (10% of 100), then hits: no Redis call per check.
+  EXPECT_EQ(Count("merchant_checks"), 1);
+  EXPECT_EQ(redis.calls[0].amount, 10u);
+  EXPECT_EQ(inner->rules.size(), 5u);
+}
+
+TEST_F(MerchantLimitsTest, OnTheLeasedEngineAFloodOverCapacityCostsRedisNothing) {
+  redis.replies["merchant_capacity"] = {.allowed = false, .retry_after_ms = 300};
+  EXPECT_EQ(RunAs(leased_core).reason, Reason::kRateLimited);  // Redis says the capacity is out
+  for (int i = 0; i < 5; ++i) {
+    const auto r = RunAs(leased_core);
+    EXPECT_EQ(r.reason, Reason::kRateLimited);
+    EXPECT_GT(r.retry_after_ms, 0u);
+  }
+  EXPECT_EQ(Count("burst"), 1);  // no burst script, no token returned, no refill until the retry time
+  EXPECT_EQ(redis.returns.size(), 1u);
+  EXPECT_EQ(Count("merchant_capacity"), 1);
+  Paid();  // a plan with a fee still reaches the reserve
+  plans.Invalidate("acme|cust:42");
+  EXPECT_TRUE(RunAs(leased_core).allowed);
+  EXPECT_EQ(Count("merchant_reserve"), 1);
+  g_now += 301 * kMs;  // the retry time passed: Redis is asked again
+  redis.replies["merchant_capacity"] = {.allowed = true, .remaining = 10};
+  EXPECT_TRUE(RunAs(leased_core).allowed);
+  EXPECT_EQ(Count("merchant_capacity"), 2);
+}
+
+TEST_F(MerchantLimitsTest, OnTheLeasedEngineAWhollyReservedCapacityRefusesFreeCallsBeforeTheBurst) {
+  const Rule* reserved = limits.reserve;
+  limits.capacity = limits.reserve = nullptr;  // no capacity set: nothing refused
+  EXPECT_TRUE(RunAs(leased_core).allowed);
+  limits.reserve = reserved;
+  EXPECT_EQ(RunAs(leased_core).reason, Reason::kRateLimited);
+  EXPECT_EQ(Count("burst"), 1);  // only the first call's
+  Paid();
+  plans.Invalidate("acme|cust:42");
+  EXPECT_TRUE(RunAs(leased_core).allowed);
+  EXPECT_EQ(Count("merchant_reserve"), 1);
+}
+
+TEST_F(MerchantLimitsTest, OnTheLeasedEngineRedisSayingNoIsAnsweredLocally) {
+  redis.replies["merchant_checks"] = {.allowed = false, .retry_after_ms = 300};
+  EXPECT_EQ(RunAs(leased_core, "api_default").reason, Reason::kRateLimited);
+  EXPECT_EQ(RunAs(leased_core, "api_default").reason, Reason::kRateLimited);
+  EXPECT_EQ(Count("merchant_checks"), 1);  // until the retry time
+  EXPECT_TRUE(inner->rules.empty());
 }
 
 }  // namespace

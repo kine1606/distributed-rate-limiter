@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -39,6 +40,7 @@
 #include "lease/deny_cache.h"
 #include "plan/plan_store.h"
 #include "redis/keys.h"
+#include "server/merchants.h"
 
 namespace ratelimiter {
 namespace {
@@ -129,6 +131,27 @@ class ScriptRedis final : public RedisBackend {
     done(h);
   }
 
+  // The billing totals of `rule|key` for a calendar month, as the billing job reads them: the
+  // counter's own month, or the month it filed when a new one began. Key lifetimes are not modelled
+  // (lua_scripts_test.cc checks them against Redis).
+  std::optional<std::pair<std::int64_t, std::int64_t>> Billed(const std::string& counter, std::int64_t month) const {
+    const auto it = billing_.find(counter);
+    if (it == billing_.end()) return std::nullopt;
+    if (it->second.bm == month) return std::pair{it->second.bu, it->second.bo};
+    if (const auto c = it->second.closed.find(month); c != it->second.closed.end()) return c->second;
+    return std::nullopt;
+  }
+  std::int64_t BillingMonth(const std::string& counter) const {
+    return billing_.count(counter) ? billing_.at(counter).bm : -1;
+  }
+  std::vector<std::int64_t> FiledMonths(const std::string& counter) const {
+    std::vector<std::int64_t> out;
+    if (billing_.count(counter)) {
+      for (const auto& [month, totals] : billing_.at(counter).closed) out.push_back(month);
+    }
+    return out;
+  }
+
   // Units the quota counter `rule|key` granted per UTC day: {day: (used, overage_used)}.
   std::map<std::int64_t, std::pair<std::int64_t, std::int64_t>> Granted(const std::string& counter) const {
     auto out = history_.count(counter) ? history_.at(counter) : decltype(history_)::mapped_type{};
@@ -146,6 +169,10 @@ class ScriptRedis final : public RedisBackend {
   struct CounterState {
     bool monthly;
     std::int64_t period, used, over, alerts;
+  };
+  struct BillingState {  // the same hash's fields bm, bu, bo and closed:m<month>
+    std::int64_t bm = -1, bu = 0, bo = 0;
+    std::map<std::int64_t, std::pair<std::int64_t, std::int64_t>> closed;
   };
   struct StoredAnswer {
     bool allowed;
@@ -206,13 +233,21 @@ class ScriptRedis final : public RedisBackend {
       if (!c.monthly) history_[counter][c.period] = {c.used, c.over};
       c = {p.monthly, p.id, 0, 0, 0};
     }
+    BillingState& b = billing_[counter];
+    if (const std::int64_t month = PeriodOf(true, now).id; b.bm != month) {
+      if (b.bm >= 0 && b.bo > 0) b.closed[b.bm] = {b.bu, b.bo};
+      b.bm = month;
+      b.bu = b.bo = 0;
+    }
     bool allowed = false, overage = false;
     if (c.used + cost <= limit) {
       c.used += cost;
+      b.bu += cost;
       allowed = true;
     } else if (rule.overage == Overage::kGrace) {
       if (c.used + cost <= limit + extra) {
         c.used += cost;
+        b.bu += cost;
         allowed = true;
       }
     } else if (rule.overage == Overage::kCap) {
@@ -220,6 +255,8 @@ class ScriptRedis final : public RedisBackend {
       if (c.over + cost - in_plan <= extra) {
         c.used += in_plan;
         c.over += cost - in_plan;
+        b.bu += in_plan;
+        b.bo += cost - in_plan;
         allowed = overage = true;
       }
     }
@@ -243,6 +280,7 @@ class ScriptRedis final : public RedisBackend {
 
   std::unordered_map<std::string, BucketState> buckets_;
   std::unordered_map<std::string, CounterState> counters_;
+  std::unordered_map<std::string, BillingState> billing_;
   std::map<std::string, std::map<std::int64_t, std::pair<std::int64_t, std::int64_t>>> history_;
   std::unordered_map<std::string, StoredAnswer> answers_;
 };
@@ -286,6 +324,9 @@ class Model {
   std::map<std::string, ModelPlan> plans;  // what Redis holds; absent = Free
   std::vector<Usage> usage;
   std::vector<Alert> alerts;  // what the quota script published
+  // What each UTC calendar month admitted, per customer, for its invoice (3.9, P3): units within
+  // the plan or free grace, and billed overage units. A replayed answer adds nothing.
+  std::map<std::string, std::map<std::int64_t, std::pair<std::int64_t, std::int64_t>>> billed;
 
   // A plan-change message arrived (only with the plan cache, as PlanListener does it).
   void Announce(const std::string& c) { denial_.erase(c); }
@@ -398,17 +439,22 @@ class Model {
       Counter& d = counters_[c];
       if (d.monthly != period.monthly || d.period != period.id) d = {period.monthly, period.id, 0, 0, 0};
       const std::int64_t room = limit - d.used;
+      auto& [in_plan, billed_over] = billed[c][PeriodOf(true, now).id];
       if (cost <= room) {  // within the plan, whatever the policy
         d.used += cost;
+        in_plan += cost;
         a.allowed = true;
       } else if (plan.overage == Overage::kGrace && cost <= room + plan.extra) {  // free extra units
         d.used += cost;
+        in_plan += cost;
         a.allowed = true;
       } else if (plan.overage == Overage::kCap) {  // billed beyond the plan, up to the cap
         const std::int64_t inside = std::clamp<std::int64_t>(room, 0, cost);
         if (d.over + (cost - inside) <= plan.extra) {
           d.used += inside;
           d.over += cost - inside;
+          in_plan += inside;
+          billed_over += cost - inside;
           a.allowed = a.overage = true;
         }
       }
@@ -543,6 +589,7 @@ struct Coverage {
   std::map<std::string, std::uint64_t> alerts;
   std::uint64_t checks = 0, replayed = 0, plan_changes = 0, outages = 0, rollovers = 0;
   std::uint64_t month_rollovers = 0, monthly_checks = 0, boosted_checks = 0, topped_up_checks = 0;
+  std::uint64_t billed_months = 0, filed_months = 0;  // months with billed overage; months filed by a rollover
 };
 Coverage g_coverage;
 struct LeasedCoverage {
@@ -703,6 +750,29 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
     if (recent.size() > 12) recent.pop_front();
   }
   for (const Alert& a : model.alerts) ++g_coverage.alerts[a.event];
+  // Billing (P3): every month with billed overage is readable as the model counted it, the counter's
+  // own month too; a finished month without billed overage is not filed.
+  for (const std::string& c : customers) {
+    const std::string counter = "daily_quota|" + c;
+    const auto months = model.billed.count(c) ? model.billed.at(c) : decltype(model.billed)::mapped_type{};
+    for (const auto& [month, totals] : months) {
+      const auto got = redis.Billed(counter, month);
+      const bool readable = month == redis.BillingMonth(counter) || totals.second > 0;
+      const auto show = [](std::pair<std::int64_t, std::int64_t> t) {
+        return "(" + std::to_string(t.first) + " in the plan, " + std::to_string(t.second) + " billed)";
+      };
+      if (readable && got != totals) {
+        return c + " month " + std::to_string(month) + ": billing reads " + (got ? show(*got) : "nothing") +
+               ", model " + show(totals);
+      }
+      if (!readable && got) return c + " month " + std::to_string(month) + " was filed without billed overage";
+      g_coverage.billed_months += totals.second > 0;
+      g_coverage.filed_months += readable && month != redis.BillingMonth(counter);
+    }
+    for (const std::int64_t month : redis.FiledMonths(counter)) {
+      if (!months.count(month)) return c + " month " + std::to_string(month) + " was filed but admitted nothing";
+    }
+  }
   return "";
 }
 
@@ -799,6 +869,114 @@ std::string RunLeasedQuota(std::uint64_t seed) {
   return "";
 }
 
+// Merchant capacity (P3 gate): N instances serve one merchant on the shared fake Redis. Its capacity
+// is `rate` calls a second (bucket `burst`), with `reserve`% only for plans with a fee, built from its
+// terms by MerchantKeys as main.cc does. Free customers flood it at three times the capacity; paying
+// customers ask for 70% of the reserve. Every window of the run admits at most
+//   burst + rate x window + N x (C_shared + C_reserve)
+// (C each bucket's chunk cap: what leases can hold beyond the buckets), Free calls alone at most the
+// shared part's share of that, and paying customers keep almost all they asked for.
+struct CapacityCoverage {
+  std::uint64_t seeds = 0, admitted = 0, free_denied = 0, paid_asked = 0, paid_admitted = 0;
+  double worst = 0;  // the largest share of its bound a window reached
+} g_capacity;
+
+std::string RunMerchantCapacity(std::uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  const auto pick = [&rng](std::uint32_t lo, std::uint32_t hi) { return std::uniform_int_distribution<std::uint32_t>(lo, hi)(rng); };
+  g_now_ns = (20'000 * kDayMs + 3'600'000) * 1'000'000;
+  ScriptRedis redis;
+  const std::uint32_t rate = std::array{100u, 200u, 500u}[pick(0, 2)], burst = rate * pick(1, 2), reserve = 10 * pick(1, 3);
+  const int n = static_cast<int>(pick(2, 4));
+  redis.hashes[std::string(kMerchantKeysHash)] = {{Sha256Hex("rl_acme"), "acme"}};
+  redis.hashes[std::string(kMerchantCapacityHash)] = {
+      {"acme", "rate " + std::to_string(rate) + " burst " + std::to_string(burst) + " reserve " + std::to_string(reserve)}};
+  MerchantKeys merchants(redis);
+  if (!merchants.ReloadAndWait(std::chrono::seconds(1))) return "merchants not loaded";
+  const MerchantLimits& limits = merchants.Resolve("rl_acme")->limits;
+  const Rule& shared = *limits.capacity;
+  const Rule& reserved = *limits.reserve;
+
+  const std::vector<std::string> free{"acme|f1", "acme|f2", "acme|f3", "acme|f4", "acme|f5"}, paid{"acme|p1", "acme|p2"};
+  for (const auto& c : free) redis.hashes[PlanKey(c)] = {{"plan", "free"}, {"daily", "90000"}, {"burst", "100000"}, {"refill", "100000"}};
+  for (const auto& c : paid) redis.hashes[PlanKey(c)] = {{"plan", "pay"}, {"daily", "90000"}, {"burst", "100000"}, {"refill", "100000"}, {"fee", "1900"}};
+
+  struct Instance {
+    PlanStore plans;
+    DenyCache deny;
+    StrictCore strict;
+    std::shared_ptr<LeasedCore> leased;
+    CompositeCore core;
+    Instance(ScriptRedis& r, const RuleTable& rules)
+        : plans(r, std::chrono::milliseconds(5000), &FakeNow),
+          strict(r, plans, rules),
+          leased(std::make_shared<LeasedCore>(r, plans, rules, 1024, &FakeNow)),
+          core(leased, strict, plans, deny, rules, &FakeNow, {}, leased.get()) {}
+  };
+  std::vector<std::unique_ptr<Instance>> instances;
+  for (int i = 0; i < n; ++i) instances.push_back(std::make_unique<Instance>(redis, CustomerRules()));
+
+  // One tick a millisecond for 4 s: Free calls at 3 x rate, paid at 0.7 x the reserve's rate.
+  constexpr int kTicks = 4000;
+  std::vector<std::int64_t> all(kTicks, 0), free_ok(kTicks, 0);
+  std::int64_t paid_asked = 0, paid_admitted = 0;
+  std::uniform_real_distribution<double> unit(0, 1);
+  const double free_per_ms = 3.0 * rate / 1000, paid_per_ms = 0.7 * reserved.refill_per_sec / 1000;
+  for (int t = 0; t < kTicks; ++t) {
+    const int f = static_cast<int>(free_per_ms) + (unit(rng) < free_per_ms - static_cast<int>(free_per_ms));
+    const int p = static_cast<int>(paid_per_ms) + (unit(rng) < paid_per_ms - static_cast<int>(paid_per_ms));
+    for (int k = 0; k < f + p; ++k) {
+      const bool is_paid = k >= f;
+      const std::string& c = is_paid ? paid[pick(0, paid.size() - 1)] : free[pick(0, free.size() - 1)];
+      CheckResult got;
+      instances[pick(0, n - 1)]->core.Check(CheckRequest{c, "customer", 1, {}, &limits}, [&got](const CheckResult& r) { got = r; });
+      if (got.reason != Reason::kAllowed && got.reason != Reason::kRateLimited) {
+        return c + " at " + std::to_string(t) + " ms: unexpected answer " + Show(got);
+      }
+      all[t] += got.allowed;
+      if (!is_paid) free_ok[t] += got.allowed;
+      if (!is_paid) g_capacity.free_denied += !got.allowed;
+      paid_asked += is_paid;
+      paid_admitted += is_paid && got.allowed;
+    }
+    Advance(1);
+  }
+
+  const std::string terms = "rate " + std::to_string(rate) + " burst " + std::to_string(burst) + " reserve " +
+                            std::to_string(reserve) + "%, " + std::to_string(n) + " instances";
+  const std::int64_t c_shared = ChunkCap(shared), c_reserved = ChunkCap(reserved);
+  for (const int w : {1, 10, 100, 1000, kTicks}) {
+    std::int64_t in_all = 0, in_free = 0;
+    for (int t = 0; t < kTicks; ++t) {
+      in_all += all[t];
+      in_free += free_ok[t];
+      if (t >= w) {
+        in_all -= all[t - w];
+        in_free -= free_ok[t - w];
+      }
+      const double bound = burst + rate * w / 1000.0 + n * (c_shared + c_reserved);
+      const double free_bound = shared.limit + shared.refill_per_sec * w / 1000.0 + n * c_shared;
+      g_capacity.worst = std::max(g_capacity.worst, in_all / bound);
+      if (in_all > bound) {
+        return terms + ": " + std::to_string(in_all) + " admitted in " + std::to_string(w) + " ms ending at " +
+               std::to_string(t) + ", bound " + std::to_string(bound);
+      }
+      if (in_free > free_bound) {
+        return terms + ": Free took " + std::to_string(in_free) + " in " + std::to_string(w) + " ms, its share is " +
+               std::to_string(free_bound) + ": the reserve leaked";
+      }
+    }
+  }
+  if (paid_admitted < paid_asked * 98 / 100) {  // asking 70% of the reserve, they lose at most 2%
+    return terms + ": paying customers got " + std::to_string(paid_admitted) + " of " + std::to_string(paid_asked);
+  }
+  g_capacity.seeds += 1;
+  g_capacity.paid_asked += paid_asked;
+  g_capacity.paid_admitted += paid_admitted;
+  for (const std::int64_t a : all) g_capacity.admitted += a;
+  return "";
+}
+
 std::uint64_t EnvSeeds(const char* name, std::uint64_t fallback) {
   const char* v = std::getenv(name);
   return v ? std::strtoull(v, nullptr, 10) : fallback;
@@ -829,7 +1007,9 @@ void RunSeeds(const char* label, const std::function<std::string(std::uint64_t)>
                 static_cast<unsigned long long>(g_coverage.boosted_checks),
                 static_cast<unsigned long long>(g_coverage.topped_up_checks));
     for (const auto& [event, n] : g_coverage.alerts) std::printf(" %s %llu", event.c_str(), static_cast<unsigned long long>(n));
-    std::printf("\n");
+    std::printf("\n[property]   billing: %llu customer months with billed overage, %llu of them filed by a new month\n",
+                static_cast<unsigned long long>(g_coverage.billed_months),
+                static_cast<unsigned long long>(g_coverage.filed_months));
     g_coverage = {};
   }
   if (g_leased.seeds > 0) {
@@ -837,6 +1017,15 @@ void RunSeeds(const char* label, const std::function<std::string(std::uint64_t)>
                 static_cast<unsigned long long>(g_leased.days), static_cast<unsigned long long>(g_leased.days_at_limit),
                 static_cast<unsigned long long>(g_leased.admitted), static_cast<unsigned long long>(g_leased.held));
     g_leased = {};
+  }
+  if (g_capacity.seeds > 0) {
+    std::printf("[property]   %llu calls admitted; the fullest window reached %.0f%% of its bound; Free denied %llu; "
+                "paying customers kept %llu of %llu calls asked\n",
+                static_cast<unsigned long long>(g_capacity.admitted), 100 * g_capacity.worst,
+                static_cast<unsigned long long>(g_capacity.free_denied),
+                static_cast<unsigned long long>(g_capacity.paid_admitted),
+                static_cast<unsigned long long>(g_capacity.paid_asked));
+    g_capacity = {};
   }
 }
 
@@ -855,6 +1044,10 @@ TEST(Property, ExactPlansMatchTheModelOnTheLeasedEngine) {
 
 TEST(Property, LeasedQuotaGrantsWithinThePlanAndAdmitsWhatWasGranted) {
   RunSeeds("leased quota bounds", RunLeasedQuota);
+}
+
+TEST(Property, MerchantCapacityHoldsAndPayingCustomersKeepTheReserve) {
+  RunSeeds("merchant capacity under a Free flood", RunMerchantCapacity);
 }
 
 }  // namespace

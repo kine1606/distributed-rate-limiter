@@ -513,6 +513,71 @@ TEST_F(LuaTest, CapBillsOnlyThePartOfARequestBeyondTheLimit) {
   EXPECT_EQ(HGet(k, "overage_used"), "1");
 }
 
+// ---- billing totals per calendar month (Phase 2, P3) ----
+
+TEST_F(LuaTest, TheMonthCountsUnitsInThePlanAndBilledOverageSeparately) {
+  const std::string cap = "{qb1}:quota", grace = "{qb2}:quota";
+  Del(cap);
+  Del(grace);
+  const long long month = MonthOf(RedisNowMs()).first;
+  for (int i = 0; i < 2; ++i) QuotaV2(cap, 3, 1, "cap", 5);
+  QuotaV2(cap, 3, 2, "cap", 5);                     // straddles the limit: 1 in the plan, 1 billed
+  QuotaV2(cap, 3, 3, "cap", 5);                     // all billed
+  EXPECT_EQ(QuotaV2(cap, 3, 2, "cap", 5).ints[0], 0);  // past the cap: denied, counts nowhere
+  EXPECT_EQ(HGet(cap, "bm"), std::to_string(month));
+  EXPECT_EQ(HGet(cap, "bu"), "3");
+  EXPECT_EQ(HGet(cap, "bo"), "4");
+  for (int i = 0; i < 5; ++i) QuotaV2(grace, 2, 1, "grace", 2);  // 2 in the plan, 2 free, 1 denied
+  EXPECT_EQ(HGet(grace, "bu"), "4");
+  EXPECT_EQ(HGet(grace, "bo"), "0");
+}
+
+TEST_F(LuaTest, ARetriedRequestIsBilledOnce) {
+  const std::string k = "{qb3}:quota", req = "{qb3}:quota:req:r1";
+  Del(k);
+  Del(req);
+  QuotaV2(k, 1, 1, "cap", 5);
+  QuotaV2(k, 1, 2, "cap", 5, req);
+  const auto again = QuotaV2(k, 1, 2, "cap", 5, req);
+  EXPECT_EQ(again.ints[5], 1);  // replayed
+  EXPECT_EQ(HGet(k, "bo"), "2");
+}
+
+TEST_F(LuaTest, ANewMonthFilesTheLastMonthsBilledOverage) {
+  const std::string k = "{qb4}:quota";
+  Del(k);
+  const auto [month, month_left] = MonthOf(RedisNowMs());
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s bm %lld bu 7 bo 3", k.c_str(), month - 1));
+  QuotaV2(k, 10, 1, "cap", 5);
+  EXPECT_EQ(HGet(k, "closed:m" + std::to_string(month - 1)), "7,3");
+  EXPECT_EQ(HGet(k, "bm"), std::to_string(month));
+  EXPECT_EQ(HGet(k, "bu"), "1");
+  EXPECT_EQ(HGet(k, "bo"), "0");
+  const long long retain = 35LL * 86400000;
+  EXPECT_NEAR(std::stod(HGet(k, "keep_until")), static_cast<double>(RedisNowMs() + retain), 2000.0);
+  EXPECT_GT(Pttl(k), retain - 2000);  // kept for the billing job though this month bills nothing yet
+}
+
+TEST_F(LuaTest, AMonthWithoutBilledOverageIsNotFiledNorKept) {
+  const std::string k = "{qb5}:quota";
+  Del(k);
+  const long long month = MonthOf(RedisNowMs()).first;
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s bm %lld bu 7 bo 0", k.c_str(), month - 1));
+  QuotaV2(k, 10, 1, "cap", 5);
+  EXPECT_EQ(HGet(k, "closed:m" + std::to_string(month - 1)), "");
+  EXPECT_LE(Pttl(k), 86400000 + 3600000);  // a key with nothing to bill goes after its day, as before
+}
+
+TEST_F(LuaTest, BilledOverageKeepsTheCounterPastItsMonth) {
+  const std::string k = "{qb6}:quota";
+  Del(k);
+  const long long month_left = MonthOf(RedisNowMs()).second;
+  QuotaV2(k, 1, 1, "cap", 5);
+  EXPECT_LE(Pttl(k), 86400000 + 3600000);
+  QuotaV2(k, 1, 1, "cap", 5);  // billed overage
+  EXPECT_GT(Pttl(k), month_left + 35LL * 86400000 - 2000);
+}
+
 TEST_F(LuaTest, NewUtcDayResetsOverageToo) {
   const std::string k = "{q11}:quota";
   Del(k);

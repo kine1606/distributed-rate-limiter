@@ -28,10 +28,12 @@ TEST(Convert, EmptyKeyOrRuleIsInvalid) {
   EXPECT_NE(Invalid(Req("cust:42", "")), nullptr);
 }
 
-TEST(Convert, KeyAndRequestIdAreCappedAt128Bytes) {
+TEST(Convert, KeyRuleAndRequestIdAreCappedAt128Bytes) {
   EXPECT_EQ(Invalid(Req(std::string(128, 'k'), "r", std::string(128, 'i'))), nullptr);
   EXPECT_NE(Invalid(Req(std::string(129, 'k'), "r")), nullptr);
   EXPECT_NE(Invalid(Req("k", "r", std::string(129, 'i'))), nullptr);
+  EXPECT_EQ(Invalid(Req("k", std::string(128, 'r'))), nullptr);
+  EXPECT_NE(Invalid(Req("k", std::string(129, 'r'))), nullptr);  // a rule name is looked up and hashed on every check
 }
 
 TEST(Convert, ZeroCostMeansOne) {

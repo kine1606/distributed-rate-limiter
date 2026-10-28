@@ -37,8 +37,8 @@ message CheckRequest {
   // never by a gateway. Required, at most 128 bytes.
   string key = 1;
 
-  // Rule name from config/rules.yaml, e.g. "api_default". Required; an unknown name is
-  // INVALID_ARGUMENT.
+  // Rule name from config/rules.yaml, e.g. "api_default". Required, at most 128 bytes; an unknown
+  // name is INVALID_ARGUMENT.
   // (2) One Check per API call, not a quota entry plus a burst entry in a CheckBatch. From Week 4 a
   // plan rule names the customer's quota and burst together: the limiter checks burst first, then
   // quota, and gives the burst token back when quota denies. Server side, that order and that refund
