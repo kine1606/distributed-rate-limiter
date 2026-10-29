@@ -112,5 +112,12 @@ TEST(Plan, APlanWithAFeeIsPaid) {  // Phase 2, P3: it may use the merchant's res
   EXPECT_FALSE(ParsePlan({{"fee", "-5"}}).paid);  // malformed: Free
 }
 
+TEST(Plan, AnAnchorIsADayFrom1To28AndPartOfTheStamp) {  // Phase 2, P5: billing from the subscription date
+  EXPECT_EQ(ParsePlan({}).anchor, 1);  // the calendar month
+  EXPECT_EQ(ParsePlan({{"anchor", "17"}}).anchor, 17);
+  for (const char* bad : {"0", "29", "31", "x", "-3", ""}) EXPECT_EQ(ParsePlan({{"anchor", bad}}).anchor, 1) << bad;
+  EXPECT_NE(QuotaStamp(ParsePlan({{"anchor", "17"}})), QuotaStamp(ParsePlan({})));  // a denial under other terms
+}
+
 }  // namespace
 }  // namespace ratelimiter

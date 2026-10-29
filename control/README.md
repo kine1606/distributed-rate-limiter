@@ -131,17 +131,35 @@ settings reach every limiter at once (`!merchants` on `plan-changes`).
   twice; a customer with nothing to bill gets no invoice.
 - **When:** after the month ends by Redis's clock, from cron or the operator's endpoint:
   `python -m rlcontrol.billing close [--month YYYY-MM]` (from `control/`; `export` and `reconcile` too).
+  Run it daily: a customer billed from its subscription date is closed once its own month has ended.
+- **From the subscription date (P5):** `PUT /v1/billing {"periods": "subscription"}` makes the months of
+  customers created from then on start on the day each was created (the 29th to 31st on the 28th): its
+  monthly quota, its billing month and its invoice. The default, `calendar`, is the calendar month. A
+  plan change keeps the customer's day (`billing_day` in `GET /v1/customers/{id}`).
+- **Proration (P5):** a change of a customer's fee during the month (a plan change, or `PATCH .../limits`
+  with a fee; by the API or `tools/rlctl`) is recorded with its time, and the invoice's fee line charges
+  each fee for the part of the month it was in force. Billed overage is priced by the plan in force at
+  close. A customer created mid-month pays the whole first fee.
 
 **Payments.** The platform never holds a card number; one sent to the API is refused. The card goes
 into the payment provider's form, which returns a token; the platform keeps only the provider's
 customer id, and at close charges each open invoice, with the invoice as the idempotency key:
 - **Paid:** the invoice is marked paid.
-- **Declined:** the invoice is marked `payment_failed` and the customer suspended.
+- **Declined (P5: retries):** the invoice is marked `retrying` and charged again after 1, 3 and 7 days
+  (`python -m rlcontrol.billing retry`, daily), each attempt with its own idempotency key. When the last
+  one fails it is marked `payment_failed` and the customer suspended.
+- **Settled later (P5: payment webhooks):** a charge the provider cannot decide at once (a bank transfer,
+  a card asking for 3-D Secure) leaves the invoice `pending`. The provider then calls
+  `POST /v1/payments/webhook` with `charge.succeeded` or `charge.failed`, signed with the secret it shares
+  with the platform (`RL_PAYMENT_WEBHOOK_SECRET`; header `X-Payment-Signature: t=<seconds>,v1=<HMAC-SHA256
+  of "<t>.<body>">`). An unsigned call, or one signed more than 5 minutes ago, is refused; an event already
+  handled is acknowledged and not acted on twice. A failed settlement is retried as a decline is.
 - **No card:** the invoice stays open, for the merchant to collect.
 
 `rlcontrol/payments.py` has the provider: `SandboxProvider` stands in for a test mode (Stripe test
 mode or a VNPay sandbox are still to settle) and takes Stripe's test tokens, `tok_visa` and
-`tok_mastercard` paying, `tok_chargeDeclined` declined.
+`tok_mastercard` paying, `tok_chargeDeclined` declined, plus its own `tok_pending`, which settles later
+by webhook (`SandboxProvider.settle` builds the provider's signed call).
 
 **Reconciliation.** `python -m rlcontrol.billing reconcile --month YYYY-MM <usage files>` compares each
 customer's usage events (`RL_USAGE_FILE` of every limiter) with its counter and reports every
@@ -185,7 +203,7 @@ notifier is down, because Redis Pub/Sub keeps no messages. The same state is alw
 | `test_periods.py` | period names and resets against `quota.lua` | the test Redis, 6380 |
 | `test_api.py` | credentials, isolation, validation, plans, customers, custom limits, boosts, idempotent top-ups, suspension, webhook addresses, usage against the script, capacity and check rate | the dev cluster |
 | `test_notifier.py` | delivery, signature, retries, refusals, private addresses | the dev cluster |
-| `test_billing.py` | invoices from the counters, once; charges once, a decline suspends; no card numbers; this month's preview with the real script; CSV; reconciliation | the dev cluster |
+| `test_billing.py` | invoices from the counters, once; charges once, a decline retried then suspending; a pending charge settled by the signed webhook; no card numbers; this month's preview with the real script; months from the subscription date; proration; CSV; reconciliation | the dev cluster |
 | `test_e2e.py` | the P2 gate end to end (below); P3's capacity and reserve, and the check rate, through the real limiter | the dev cluster and `build/release/rate_limiter_server` |
 
 The P2 gate (`test_e2e.py`), with the real limiter:

@@ -13,6 +13,8 @@
 -- ARGV[7]  boost end, Unix ms by the Redis clock (the same clock as the reset); default 0 = none
 -- ARGV[8]  prepaid top-up: extra units for one period (P2); default 0
 -- ARGV[9]  the period the top-up was bought for, "d<day>" or "m<year * 12 + month - 1>"
+-- ARGV[10] the day of the month a monthly period and the billing month start, 1 to 28 (P5: billing
+--          from the subscription date); 1, the default, is the calendar month
 -- Returns: { allowed (0|1), used, remaining, reset_after_ms, overage (0|1), replayed (0|1), limit }
 --          replayed = 1: the stored answer of a retried request ID, not counted again
 --          limit = the limit in force, the boost and a top-up for this period included
@@ -38,6 +40,8 @@ local boost = tonumber(ARGV[6]) or 0
 local boost_until = tonumber(ARGV[7]) or 0
 local topup = tonumber(ARGV[8]) or 0
 local topup_period = ARGV[9] or ''
+local anchor = tonumber(ARGV[10]) or 1
+if anchor < 1 or anchor > 28 or anchor % 1 ~= 0 then anchor = 1 end
 
 local t = redis.call('TIME')
 local now_ms = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -58,14 +62,17 @@ local mp = math.floor((5 * doy + 2) / 153)
 local m = mp < 10 and mp + 3 or mp - 9
 local y = yoe + era * 400 + (m <= 2 and 1 or 0)
 local month = y * 12 + m - 1
-local ny, nm = y, m + 1  -- the next month
-if nm > 12 then ny, nm = y + 1, 1 end
+-- An anchored month (P5) starts on day `anchor`: before that day, the date is still in the period that
+-- began the month before. A period is numbered by the calendar month it starts in, so anchor 1 is the
+-- calendar month.
+if doy - math.floor((153 * mp + 2) / 5) + 1 < anchor then month = month - 1 end
+local ny, nm = math.floor((month + 1) / 12), (month + 1) % 12 + 1  -- where the next period starts
 if nm <= 2 then ny = ny - 1 end
 local nera = math.floor(ny / 400)
 local nyoe = ny - nera * 400
 local nmp = nm > 2 and nm - 3 or nm + 9
 local ndoe = nyoe * 365 + math.floor(nyoe / 4) - math.floor(nyoe / 100) + math.floor((153 * nmp + 2) / 5)
-local month_left = (nera * 146097 + ndoe - 719468) * day_ms - now_ms
+local month_left = (nera * 146097 + ndoe + anchor - 1 - 719468) * day_ms - now_ms
 
 -- The period this call counts in, the counter field that holds it, and the time until it ends.
 local field, period, reset_after = 'day', day, (day + 1) * day_ms - now_ms
@@ -99,7 +106,12 @@ end
 -- usage. The billing job removes the field once the month is invoiced.
 local bm, bu, bo, keep = tonumber(st[5]), tonumber(st[6]) or 0, tonumber(st[7]) or 0, tonumber(st[8]) or 0
 local retain_ms = 35 * day_ms  -- how long after its month a billable total waits for the billing job
-if bm ~= month then
+-- The billing month never moves back (P5): a customer whose anchor day changed could otherwise reopen a
+-- month already filed, and filing it again would overwrite what it billed. Units then count in the month
+-- already open.
+local billing_month = month
+if bm and bm > month then billing_month = bm end
+if bm ~= billing_month then
   if bm and bo > 0 then
     redis.call('HSET', KEYS[1], 'closed:m' .. bm, bu .. ',' .. bo)
     keep = now_ms + retain_ms
@@ -150,7 +162,7 @@ if over_used > 0 then alert(4, 'overage.started') end
 if allowed == 0 then alert(8, 'quota.denied') end
 
 redis.call('HSET', KEYS[1], field, period, 'used', used, 'overage_used', over_used, 'alerts', alerts,
-           'bm', month, 'bu', bu, 'bo', bo, 'keep_until', keep)
+           'bm', billing_month, 'bu', bu, 'bo', bo, 'keep_until', keep)
 -- Keep the key until the period ends plus a margin, then Redis cleans it up. Billed overage keeps it
 -- until `retain_ms` after its month, so the billing job finds it even if the customer never calls
 -- again; a key without any (a Free customer, a flood of unknown ids) still goes after its period.

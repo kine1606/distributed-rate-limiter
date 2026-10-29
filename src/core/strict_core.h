@@ -79,6 +79,7 @@ class StrictCore final : public RateLimiterCore {
       numbers.boost_until_ms = plan.boost_until_ms;
       numbers.topup = plan.topup;
       numbers.topup_period = plan.topup_period;
+      numbers.anchor = plan.anchor;
     } else if (rule.limit_from == PlanLimit::kBurst) {
       numbers.limit = plan.burst;
       numbers.refill_per_sec = plan.refill;

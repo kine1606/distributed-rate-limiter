@@ -41,6 +41,22 @@ class KnownDates(unittest.TestCase):
         self.assertEqual(periods.reset_after_ms(ms(2028, 2, 28), True), 2 * 86_400_000)    # a leap year
 
 
+class Anchored(unittest.TestCase):  # P5: billing from the subscription date
+    def test_a_month_runs_from_its_anchor_day_to_the_same_day_of_the_next(self):
+        self.assertEqual(periods.month_of(ms(2026, 11, 16), 17), periods.month_id("2026-10"))  # before the 17th
+        self.assertEqual(periods.month_of(ms(2026, 11, 17), 17), periods.month_id("2026-11"))
+        self.assertEqual(periods.period_name(ms(2027, 1, 5), True, 17), f"m{2026 * 12 + 11}")  # December's, into January
+        self.assertEqual(periods.month_bounds_ms(periods.month_id("2026-12"), 17), (ms(2026, 12, 17), ms(2027, 1, 17)))
+        self.assertEqual(periods.reset_after_ms(ms(2026, 11, 16, 23), True, 17), 3_600_000)
+        self.assertEqual(periods.month_of(ms(2026, 11, 16), 1), periods.month_of(ms(2026, 11, 16)))  # 1: calendar
+
+    def test_an_anchor_is_a_day_from_1_to_28(self):
+        self.assertEqual([periods.anchor_of({"anchor": v}) for v in ("17", "0", "29", "x", "")], [17, 1, 1, 1, 1])
+        self.assertEqual(periods.anchor_of({}), 1)
+        self.assertEqual(periods.anchor_at(ms(2026, 10, 17, 12)), 17)
+        self.assertEqual(periods.anchor_at(ms(2026, 10, 30)), 28)  # every month has a 28th
+
+
 class AgainstTheScript(unittest.TestCase):
     def setUp(self):
         host, _, port = os.environ.get("RL_TEST_REDIS", "127.0.0.1:6380").partition(":")
@@ -55,20 +71,22 @@ class AgainstTheScript(unittest.TestCase):
         sub = self.r.pubsub()
         sub.subscribe("rl-alerts")
         sub.get_message(timeout=1)  # the subscribe confirmation
-        for monthly in (False, True):
+        seconds, _ = self.r.time()
+        today = periods.anchor_at(seconds * 1000)
+        for monthly, anchor in ((False, 1), (True, 1), (True, today), (True, min(today + 1, 28))):
             key = "{tp|c}:daily_quota:q"
             self.r.delete(key)
-            reply = self.quota(keys=[key], args=[1, 1, "hard", 0, "month" if monthly else "day"])
+            reply = self.quota(keys=[key], args=[1, 1, "hard", 0, "month" if monthly else "day", 0, 0, 0, "", anchor])
             seconds, micros = self.r.time()
             now = seconds * 1000 + micros // 1000
-            self.assertAlmostEqual(reply[3], periods.reset_after_ms(now, monthly), delta=1000)
+            self.assertAlmostEqual(reply[3], periods.reset_after_ms(now, monthly, anchor), delta=1000)
             alert = None
             while alert is None or alert["event"] != "quota.80":
                 m = sub.get_message(timeout=2)
                 self.assertIsNotNone(m, "no alert from the script")
                 if m["type"] == "message":
                     alert = json.loads(m["data"])
-            self.assertEqual(alert["period"], periods.period_name(now, monthly))
+            self.assertEqual(alert["period"], periods.period_name(now, monthly, anchor))
         sub.close()
 
 

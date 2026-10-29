@@ -114,14 +114,15 @@ class LuaTest : public ::testing::Test {
     return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", "day", "0", "0", std::to_string(topup),
                                  topup_period});
   }
-  // The UTC calendar month of `ms` as the script numbers it, year * 12 + month - 1, and the ms from
-  // `ms` to the first day of the next month.
-  static std::pair<long long, long long> MonthOf(long long ms) {
+  // The month starting on day `anchor` (P5; 1: the UTC calendar month) that `ms` falls in, numbered as
+  // the script numbers it (year * 12 + month - 1 of the month it starts in), and the ms to the next one.
+  static std::pair<long long, long long> MonthOf(long long ms, unsigned anchor = 1) {
     using namespace std::chrono;
-    const sys_days day{floor<days>(sys_time<milliseconds>(milliseconds(ms)))};
-    const year_month_day ymd{day};
-    const sys_days next{year_month_day{(ymd.year() / ymd.month() / 1) + months(1)}};
-    return {static_cast<int>(ymd.year()) * 12LL + static_cast<unsigned>(ymd.month()) - 1,
+    const year_month_day ymd{floor<days>(sys_time<milliseconds>(milliseconds(ms)))};
+    year_month start = ymd.year() / ymd.month();
+    if (static_cast<unsigned>(ymd.day()) < anchor) start -= months(1);
+    const sys_days next{(start + months(1)) / day(anchor)};
+    return {static_cast<int>(start.year()) * 12LL + static_cast<unsigned>(start.month()) - 1,
             duration_cast<milliseconds>(next.time_since_epoch()).count() - ms};
   }
   // Today's quota state, as if `used` units were already consumed (request used + 1 comes next).
@@ -372,6 +373,32 @@ TEST_F(LuaTest, MonthlyQuotaCountsAcrossDaysAndStartsAgainInANewMonth) {
   const auto fresh = QuotaV3(k, 5, "month");
   EXPECT_EQ(fresh.ints[0], 1);
   EXPECT_EQ(fresh.ints[1], 1);
+}
+
+// P5: billing from the subscription date. Redis's clock cannot be moved, so the anchors are around
+// today: on or before today the period began this month; after today (only possible up to the 27th)
+// it began last month. The property tests cover every date on a fake clock.
+TEST_F(LuaTest, AnAnchoredMonthRunsFromItsDayToTheSameDayOfTheNextMonth) {
+  const std::string k = "{qa1}:quota";
+  const long long now = RedisNowMs();
+  const unsigned today = static_cast<unsigned>(std::chrono::year_month_day{
+      std::chrono::floor<std::chrono::days>(std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(now)))}
+                                                   .day());
+  std::vector<unsigned> anchors{std::min(today, 28u)};
+  if (today < 28) anchors.push_back(today + 1);
+  for (const unsigned anchor : anchors) {
+    Del(k);
+    const auto [month, until_next] = MonthOf(now, anchor);
+    const auto r = Run(quota_sha_, k, {"5", "1", "hard", "0", "month", "0", "0", "0", "", std::to_string(anchor)});
+    ASSERT_EQ(r.ints.size(), 7u);
+    EXPECT_EQ(r.ints[0], 1) << anchor;
+    EXPECT_NEAR(static_cast<double>(r.ints[3]), static_cast<double>(until_next), 2000.0) << anchor;
+    EXPECT_EQ(HGet(k, "month"), std::to_string(month)) << anchor;
+    EXPECT_EQ(HGet(k, "bm"), std::to_string(month)) << anchor;  // the billing month follows the anchor too
+  }
+  Del(k);  // a day out of range is the calendar month
+  Run(quota_sha_, k, {"5", "1", "hard", "0", "month", "0", "0", "0", "", "31"});
+  EXPECT_EQ(HGet(k, "month"), std::to_string(MonthOf(now).first));
 }
 
 TEST_F(LuaTest, ABoostRaisesTheLimitUntilItEnds) {

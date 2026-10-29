@@ -38,16 +38,23 @@ done
 cmd=${args[0]}
 [ -z "$merchant" ] || valid_merchant "$merchant" || die "merchant must be 1 to 64 of A-Z a-z 0-9 _ -"
 
-# Every change that succeeds goes to the merchant's audit log, as the management API's do
-# (control/rlcontrol/store.py audit_key); a platform customer (no merchant) has none.
-audit() {
-  local status=$? m=$merchant
+# On exit, for a change that succeeded, as the management API does: a change of a merchant customer's fee
+# is recorded for the invoice's proration (P5; not at creation), and the change goes to the merchant's audit
+# log (control/rlcontrol/store.py purchases_key, audit_key). A platform customer (no merchant) has neither.
+on_exit() {
+  local status=$? m=$merchant after
   case $cmd in show) return ;; merchant-add | merchant-revoke) m=${args[1]:-} ;; esac
-  if [ "$status" = 0 ] && [ -n "$m" ]; then
-    cli xadd "{rl:m:$m}:audit" MAXLEN '~' 10000 '*' actor rlctl action "$cmd" body "${args[*]:1}" >/dev/null || true
+  [ "$status" = 0 ] && [ -n "$m" ] || return 0
+  if [ -n "${key:-}" ] && [ "$cmd" != create ]; then
+    after=$(cli hget "$key" fee)
+    if [ "${after:-0}" != "${fee_before:-0}" ]; then
+      cli xadd "{rl:m:$m}:purchases" '*' kind fee customer "$customer" from "${fee_before:-0}" to "${after:-0}" \
+        at_ms "$(cli time | { read -r s; read -r us; echo $((s * 1000 + us / 1000)); })" >/dev/null || true
+    fi
   fi
+  cli xadd "{rl:m:$m}:audit" MAXLEN '~' 10000 '*' actor rlctl action "$cmd" body "${args[*]:1}" >/dev/null || true
 }
-trap audit EXIT
+trap on_exit EXIT
 
 # check_fields <field> <value>...: the fields a plan hash may hold, with values the limiter reads.
 check_fields() {
@@ -106,6 +113,7 @@ customer=${args[1]}
 id=$customer
 [ -z "$merchant" ] || id="$merchant|$customer"
 key="{$id}:plan"
+fee_before=$(cli hget "$key" fee)  # for the invoice's proration (on_exit)
 show_hash() {  # one field per line, or (none)
   local out
   out=$(cli hgetall "$1")
@@ -127,9 +135,10 @@ case $cmd in
     # One script, so no limiter can read the hash half written; a top-up already paid for is kept (as
     # the management API does, control/rlcontrol/store.py APPLY).
     # shellcheck disable=SC2086  # the preset is field-value pairs
-    cli eval "local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period'); redis.call('DEL', KEYS[1]);
+    cli eval "local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period', 'anchor'); redis.call('DEL', KEYS[1]);
       redis.call('HSET', KEYS[1], unpack(ARGV));
       if keep[1] and keep[2] then redis.call('HSET', KEYS[1], 'topup', keep[1], 'topup_period', keep[2]) end
+      if keep[3] then redis.call('HSET', KEYS[1], 'anchor', keep[3]) end
       return 1" 1 "$key" plan "$plan" $fields >/dev/null || die "writing $key failed"
     # In the merchant's customer list too (the management API's GET /v1/customers).
     [ -z "$merchant" ] || cli zadd "{rl:m:$merchant}:customers" 0 "$customer" >/dev/null

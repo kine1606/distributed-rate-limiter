@@ -55,11 +55,19 @@ def payers_key(merchant):  # customer -> the payment provider's customer id; nev
     return f"{{rl:m:{merchant}}}:payers"
 
 
+def settings_key(merchant):  # the merchant's own settings: "periods" (calendar | subscription, P5)
+    return f"{{rl:m:{merchant}}}:settings"
+
+
 def audit_key(merchant):  # a stream of every change to the merchant, through the API or tools/rlctl (P5)
     return f"{{rl:m:{merchant}}}:audit"
 
 
 AUDIT_MAXLEN = 10_000  # the latest changes kept, about; XADD trims the rest
+
+
+def payment_event_key(event_id):  # a provider's webhook event already handled (P5)
+    return f"{{rl:payments}}:event:{event_id}"
 
 
 def authfail_key(address):  # failed authentications from one client address, this minute (P5)
@@ -108,13 +116,15 @@ redis.call('HSET', KEYS[1], unpack(ARGV))
 return 1
 """
 
-# Replaces the hash with a plan's fields, keeping a top-up already paid for. ARGV: field value ...
+# Replaces the hash with a plan's fields, keeping a top-up already paid for and the subscription's
+# anchor day (P5), which belong to the customer, not the plan. ARGV: field value ...
 APPLY = """
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period')
+local keep = redis.call('HMGET', KEYS[1], 'topup', 'topup_period', 'anchor')
 redis.call('DEL', KEYS[1])
 redis.call('HSET', KEYS[1], unpack(ARGV))
 if keep[1] and keep[2] then redis.call('HSET', KEYS[1], 'topup', keep[1], 'topup_period', keep[2]) end
+if keep[3] then redis.call('HSET', KEYS[1], 'anchor', keep[3]) end
 return 1
 """
 

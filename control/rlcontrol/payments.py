@@ -5,10 +5,16 @@ carries the invoice as its idempotency key, so closing a month again never charg
 
 SandboxProvider stands in for a provider's test mode (docs/PRODUCT_PLAN.md section 10: Stripe test
 mode, a VNPay sandbox, or invoices only, still to settle with the advisor). It accepts Stripe's test
-tokens and keeps its state under {rl:sandbox}: what the provider would store, not the platform."""
+tokens and keeps its state under {rl:sandbox}: what the provider would store, not the platform.
+
+A charge can also stay pending (P5), as a bank transfer or a card asking for 3-D Secure does: the provider
+tells the platform later how it settled, with a signed webhook (POST /v1/payments/webhook), which `settle`
+builds here as the provider would send it."""
 import json
 import re
 import secrets
+
+from . import webhooks
 
 TOKEN_RE = re.compile(r"tok_[A-Za-z0-9_]{1,64}")
 CARD_NUMBER_RE = re.compile(r"\d(?:[ -]?\d){11,18}")  # 12 to 19 digits, maybe grouped: a card number
@@ -39,6 +45,7 @@ class SandboxProvider:
         "tok_mastercard": ("mastercard", "4444", None),
         "tok_chargeDeclined": ("visa", "0002", "card_declined"),
         "tok_chargeDeclinedInsufficientFunds": ("visa", "9995", "insufficient_funds"),
+        "tok_pending": ("visa", "3220", "pending"),  # the sandbox's own: settles later, by webhook
     }
 
     def __init__(self, redis):
@@ -75,8 +82,20 @@ class SandboxProvider:
         stored = self.r.hget(CUSTOMERS, pid)
         token = json.loads(stored)["card"] if stored else None
         failure = "no_card" if token is None else self.TEST_CARDS[token][2]
-        result = {"id": "ch_" + secrets.token_hex(8), "ok": failure is None, "failure": failure, "amount": amount,
-                  "currency": currency}
+        pending = failure == "pending"
+        result = {"id": "ch_" + secrets.token_hex(8), "ok": failure is None, "pending": pending,
+                  "failure": None if pending else failure, "amount": amount, "currency": currency}
         if not self.r.hsetnx(CHARGES, idempotency_key, json.dumps(result)):  # a concurrent charge won
             return json.loads(self.r.hget(CHARGES, idempotency_key))
         return result
+
+    def settle(self, idempotency_key, ok, secret, failure="card_declined", at=None):
+        """A pending charge settles: the provider records it and returns the webhook it would POST to the
+        platform, (body, X-Payment-Signature header), signed with the secret they share."""
+        charge = json.loads(self.r.hget(CHARGES, idempotency_key))
+        charge.update(ok=ok, pending=False, failure=None if ok else failure)
+        self.r.hset(CHARGES, idempotency_key, json.dumps(charge))
+        body = json.dumps({"id": "evt_" + secrets.token_hex(8), "type": "charge.succeeded" if ok else "charge.failed",
+                           "data": {"charge": charge["id"], "idempotency_key": idempotency_key,
+                                    "failure": charge["failure"]}}).encode()
+        return body, webhooks.sign(secret, body, at)

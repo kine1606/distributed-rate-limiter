@@ -8,18 +8,22 @@ import io
 import json
 import pathlib
 import secrets
+import subprocess
+import time
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisClusterException
 
-from rlcontrol import billing, payments, periods, store
+from rlcontrol import billing, payments, periods, store, webhooks
 from rlcontrol.api import create_app
 
 from .test_api import ADMIN, PLAN, cluster
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+SECRET = "whsec-for-tests-only"  # the payment provider's webhook secret
 PAY = {**PLAN, "overage": "postpaid", "allowance": 100_000, "fee": 1900, "overage_price": 50, "topup_price": 40}
 
 
@@ -32,7 +36,7 @@ class BillingTest(unittest.TestCase):
         except (RedisClusterException, RedisConnectionError):
             raise unittest.SkipTest("Redis Cluster not reachable")
         cls.provider = payments.SandboxProvider(cls.r)
-        cls.client = TestClient(create_app(redis=cls.r, admin_token=ADMIN, provider=cls.provider))
+        cls.client = TestClient(create_app(redis=cls.r, admin_token=ADMIN, provider=cls.provider, payment_secret=SECRET))
         cls.quota = cls.r.register_script((ROOT / "lua/quota.lua").read_text())
 
     def setUp(self):
@@ -45,8 +49,9 @@ class BillingTest(unittest.TestCase):
             for pid in self.r.hvals(store.payers_key(m)):
                 self.r.hdel(payments.CUSTOMERS, pid)
             for iid in self.r.hkeys(store.invoices_key(m)):
-                self.r.hdel(payments.CHARGES, f"{m}/{iid}")
-            for key in (store.catalog_key(m), store.invoices_key(m), store.purchases_key(m), store.payers_key(m)):
+                self.r.hdel(payments.CHARGES, f"{m}/{iid}", *(f"{m}/{iid}/{n}" for n in range(2, 6)))
+            for key in (store.catalog_key(m), store.invoices_key(m), store.purchases_key(m), store.payers_key(m),
+                        store.settings_key(m), store.audit_key(m)):
                 self.r.delete(key)
             for c in self.customers:
                 self.r.delete(store.plan_key(m, c), store.quota_key(m, c))
@@ -55,6 +60,8 @@ class BillingTest(unittest.TestCase):
                 if mine:
                     self.r.hdel(h, *mine)
             self.r.hdel(store.MERCHANTS, m)
+        for event in getattr(self, "events", []):
+            self.r.delete(store.payment_event_key(event))
 
     def merchant(self, plans=(("pay", PAY), ("free", PLAN))):
         m = "b" + secrets.token_hex(5)
@@ -70,6 +77,55 @@ class BillingTest(unittest.TestCase):
 
     def lines(self, invoice):
         return {line["item"]: (line["units"], line["amount"]) for line in invoice["lines"]}
+
+    def test_a_customer_billed_from_its_subscription_date_is_closed_once_its_own_month_ends(self):  # P5
+        m, auth = self.merchant()
+        self.assertEqual(self.client.get("/v1/billing", headers=auth).json(), {"periods": "calendar"})
+        self.client.put("/v1/billing", json={"periods": "subscription"}, headers=auth)
+        self.customer(auth, "u1")
+        day = self.client.get("/v1/customers/u1", headers=auth).json()["billing_day"]
+        self.assertEqual(day, periods.anchor_at(store.now_ms(self.r)))  # the day it joined
+        self.client.put("/v1/customers/u1/plan", json={"plan": "free"}, headers=auth)
+        self.client.put("/v1/customers/u1/plan", json={"plan": "pay"}, headers=auth)
+        self.assertEqual(self.client.get("/v1/customers/u1", headers=auth).json()["billing_day"], day)  # kept
+
+        start, end = periods.month_bounds_ms(self.last, day)
+        with mock.patch("rlcontrol.store.now_ms", return_value=end - 1):  # its month has not ended yet
+            early = billing.close(self.r, self.last, merchants=[m])
+        self.assertEqual((early["invoices"], early["not_ended"]), (0, 1))
+        billing.close(self.r, self.last, merchants=[m])  # its day this month has come: today, or the 28th
+        (inv,) = billing.invoices(self.r, m, self.last)
+        self.assertEqual(inv["period"], {"from_ms": start, "to_ms": end})
+        self.assertEqual(self.lines(inv), {"fee": (1, 1900)})
+
+    def test_a_fee_changed_during_the_month_is_prorated(self):  # P5
+        m, auth = self.merchant(plans=(("pay", PAY), ("free", PLAN), ("pro", {**PAY, "fee": 4900})))
+        self.customer(auth, "u1")
+        # Every change of the fee is recorded, by the API or tools/rlctl, and nothing else.
+        self.client.put("/v1/customers/u1/plan", json={"plan": "pro"}, headers=auth)
+        self.client.patch("/v1/customers/u1/limits", json={"daily": 7}, headers=auth)
+        self.client.patch("/v1/customers/u1/limits", json={"fee": 2900}, headers=auth)
+        tool = subprocess.run([str(ROOT / "tools/rlctl"), "--merchant", m, "--plan", "pay", "downgrade", "u1"],
+                              capture_output=True, text=True)
+        self.assertEqual(tool.returncode, 0, tool.stderr)
+        now = store.now_ms(self.r)
+        recorded = billing.fee_changes(self.r, m, now - 60_000, now + 1)["u1"]
+        self.assertEqual([(before, after) for _, before, after in recorded], [(1900, 4900), (4900, 2900), (2900, 1900)])
+
+        # Last month: 1900 for its first half, then 4900, the fee in force at close. A stream only grows, so
+        # last month's change goes into an empty one first.
+        self.r.delete(store.purchases_key(m))
+        start, end = periods.month_bounds_ms(self.last)
+        half = start + (end - start) // 2
+        self.r.xadd(store.purchases_key(m), {"kind": "fee", "customer": "u1", "from": 1900, "to": 4900, "at_ms": half},
+                    id=f"{half}-0")
+        self.client.put("/v1/customers/u1/plan", json={"plan": "pro"}, headers=auth)  # recorded this month
+        billing.close(self.r, self.last, merchants=[m])
+        (inv,) = billing.invoices(self.r, m, self.last)
+        (fee,) = inv["lines"]
+        self.assertEqual(fee["amount"], 3400)  # (1900 + 4900) / 2
+        self.assertEqual(fee["prorated"], [{"fee": 1900, "from_ms": start, "to_ms": half},
+                                           {"fee": 4900, "from_ms": half, "to_ms": end}])
 
     def test_an_ended_month_is_invoiced_from_the_counters_once(self):
         m, auth = self.merchant()
@@ -99,7 +155,7 @@ class BillingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             billing.close(self.r, self.month, merchants=[m])  # not over yet
 
-    def test_charges_once_and_a_declined_card_suspends(self):
+    def test_charges_once_and_a_declined_card_is_retried_then_suspends(self):
         m, auth = self.merchant()
         for cid in ("u1", "u2", "u3"):
             self.customer(auth, cid)
@@ -116,23 +172,60 @@ class BillingTest(unittest.TestCase):
         self.client.put("/v1/customers/u2/payment-method", json={"token": "tok_chargeDeclined"}, headers=auth)
         self.assertNotIn("4242", json.dumps(self.r.hgetall(store.payers_key(m))))  # provider ids only
 
+        now = store.now_ms(self.r)
         summary = billing.close(self.r, self.last, self.provider, [m])  # each owes last month's fee
-        self.assertEqual((summary["paid"], summary["payment_failed"], summary["open"]), (1, 1, 1))
+        self.assertEqual((summary["paid"], summary["retrying"], summary["open"]), (1, 1, 1))
         u1, u2, u3 = billing.invoices(self.r, m, self.last)
         self.assertEqual((u1["status"], u1["payment"]["failure"]), ("paid", None))
-        self.assertEqual((u2["status"], u2["payment"]["failure"]), ("payment_failed", "card_declined"))
+        self.assertEqual((u2["status"], u2["payment"]["failure"], u2["attempts"]), ("retrying", "card_declined", 1))
+        self.assertAlmostEqual(u2["next_attempt_ms"], now + 86_400_000, delta=60_000)  # tried again in a day
         self.assertEqual(u3["status"], "open")  # no card: for the merchant to collect
-        self.assertEqual(self.r.hget(store.plan_key(m, "u2"), "plan"), "suspended")
-        self.assertEqual(self.client.get("/v1/customers/u2", headers=auth).json()["suspended"], True)
-        self.assertEqual(self.r.hget(store.plan_key(m, "u1"), "plan"), "pay")
+        self.assertEqual(self.r.hget(store.plan_key(m, "u2"), "plan"), "pay")  # not suspended on the first failure
 
         # u3 adds a card; closing again charges u3 only, and u1's charge is not repeated.
         self.client.put("/v1/customers/u3/payment-method", json={"token": "tok_mastercard"}, headers=auth)
         again = billing.close(self.r, self.last, self.provider, [m])
-        self.assertEqual((again["invoices"], again["paid"], again["payment_failed"]), (0, 2, 1))
+        self.assertEqual((again["invoices"], again["paid"], again["retrying"]), (0, 2, 1))
         charged = [k for k in self.r.hkeys(payments.CHARGES) if k.startswith(m + "/")]
         self.assertEqual(len(charged), 3)
         self.assertEqual(billing.invoices(self.r, m, self.last)[0]["payment"], u1["payment"])
+
+        # The retries (P5): nothing before one is due; then after 1, 3 and 7 days, the last failure suspends.
+        self.assertEqual(billing.retry(self.r, self.provider, [m]), {})
+        for days, status in ((1, "retrying"), (1 + 3, "retrying"), (1 + 3 + 7, "payment_failed")):
+            with mock.patch("rlcontrol.store.now_ms", return_value=now + days * 86_400_000 + 60_000):
+                self.assertEqual(billing.retry(self.r, self.provider, [m]), {status: 1})
+        u2 = billing.invoices(self.r, m, self.last)[1]
+        self.assertEqual((u2["status"], u2["attempts"]), ("payment_failed", 4))
+        self.assertEqual(self.r.hget(store.plan_key(m, "u2"), "plan"), "suspended")
+        self.assertEqual(self.client.get("/v1/customers/u2", headers=auth).json()["suspended"], True)
+        self.assertEqual(self.r.hget(store.plan_key(m, "u1"), "plan"), "pay")
+
+    def test_a_pending_charge_is_settled_by_the_providers_signed_webhook(self):  # P5
+        m, auth = self.merchant()
+        for cid in ("u1", "u2"):
+            self.customer(auth, cid)
+            self.client.put(f"/v1/customers/{cid}/payment-method", json={"token": "tok_pending"}, headers=auth)
+        self.assertEqual(billing.close(self.r, self.last, self.provider, [m])["pending"], 2)
+        u1, u2 = billing.invoices(self.r, m, self.last)
+        hook = "/v1/payments/webhook"
+
+        body, signature = self.provider.settle(f"{m}/{u1['id']}", ok=True, secret=SECRET)
+        self.assertEqual(self.client.post(hook, content=body, headers={"X-Payment-Signature": signature}).json(),
+                         {"invoice_status": "paid"})
+        self.assertEqual(self.client.post(hook, content=body, headers={"X-Payment-Signature": signature}).json(),
+                         {"duplicate": True})  # the provider sent it again: nothing done twice
+        self.events = [json.loads(body)["id"]]
+        for bad in ("", signature.replace("v1=", "v1=0"), webhooks.sign("another-secret", body)):
+            self.assertEqual(self.client.post(hook, content=body, headers={"X-Payment-Signature": bad}).status_code, 400)
+        stale = webhooks.sign(SECRET, body, at=int(time.time()) - 3600)  # replayed an hour later
+        self.assertEqual(self.client.post(hook, content=body, headers={"X-Payment-Signature": stale}).status_code, 400)
+
+        body, signature = self.provider.settle(f"{m}/{u2['id']}", ok=False, secret=SECRET)
+        self.events.append(json.loads(body)["id"])
+        self.assertEqual(self.client.post(hook, content=body, headers={"X-Payment-Signature": signature}).json(),
+                         {"invoice_status": "retrying"})  # a failed settlement is retried as a declined charge is
+        self.assertEqual([i["status"] for i in billing.invoices(self.r, m, self.last)], ["paid", "retrying"])
 
     def test_this_months_preview_counts_what_the_script_admits(self):
         m, auth = self.merchant()

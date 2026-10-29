@@ -26,6 +26,8 @@ struct Plan {
   std::uint32_t topup{0};                 // prepaid units for the period topup_period (P2), "d<day>" or
   std::string topup_period{};             // "m<year * 12 + month - 1>"; another period ignores them
   bool paid{false};                       // the plan has a monthly fee (P3): it may use the merchant's reserve
+  std::uint8_t anchor{1};                 // P5: the day (1 to 28) a monthly period and the billing month start;
+                                          // 1 is the calendar month, another day bills from the subscription date
 };
 
 // Identifies a plan's quota terms, so a denial recorded under them (DenyCache) is ignored once the
@@ -36,7 +38,7 @@ inline std::uint64_t QuotaStamp(const Plan& p) {
   for (const std::uint64_t v : {std::uint64_t{static_cast<std::uint8_t>(p.overage)},
                                 std::uint64_t{static_cast<std::uint8_t>(p.period)}, std::uint64_t{p.boost},
                                 static_cast<std::uint64_t>(p.boost_until_ms), std::uint64_t{p.topup},
-                                std::uint64_t{std::hash<std::string>{}(p.topup_period)}}) {
+                                std::uint64_t{std::hash<std::string>{}(p.topup_period)}, std::uint64_t{p.anchor}}) {
     h = (h ^ (v + kMix + (h << 6) + (h >> 2))) * kMix;
   }
   return h;
@@ -72,6 +74,9 @@ inline Plan ParsePlan(const std::unordered_map<std::string, std::string>& fields
     if (ok) p.topup_period = v;
   }
   if (p.topup_period.empty()) p.topup = 0;  // units without a period apply to none
+  std::uint32_t anchor = 1;
+  read("anchor", anchor);
+  if (anchor >= 1 && anchor <= 28) p.anchor = static_cast<std::uint8_t>(anchor);  // else the calendar month
   std::uint32_t fee = 0;  // in cents; only whether there is one matters here (billing: control/rlcontrol)
   read("fee", fee);
   p.paid = fee > 0;

@@ -59,13 +59,17 @@ struct Period {
   std::int64_t id, reset_after_ms;
   std::string name;
 };
-Period PeriodOf(bool monthly, std::int64_t now) {
+// A month anchored on day `anchor` (P5) runs from that day to the same day of the next month, and is
+// numbered by the calendar month it starts in; anchor 1 is the calendar month.
+Period PeriodOf(bool monthly, std::int64_t now, unsigned anchor = 1) {
   if (!monthly) return {false, now / kDayMs, (now / kDayMs + 1) * kDayMs - now, "d" + std::to_string(now / kDayMs)};
   using namespace std::chrono;
   const sys_days day{floor<days>(sys_time<milliseconds>(milliseconds(now)))};
   const year_month_day ymd{day};
-  const sys_days next{year_month_day{(ymd.year() / ymd.month() / 1) + months(1)}};
-  const std::int64_t id = static_cast<int>(ymd.year()) * 12LL + static_cast<unsigned>(ymd.month()) - 1;
+  year_month start = ymd.year() / ymd.month();
+  if (static_cast<unsigned>(ymd.day()) < anchor) start -= months(1);
+  const sys_days next{(start + months(1)) / std::chrono::day(anchor)};
+  const std::int64_t id = static_cast<int>(start.year()) * 12LL + static_cast<unsigned>(start.month()) - 1;
   return {true, id, duration_cast<milliseconds>(next.time_since_epoch()).count() - now, "m" + std::to_string(id)};
 }
 
@@ -210,7 +214,7 @@ class ScriptRedis final : public RedisBackend {
   // lua/quota.lua.
   ScriptResult Quota(const Rule& rule, const std::string& key, std::uint32_t requested, const std::string& id) {
     const std::int64_t now = NowMs(), cost = requested, extra = rule.overage_extra;
-    const Period p = PeriodOf(rule.quota_period == QuotaPeriod::kMonth, now);
+    const Period p = PeriodOf(rule.quota_period == QuotaPeriod::kMonth, now, rule.anchor);
     std::int64_t limit = rule.limit;
     if (now < rule.boost_until_ms) limit += rule.boost;
     if (rule.topup > 0 && rule.topup_period == p.name) limit += rule.topup;
@@ -234,7 +238,7 @@ class ScriptRedis final : public RedisBackend {
       c = {p.monthly, p.id, 0, 0, 0};
     }
     BillingState& b = billing_[counter];
-    if (const std::int64_t month = PeriodOf(true, now).id; b.bm != month) {
+    if (const std::int64_t month = std::max(PeriodOf(true, now, rule.anchor).id, b.bm); b.bm != month) {
       if (b.bm >= 0 && b.bo > 0) b.closed[b.bm] = {b.bu, b.bo};
       b.bm = month;
       b.bu = b.bo = 0;
@@ -307,6 +311,7 @@ struct ModelPlan {  // a missing hash or field means Free (3.1.3)
   std::int64_t boost_until_ms = 0;
   std::uint32_t topup = 0;                 // prepaid units for the period named topup_period only
   std::string topup_period;
+  unsigned anchor = 1;                     // the day a month starts (P5); 1: the calendar month
 };
 
 struct Usage {
@@ -342,6 +347,7 @@ class Model {
     double tokens_m;
     std::int64_t last_ms, expires_ms;
   };
+  std::map<std::string, std::int64_t> billing_month_;  // the latest billing month each customer counted in
   struct Counter {  // one customer's quota in its current period
     bool monthly = false;
     std::int64_t period = -1, used = 0, over = 0;
@@ -353,14 +359,15 @@ class Model {
     bool overage;
     std::int64_t expires_ms;
   };
-  using QuotaTerms = std::tuple<std::uint32_t, std::uint32_t, Overage, bool, std::uint32_t, std::int64_t, std::uint32_t, std::string>;
+  using QuotaTerms =
+      std::tuple<std::uint32_t, std::uint32_t, Overage, bool, std::uint32_t, std::int64_t, std::uint32_t, std::string, unsigned>;
   struct Denial {
     std::int64_t until_ms;
     QuotaTerms terms;  // a denial holds only under its plan's quota terms
   };
 
   static QuotaTerms Terms(const ModelPlan& p) {
-    return {p.daily, p.extra, p.overage, p.monthly, p.boost, p.boost_until_ms, p.topup, p.topup_period};
+    return {p.daily, p.extra, p.overage, p.monthly, p.boost, p.boost_until_ms, p.topup, p.topup_period, p.anchor};
   }
 
   // Redis cannot answer: a paid plan admits unverified, anything else is unavailable for a second.
@@ -424,7 +431,7 @@ class Model {
     // 4. The quota of the current period (a UTC day, or a UTC calendar month) under the plan's overage
     // policy. The limit in force adds a boost until it ends and a top-up bought for this period. A
     // request id decided in the last five minutes gets its first answer again and is not counted.
-    const Period period = PeriodOf(plan.monthly, now);
+    const Period period = PeriodOf(plan.monthly, now, plan.anchor);
     std::int64_t limit = plan.daily;
     if (now < plan.boost_until_ms) limit += plan.boost;
     if (plan.topup > 0 && plan.topup_period == period.name) limit += plan.topup;
@@ -439,7 +446,10 @@ class Model {
       Counter& d = counters_[c];
       if (d.monthly != period.monthly || d.period != period.id) d = {period.monthly, period.id, 0, 0, 0};
       const std::int64_t room = limit - d.used;
-      auto& [in_plan, billed_over] = billed[c][PeriodOf(true, now).id];
+      // A customer's billing month never goes back (P5), even if its anchor day changes.
+      std::int64_t& month = billing_month_[c];
+      month = std::max(month, PeriodOf(true, now, plan.anchor).id);
+      auto& [in_plan, billed_over] = billed[c][month];
       if (cost <= room) {  // within the plan, whatever the policy
         d.used += cost;
         in_plan += cost;
@@ -546,6 +556,16 @@ std::pair<std::optional<Fields>, ModelPlan> RandomPlan(std::mt19937_64& rng) {
     m.monthly = true;
     f["period"] = "month";
   }
+  if (pick(0, 3) == 0) {  // billed from a subscription day (P5), near today so histories cross it
+    using namespace std::chrono;
+    const unsigned today = static_cast<unsigned>(
+        year_month_day{floor<days>(sys_time<milliseconds>(milliseconds(NowMs())))}.day());
+    const unsigned day = std::min(28u, today + pick(0, 2));
+    m.anchor = day;
+    f["anchor"] = std::to_string(day);
+  } else if (pick(0, 9) == 0) {
+    f["anchor"] = pick(0, 1) ? "31" : "0";  // out of range: the calendar month
+  }
   if (pick(0, 4) == 0) {
     m.boost = pick(1, 10);
     m.boost_until_ms = NowMs() + std::uniform_int_distribution<std::int64_t>(-60'000, 3'600'000)(rng);
@@ -554,7 +574,7 @@ std::pair<std::optional<Fields>, ModelPlan> RandomPlan(std::mt19937_64& rng) {
   }
   if (pick(0, 4) == 0) {
     const std::uint32_t units = pick(1, 10);
-    const Period now = PeriodOf(m.monthly, NowMs());
+    const Period now = PeriodOf(m.monthly, NowMs(), m.anchor);
     const int which = static_cast<int>(pick(0, 9));
     const std::string period = which < 7 ? now.name : which < 9 ? (now.monthly ? "m" : "d") + std::to_string(now.id - 1) : "x1";
     if (period != "x1") {
@@ -589,6 +609,7 @@ struct Coverage {
   std::map<std::string, std::uint64_t> alerts;
   std::uint64_t checks = 0, replayed = 0, plan_changes = 0, outages = 0, rollovers = 0;
   std::uint64_t month_rollovers = 0, monthly_checks = 0, boosted_checks = 0, topped_up_checks = 0;
+  std::uint64_t anchored_checks = 0, anchored_rollovers = 0;  // plans billed from a subscription day (P5)
   std::uint64_t billed_months = 0, filed_months = 0;  // months with billed overage; months filed by a rollover
 };
 Coverage g_coverage;
@@ -624,6 +645,7 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
                      [&usage](std::string_view c, Reason r, std::uint32_t cost) { usage.push_back({std::string(c), r, cost}); },
                      leased);
   Model model(cfg.plan_cache);
+  std::map<std::string, unsigned> anchors;  // each customer's subscription day, fixed by its first plan (P5)
 
   const std::vector<std::string> customers{"cust:a", "cust:b", "cust:c"};
   std::map<std::string, std::vector<std::pair<std::string, std::uint32_t>>> sent;  // ids and costs, per customer
@@ -682,12 +704,17 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
         const ModelPlan& mp = it->second;
         g_coverage.monthly_checks += mp.monthly;
         g_coverage.boosted_checks += mp.boost > 0 && NowMs() < mp.boost_until_ms;
-        g_coverage.topped_up_checks += mp.topup > 0 && mp.topup_period == PeriodOf(mp.monthly, NowMs()).name;
+        g_coverage.topped_up_checks += mp.topup > 0 && mp.topup_period == PeriodOf(mp.monthly, NowMs(), mp.anchor).name;
+        g_coverage.anchored_checks += mp.anchor != 1;
       }
     } else if (op < 87) {
       const std::int64_t ms = RandomStep(rng);
       g_coverage.rollovers += (NowMs() + ms) / kDayMs != NowMs() / kDayMs;
       g_coverage.month_rollovers += PeriodOf(true, NowMs() + ms).id != PeriodOf(true, NowMs()).id;
+      for (const auto& [customer, mp] : model.plans) {
+        g_coverage.anchored_rollovers +=
+            mp.anchor != 1 && PeriodOf(true, NowMs() + ms, mp.anchor).id != PeriodOf(true, NowMs(), mp.anchor).id;
+      }
       Advance(ms);
       what = "advance " + std::to_string(ms) + " ms";
     } else if (op < 98) {
@@ -706,7 +733,7 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
         } else if (change == 1) {
           plan.boost_until_ms = NowMs();  // ended now; the units stay in the hash
         } else {
-          const std::string current = PeriodOf(plan.monthly, NowMs()).name;
+          const std::string current = PeriodOf(plan.monthly, NowMs(), plan.anchor).name;
           plan.topup = (plan.topup_period == current ? plan.topup : 0) + std::uniform_int_distribution<std::uint32_t>(1, 5)(rng);
           plan.topup_period = current;
           (*fields)["topup"] = std::to_string(plan.topup);
@@ -718,6 +745,15 @@ std::string RunExact(std::uint64_t seed, Config cfg) {
         }
       } else {
         std::tie(fields, plan) = RandomPlan(rng);
+      }
+      // A customer's anchor is its subscription day: set once, kept by every plan change (store.py APPLY).
+      if (const unsigned anchor = anchors.try_emplace(c, plan.anchor).first->second; fields && plan.anchor != anchor) {
+        plan.anchor = anchor;
+        if (anchor == 1) {
+          fields->erase("anchor");
+        } else {
+          (*fields)["anchor"] = std::to_string(anchor);
+        }
       }
       if (fields) {
         redis.hashes[PlanKey(c)] = *fields;
@@ -1010,6 +1046,9 @@ void RunSeeds(const char* label, const std::function<std::string(std::uint64_t)>
     std::printf("\n[property]   billing: %llu customer months with billed overage, %llu of them filed by a new month\n",
                 static_cast<unsigned long long>(g_coverage.billed_months),
                 static_cast<unsigned long long>(g_coverage.filed_months));
+    std::printf("[property]   anchored months (P5): %llu checks, %llu of a customer's periods ended at its anchor day\n",
+                static_cast<unsigned long long>(g_coverage.anchored_checks),
+                static_cast<unsigned long long>(g_coverage.anchored_rollovers));
     g_coverage = {};
   }
   if (g_leased.seeds > 0) {

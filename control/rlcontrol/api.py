@@ -114,6 +114,12 @@ class TopUp(Strict):
     units: int = Field(ge=1, le=1_000_000_000)
 
 
+class BillingPeriods(Strict):
+    periods: Literal["calendar", "subscription"] = Field(
+        description="calendar: every customer's month is the calendar month; subscription: it starts on the day "
+                    "the customer was created")
+
+
 class Capacity(Strict):
     rate: int = Field(ge=1, le=store.UINT32, description="calls a second the merchant's backend takes from all its customers")
     burst: Optional[int] = Field(None, ge=1, le=store.UINT32,
@@ -201,8 +207,10 @@ class AuditLog:
             logging.getLogger(__name__).exception("audit entry lost: %s %s", merchant, action)
 
 
-def create_app(redis=None, admin_token=None, provider=None):
+def create_app(redis=None, admin_token=None, provider=None, payment_secret=None):
     admin_token = admin_token if admin_token is not None else os.environ.get("RL_ADMIN_TOKEN", "")
+    # the secret the payment provider signs its webhooks with (P5); unset, the webhook is refused
+    payment_secret = payment_secret if payment_secret is not None else os.environ.get("RL_PAYMENT_WEBHOOK_SECRET", "")
     if len(admin_token) < 16:
         raise RuntimeError("RL_ADMIN_TOKEN must be set, at least 16 characters")
     if redis is None:
@@ -264,8 +272,8 @@ def create_app(redis=None, admin_token=None, provider=None):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no such customer")
         counter = r.hgetall(store.quota_key(m, customer))
         now = store.now_ms(r)
-        monthly = plan.get("period") == "month"
-        period = periods.period_name(now, monthly)
+        monthly, anchor = plan.get("period") == "month", periods.anchor_of(plan)
+        period = periods.period_name(now, monthly, anchor)
         current = counter.get("month" if monthly else "day") == period[1:]  # the counter of this period
         used = int(counter.get("used", 0)) if current else 0
         over = int(counter.get("overage_used", 0)) if current else 0
@@ -277,11 +285,12 @@ def create_app(redis=None, admin_token=None, provider=None):
             "plan": plan.get("plan", "free"),
             "suspended": plan.get("plan") == "suspended",
             "terms": terms_view(plan),
+            "billing_day": anchor,  # the day its month starts (P5); 1: the calendar month
             "boost": {"units": int(plan.get("boost", 0)), "until_ms": int(plan.get("boost_until", 0)),
                       "active": boost > 0},
             "topup": {"units": topup, "period": period},
             "usage": {"period": period, "used": used, "overage_used": over, "limit": limit,
-                      "remaining": max(0, limit - used), "resets_in_ms": periods.reset_after_ms(now, monthly),
+                      "remaining": max(0, limit - used), "resets_in_ms": periods.reset_after_ms(now, monthly, anchor),
                       "alerts": store.decode_alerts(counter.get("alerts", 0)) if current else []},
         }
 
@@ -369,6 +378,45 @@ def create_app(redis=None, admin_token=None, provider=None):
         r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)  # every limiter drops them at once
         return {"id": mid, "revoked": len(mine)}
 
+    # ---- the payment provider (P5) ----
+
+    @app.post("/v1/payments/webhook")
+    async def payment_webhook(request: Request, x_payment_signature: str = Header("")):
+        """The payment provider tells how a pending charge settled. Signed with the secret it shares with the
+        platform (RL_PAYMENT_WEBHOOK_SECRET) over a timestamp: an unsigned or stale call is refused, and an
+        event already handled is acknowledged without acting twice."""
+        body = await request.body()
+        if not payment_secret or not webhooks.verify(payment_secret, x_payment_signature, body):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad or missing signature")
+        try:
+            event = json.loads(body)
+            data, kind, eid = event.get("data") or {}, event.get("type"), str(event["id"])
+        except (ValueError, KeyError, AttributeError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "not an event")
+        if kind not in ("charge.succeeded", "charge.failed"):
+            return {"ignored": kind}
+
+        def handle():
+            if not r.set(store.payment_event_key(eid), 1, nx=True, ex=7 * 86_400):
+                return {"duplicate": True}
+            return {"invoice_status": billing.settled(r, str(data.get("idempotency_key", "")), kind == "charge.succeeded",
+                                                      data.get("failure"), data.get("charge"), provider.name)}
+        return await anyio.to_thread.run_sync(handle)
+
+    # ---- a merchant: billing periods (P5) ----
+
+    @app.put("/v1/billing")
+    def put_billing(body: BillingPeriods, m: str = Depends(merchant)):
+        """How the merchant's months run: the calendar month, or from each customer's subscription date (the
+        day it was created; the 29th to 31st bill on the 28th). It applies to customers created from now on;
+        a plan change keeps a customer's day."""
+        r.hset(store.settings_key(m), "periods", body.periods)
+        return {"periods": body.periods}
+
+    @app.get("/v1/billing")
+    def get_billing(m: str = Depends(merchant)):
+        return {"periods": r.hget(store.settings_key(m), "periods") or "calendar"}
+
     # ---- a merchant: its management key and its audit log (P5) ----
 
     @app.post("/v1/management-key", status_code=201)
@@ -419,7 +467,10 @@ def create_app(redis=None, admin_token=None, provider=None):
 
     @app.post("/v1/customers", status_code=201)
     def create_customer(body: CustomerCreate, m: str = Depends(merchant)):
-        created = run("CREATE", m, body.id, store.flatten(plan_fields(m, body.plan)))
+        fields = plan_fields(m, body.plan)
+        if r.hget(store.settings_key(m), "periods") == "subscription":  # its months start on the day it joins
+            fields["anchor"] = periods.anchor_at(store.now_ms(r))
+        created = run("CREATE", m, body.id, store.flatten(fields))
         # The index lives in the merchant's slot, the hash in the customer's: two writes. If a crash
         # falls between them, POST /v1/customers/reindex (or creating it again) puts it back.
         r.zadd(store.customers_key(m), {body.id: 0})
@@ -456,9 +507,11 @@ def create_app(redis=None, admin_token=None, provider=None):
         pipe = r.pipeline()
         for cid in ids:
             pipe.hmget(store.quota_key(m, cid), "bm", "bu", "bo")
+            pipe.hget(store.plan_key(m, cid), "anchor")
+        replies = pipe.execute() if ids else []
         admitted = billed = 0
-        for bm, bu, bo in pipe.execute() if ids else []:
-            if bm is not None and int(bm) == month:
+        for (bm, bu, bo), anchor in zip(replies[::2], replies[1::2]):  # each customer's own billing month
+            if bm is not None and int(bm) == periods.month_of(now, periods.anchor_of({"anchor": anchor or "1"})):
                 admitted += int(bu or 0) + int(bo or 0)
                 billed += int(bo or 0)
         return {"month": periods.month_label(month), "at_ms": now, "customers": len(ids), "admitted": admitted,
@@ -467,6 +520,16 @@ def create_app(redis=None, admin_token=None, provider=None):
     @app.get("/v1/customers/{cid}")
     def get_customer(cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
         return customer_view(m, cid)
+
+    def fee_recorded(m, cid, change):
+        """Runs `change()`, a write to the customer's hash, and records a change of its fee with Redis's time,
+        for the invoice's proration (P5)."""
+        before = r.hget(store.plan_key(m, cid), "fee") or "0"
+        ok = change()
+        if ok and (after := r.hget(store.plan_key(m, cid), "fee") or "0") != before:
+            r.xadd(store.purchases_key(m), {"kind": "fee", "customer": cid, "from": before, "to": after,
+                                            "at_ms": store.now_ms(r)})
+        return ok
 
     def changed(m, cid, ok):
         if not ok:
@@ -478,7 +541,7 @@ def create_app(redis=None, admin_token=None, provider=None):
     def apply_plan(body: PlanChoice, cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
         """Moves the customer to a plan of the catalogue: its terms replace custom limits and boosts; a
         top-up already bought is kept."""
-        return changed(m, cid, run("APPLY", m, cid, store.flatten(plan_fields(m, body.plan))))
+        return changed(m, cid, fee_recorded(m, cid, lambda: run("APPLY", m, cid, store.flatten(plan_fields(m, body.plan)))))
 
     @app.patch("/v1/customers/{cid}/limits")
     def set_limits(body: LimitsPatch, cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
@@ -486,7 +549,7 @@ def create_app(redis=None, admin_token=None, provider=None):
         fields = body.fields()
         if not fields:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "no field to change")
-        return changed(m, cid, run("UPDATE", m, cid, store.flatten(fields)))
+        return changed(m, cid, fee_recorded(m, cid, lambda: run("UPDATE", m, cid, store.flatten(fields))))
 
     @app.post("/v1/customers/{cid}/boost")
     def boost(body: Boost, cid: str = Path(pattern=CUSTOMER), m: str = Depends(merchant)):
@@ -510,7 +573,8 @@ def create_app(redis=None, admin_token=None, provider=None):
             response.headers["Idempotent-Replayed"] = "true"
             return json.loads(first)
         now = store.now_ms(r)
-        result = run("TOPUP", m, cid, [body.units, periods.period_name(now, False), periods.period_name(now, True)])
+        anchor = periods.anchor_of({"anchor": r.hget(store.plan_key(m, cid), "anchor") or "1"})
+        result = run("TOPUP", m, cid, [body.units, periods.period_name(now, False), periods.period_name(now, True, anchor)])
         if result == -1:
             if idem:
                 r.delete(idem)
