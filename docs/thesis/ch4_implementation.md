@@ -360,14 +360,14 @@ uses every action, checks what the page then shows, and fails on any script erro
 
 ## 4.8 Testing
 
-*Table 4.5: Tests by kind (279 C++ tests, every one passing in release, ASan and TSan; 39 of the control plane).*
+*Table 4.5: Tests by kind (281 C++ tests, every one passing in release, ASan and TSan; 48 of the control plane).*
 
 | Kind | Count | Against | Examples |
 | --- | --- | --- | --- |
-| Unit | 216 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines; the merchant key index, a merchant's check rate, capacity and reserve |
-| Script | 42 | a real Redis (port 6380) | each algorithm's limits, request ids, overage, clock jumps, day rollover; months, boosts, top-ups, alerts, billing totals |
+| Unit | 217 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines; the merchant key index, a merchant's check rate, capacity and reserve |
+| Script | 43 | a real Redis (port 6380) | each algorithm's limits, request ids, overage, clock jumps, day rollover; months, boosts, top-ups, alerts, billing totals |
 | Integration | 21 | the three-master cluster | exactly 200 of 400 concurrent calls; plan changes reaching two instances; leased quota on four instances; a killed subscription coming back; merchants end to end |
-| Control plane (Python) | 39 | the cluster and the real limiter | the API's isolation and idempotency, invoices and the payment sandbox, signed webhooks to pinned public addresses, TLS, the gateway example |
+| Control plane (Python) | 48 | the cluster and the real limiter | the API's isolation and idempotency, invoices and the payment sandbox, signed webhooks to pinned public addresses, TLS, the gateway example |
 
 Some tests do more than check examples:
 

@@ -457,10 +457,22 @@ TSan, the 39 of the control plane pass, and the property tests pass at 2,000 see
 
 ### Optional Week P5 (Nov 23 to 29): if the business layer runs long
 
-- [ ] Billing periods from the subscription date, and proration when a customer upgrades mid-period.
-      *Waits on the advisor (section 10, question 3).*
-- [ ] Payment webhooks and retries; a Vietnamese provider's sandbox if the faculty prefers one.
-      *Waits on the advisor (section 10, question 2).*
+- [x] Billing periods from the subscription date, and proration when a customer upgrades mid-period.
+  - *Done (2026-10-29), as an option, so either answer to section 10's question 3 is a setting:*
+    `PUT /v1/billing {"periods": "subscription"}` starts the months of customers created from then on on
+    their own day (plan field `anchor`, 1 to 28; `quota.lua` ARGV 10; the property tests' transcription
+    and model, which found that a billing month must never move back). A fee changed mid-month is
+    prorated by time, from changes recorded by the API and `tools/rlctl`.
+  - *Tests:* 2 C++ (parse, the script on a real Redis), property tests at 2,000 seeds with 87,620 checks
+    on anchored plans and 547 months ended on an anchor day, 4 Python and the script check extended; 5
+    planted bugs caught.
+- [x] Payment webhooks and retries; a Vietnamese provider's sandbox if the faculty prefers one.
+  - *Done (2026-10-29):* a declined charge is retried after 1, 3 and 7 days and suspends only after the
+    last; a pending charge is settled by the provider's signed webhook (`POST /v1/payments/webhook`,
+    HMAC-SHA256 with a timestamp, events handled once). 2 tests, 3 planted bugs caught.
+  - *Not done:* a VNPay sandbox, which needs a merchant account and the faculty's preference. VNPay pays
+    on a redirect page, not by charging a saved customer at month close, so it would add a pay-by-link
+    flow beside the sandbox rather than replace it.
 - [x] Hardening: key rotation, a limit on failed authentication, an audit log of every limit change.
   - *Done (2026-10-29):* management keys rotated by the merchant; check keys revoked one at a time by id;
     20 failed authentications a minute per client address, then 429; every successful change through
@@ -468,7 +480,7 @@ TSan, the 39 of the control plane pass, and the property tests pass at 2,000 see
     4 API tests, each shown to fail with its bug planted.
   - *Not done:* a failed-key limit on the limiter's gRPC side (a wrong key costs a hash and no Redis
     call, measured in P4); an operator's view of a merchant's log (it reads the stream).
-- [ ] The AWS run, if the budget is agreed.
+- [ ] The AWS run, if the budget is agreed. *Not done: it needs an AWS account and an agreed budget.*
 
 ### Optional Week P6 (Nov 30 to Dec 6): buffer
 

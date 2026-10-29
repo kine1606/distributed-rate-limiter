@@ -39,7 +39,7 @@ Measured on one laptop, where client, limiter and Redis share 12 hardware thread
   - *Billing:* invoices equal the counters with a master killed.
   - *Cost and scale:* tenancy costs less than the measurement noise; 10,000 merchants of 100 customers
     take 193 bytes of Redis a customer.
-- **Tests:** 279, passing in release, ASan and TSan, plus 39 of the control plane; 97.1% line coverage.
+- **Tests:** 281, passing in release, ASan and TSan, plus 48 of the control plane; 97.1% line coverage.
 
 1,000,000 checks/s is an estimate, not a measurement (`tools/extrapolate.py`): 15 to 50 instances,
 depending on the latency target, and 17 Redis masters for customer checks. **Start with

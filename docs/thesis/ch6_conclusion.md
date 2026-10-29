@@ -45,8 +45,8 @@ decided:
 **The engineering rules held,** measured rather than assumed:
 - *The lease hot path* takes no lock and makes no allocation (microbenchmark, profile). The limiter's
   own code is 4 to 6% of the CPU under load.
-- *Every test passes under the sanitizers:* 279 tests in release, AddressSanitizer and
-  ThreadSanitizer, plus 39 tests of the control plane, with 97.1% line coverage.
+- *Every test passes under the sanitizers:* 281 tests in release, AddressSanitizer and
+  ThreadSanitizer, plus 48 tests of the control plane, with 97.1% line coverage.
 
 **One intermediate target was not met.** A leased instance at four times the strict baseline would be
 101,204 checks/s. On the laptop, gRPC with no limiter at all runs at 82,700 to 91,200, so no limiter
@@ -86,7 +86,8 @@ instance reached 400,187 checks/s (5.10).
 - **The portal shows admitted calls only.** Refusals are not counted per merchant.
 - **A merchant's monthly usage is summed per customer** on every request, so its cost grows with the
   merchant's number of customers.
-- **Payments are a sandbox,** in one currency, and billing periods are calendar months.
+- **Payments are a sandbox,** in one currency. Billed overage is priced by the plan in force at the
+  end of the month, though a fee that changed is prorated.
 
 ## 6.3 Future work
 
@@ -108,5 +109,5 @@ instance reached 400,187 checks/s (5.10).
   flood is refused locally without the operator's action.
 - **Running totals per merchant,** sharded across masters, for the portal's numbers and a live count of
   refusals.
-- **Billing periods from the subscription date,** proration on a mid-period upgrade, and a real payment
-  provider's webhooks.
+- **A real payment provider** (Stripe's test mode, or VNPay's sandbox with a pay-by-link flow) in place
+  of the sandbox, whose webhook and retries are built.

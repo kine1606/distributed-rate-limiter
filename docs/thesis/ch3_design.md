@@ -1004,6 +1004,15 @@ plan-change message of 3.4.4. The API's main choices, each against the alternati
     to the very address that was checked, with the name kept for the `Host` header and the
     certificate, so a name that answers a public address first and a private one next (DNS
     rebinding) cannot redirect it.
+- **Hardening.**
+  - *Keys are rotated without a gap:* a merchant replaces its own management key in one step, and the
+    old one stops at once. The operator revokes check keys one at a time, so a gateway moves to a new
+    key before the old one goes.
+  - *Guessing is limited:* after 20 failed authentications in a minute, the client's address is
+    refused with `429`. The limit is checked before the key is looked at.
+  - *Every change is in an audit log:* who made it (the merchant, the operator or the admin tool), when,
+    and the request with its secrets masked. It is kept in a stream per merchant, written in one place,
+    a middleware, so no endpoint can be left out.
 
 ### 3.9.6 Metering and invoices
 
@@ -1030,10 +1039,18 @@ numbers the quota decided with. The service keeps them where they are made.
   - *How:* the card is typed into the payment provider's form, which returns a token. The service keeps
     only the provider's customer id and charges it when the month closes, with the invoice as the
     idempotency key.
-  - *Outcomes:* a declined charge suspends the customer (the `suspended` plan of 3.3.2). A customer without a card keeps an open
-    invoice for the merchant to collect.
+  - *Outcomes:* a declined charge is tried again after 1, 3 and 7 days, each try with its own
+    idempotency key. Only when the last one fails is the customer suspended (the `suspended` plan of
+    3.3.2). A charge the provider settles later stays pending until the provider's signed webhook says
+    how it ended. A customer without a card keeps an open invoice for the merchant to collect.
   - *Not stored:* a card number sent to the API is refused.
   - *The provider:* a sandbox here, which takes the test tokens of a real provider.
+- **Months from the subscription date,** if the merchant chooses: a customer's month then starts on the
+  day it joined. The day is a field of its plan hash, kept when the plan changes, and the script counts
+  the monthly quota and the billing month from it. A billing month never moves back, so a filed month
+  is never reopened and overwritten.
+- **Proration.** A change of fee during the month is recorded with its time, and the invoice charges each
+  fee for the part of the month it was in force.
 - **Persistence.** Redis appends every write to a file and syncs it once a second, so a restarted node
   keeps its counters, less at most the last second. Replication stays asynchronous, so a killed master
   can still lose writes it had not passed on; the evaluation measures this rather than hiding it

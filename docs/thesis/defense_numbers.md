@@ -22,7 +22,7 @@ and each of its questions with the measurement that answers it. Every number has
 | 16,384 | Redis Cluster hash slots | a customer's keys share one slot by hash tag |
 | 3 masters | test cluster | 3 + 3 replicas for fault tests |
 | 64 bytes | lease alignment | 14 times faster per-thread counters at 16 threads (microbenchmark); within noise in the whole server (ablation) |
-| 279 tests | release, ASan, TSan | 216 unit, 42 against a real Redis, 21 integration; plus 39 of the control plane (Python); 97.1% line coverage |
+| 281 tests | release, ASan, TSan | 217 unit, 43 against a real Redis, 21 integration; plus 48 of the control plane (Python); 97.1% line coverage |
 | 42,065 checks/s | one instance, strict, uniform keys | matrix, pinned (Week 2's ghz baseline: 25,301) |
 | 67,459 / 95,913 / 400,187 checks/s | one instance, leased: Zipf keys / one hot key / `CheckBatch` of 10 | matrix and its CheckBatch section |
 | 82,700 to 91,200 checks/s | gRPC alone, one instance | the ceiling of any limiter on this laptop |
