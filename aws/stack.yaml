@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Benchmark machines for the rate limiter thesis (aws/README.md): a Redis Cluster, limiter instances and
+  load generators in one private network, reachable by SSH from one address only. Every instance ends
+  itself after MaxMinutes; deleting the stack deletes everything it made.
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: the SSH key pair aws/kit.sh creates
+  SshCidr:
+    Type: String
+    AllowedPattern: '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/32$'
+    Description: the one address allowed to SSH in (yours, found by aws/kit.sh)
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Ubuntu 24.04, as the project is developed on
+  Zone:
+    Type: String
+    Default: ""
+    Description: an availability zone; empty for the region's first
+  RedisType:
+    Type: String
+    Default: c7i.large
+  LimiterType:
+    Type: String
+    Default: c7i.xlarge
+  LimiterCount:
+    Type: String
+    AllowedValues: ["1", "2", "4"]
+    Default: "4"
+  LoadgenType:
+    Type: String
+    Default: c7i.2xlarge
+  LoadgenCount:
+    Type: String
+    AllowedValues: ["1", "2"]
+    Default: "2"
+  MaxMinutes:
+    Type: Number
+    Default: 240
+    MinValue: 30
+    MaxValue: 720
+    Description: each instance shuts down, and so terminates, this long after it starts
+
+Conditions:
+  AnyZone: !Equals [!Ref Zone, ""]
+  TwoLimiters: !Not [!Equals [!Ref LimiterCount, "1"]]
+  FourLimiters: !Equals [!Ref LimiterCount, "4"]
+  TwoLoadgens: !Equals [!Ref LoadgenCount, "2"]
+
+Resources:
+  # ---- the network: public addresses for SSH, no NAT gateway (it would cost by the hour) ----
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: rl-bench}]
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref Vpc, InternetGatewayId: !Ref Gateway}
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone: !If [AnyZone, !Select [0, !GetAZs ""], !Ref Zone]
+      MapPublicIpOnLaunch: true
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref Vpc}
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties: {RouteTableId: !Ref Routes, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref Gateway}
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref Subnet, RouteTableId: !Ref Routes}
+
+  # ---- who may connect: SSH from one address; the machines to each other on any port ----
+  Group:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH from one address; everything between the benchmark machines
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref SshCidr}
+  GroupInside:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: {GroupId: !Ref Group, IpProtocol: "-1", SourceSecurityGroupId: !Ref Group}
+
+  # ---- every machine: the same image, disk, timer and settings ----
+  Nearby:
+    Type: AWS::EC2::PlacementGroup
+    Properties: {Strategy: cluster}  # one rack row: the network between them is short and steady
+  Template:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        KeyName: !Ref KeyName
+        InstanceInitiatedShutdownBehavior: terminate
+        MetadataOptions: {HttpTokens: required}
+        Placement: {GroupName: !Ref Nearby}
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+        NetworkInterfaces:
+          - {DeviceIndex: 0, SubnetId: !Ref Subnet, Groups: [!Ref Group], AssociatePublicIpAddress: true}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Ends this machine after ${MaxMinutes} minutes whatever happens: it terminates on shutdown.
+            shutdown -h +${MaxMinutes}
+        TagSpecifications:
+          - {ResourceType: instance, Tags: [{Key: Project, Value: rl-thesis-bench}]}
+          - {ResourceType: volume, Tags: [{Key: Project, Value: rl-thesis-bench}]}
+
+  Redis1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref RedisType
+      Tags: [{Key: Name, Value: rl-redis-1}]
+  Redis2:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref RedisType
+      Tags: [{Key: Name, Value: rl-redis-2}]
+  Redis3:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref RedisType
+      Tags: [{Key: Name, Value: rl-redis-3}]
+  Limiter1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LimiterType
+      Tags: [{Key: Name, Value: rl-limiter-1}]
+  Limiter2:
+    Type: AWS::EC2::Instance
+    Condition: TwoLimiters
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LimiterType
+      Tags: [{Key: Name, Value: rl-limiter-2}]
+  Limiter3:
+    Type: AWS::EC2::Instance
+    Condition: FourLimiters
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LimiterType
+      Tags: [{Key: Name, Value: rl-limiter-3}]
+  Limiter4:
+    Type: AWS::EC2::Instance
+    Condition: FourLimiters
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LimiterType
+      Tags: [{Key: Name, Value: rl-limiter-4}]
+  Loadgen1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LoadgenType
+      Tags: [{Key: Name, Value: rl-loadgen-1}]
+  Loadgen2:
+    Type: AWS::EC2::Instance
+    Condition: TwoLoadgens
+    Properties:
+      LaunchTemplate: {LaunchTemplateId: !Ref Template, Version: !GetAtt Template.LatestVersionNumber}
+      InstanceType: !Ref LoadgenType
+      Tags: [{Key: Name, Value: rl-loadgen-2}]

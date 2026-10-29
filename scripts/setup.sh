@@ -42,9 +42,14 @@ fetch() {  # fetch <url> <sha256> <file in the archive>
 [ -x ~/.local/bin/grpcurl ] || fetch https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
   588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214 grpcurl
 
-# Development Redis: cluster on 127.0.0.1:7001-7003, throwaway plain Redis on 127.0.0.1:6380.
-docker compose -f docker/docker-compose.dev.yml up -d
-redis-cli -p 7001 cluster info | grep cluster_state
-redis-cli -p 6380 ping
+# Development Redis: cluster on 127.0.0.1:7001-7003, throwaway plain Redis on 127.0.0.1:6380. Not on a
+# machine without Docker, such as the cloud benchmark's (aws/node/build.sh).
+if command -v docker >/dev/null; then
+  docker compose -f docker/docker-compose.dev.yml up -d
+  redis-cli -p 7001 cluster info | grep cluster_state
+  redis-cli -p 6380 ping
+else
+  echo "no Docker: the development Redis is not started"
+fi
 
 echo "setup done: now scripts/test.sh release"

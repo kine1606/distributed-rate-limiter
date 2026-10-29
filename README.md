@@ -67,6 +67,7 @@ tests/                  GoogleTest unit, script, integration, eval     tests/REA
 bench/                  Google Benchmark, load generator               bench/README.md
 docker/                 Redis Cluster + limiter instances              docker/README.md
 control/                Management API, billing, payments, portal      control/README.md
+aws/                    Benchmark on separate machines, on demand      aws/README.md
 scripts/                Setup, build, test, demos (demo_v2.py: merchants)
 examples/               Python gateway (API keys); Spring Boot notes   examples/gateway-springboot/README.md
 docs/                   ROADMAP, CUSTOMER_PLANS, DESIGN, EVALUATION, THESIS_PLAN, thesis/OUTLINE
