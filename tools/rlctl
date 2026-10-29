@@ -38,6 +38,17 @@ done
 cmd=${args[0]}
 [ -z "$merchant" ] || valid_merchant "$merchant" || die "merchant must be 1 to 64 of A-Z a-z 0-9 _ -"
 
+# Every change that succeeds goes to the merchant's audit log, as the management API's do
+# (control/rlcontrol/store.py audit_key); a platform customer (no merchant) has none.
+audit() {
+  local status=$? m=$merchant
+  case $cmd in show) return ;; merchant-add | merchant-revoke) m=${args[1]:-} ;; esac
+  if [ "$status" = 0 ] && [ -n "$m" ]; then
+    cli xadd "{rl:m:$m}:audit" MAXLEN '~' 10000 '*' actor rlctl action "$cmd" body "${args[*]:1}" >/dev/null || true
+  fi
+}
+trap audit EXIT
+
 # check_fields <field> <value>...: the fields a plan hash may hold, with values the limiter reads.
 check_fields() {
   [ $# -gt 0 ] && [ $(($# % 2)) = 0 ] || die "fields come in <field> <value> pairs"

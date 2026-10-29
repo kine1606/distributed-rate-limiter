@@ -458,8 +458,16 @@ TSan, the 39 of the control plane pass, and the property tests pass at 2,000 see
 ### Optional Week P5 (Nov 23 to 29): if the business layer runs long
 
 - [ ] Billing periods from the subscription date, and proration when a customer upgrades mid-period.
+      *Waits on the advisor (section 10, question 3).*
 - [ ] Payment webhooks and retries; a Vietnamese provider's sandbox if the faculty prefers one.
-- [ ] Hardening: key rotation, a limit on failed authentication, an audit log of every limit change.
+      *Waits on the advisor (section 10, question 2).*
+- [x] Hardening: key rotation, a limit on failed authentication, an audit log of every limit change.
+  - *Done (2026-10-29):* management keys rotated by the merchant; check keys revoked one at a time by id;
+    20 failed authentications a minute per client address, then 429; every successful change through
+    the API or `tools/rlctl` in the merchant's audit stream, with secrets masked (`control/README.md`).
+    4 API tests, each shown to fail with its bug planted.
+  - *Not done:* a failed-key limit on the limiter's gRPC side (a wrong key costs a hash and no Redis
+    call, measured in P4); an operator's view of a merchant's log (it reads the stream).
 - [ ] The AWS run, if the budget is agreed.
 
 ### Optional Week P6 (Nov 30 to Dec 6): buffer

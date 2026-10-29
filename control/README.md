@@ -100,6 +100,25 @@ The operator's check rate (`/v1/merchants/{id}/check-rate`) works the same way b
 of the merchant, before anything else, so that merchant's flood costs the others nothing. Both
 settings reach every limiter at once (`!merchants` on `plan-changes`).
 
+## Keys, failed sign-ins and the audit log (P5)
+
+- **Rotating keys.**
+  - *A merchant's management key:* `POST /v1/management-key` with the current key returns a new one,
+    shown once; the old one stops working at once.
+  - *Check keys:* each has an id (the start of its hash, returned when it is made). The operator rotates
+    one by adding a key (`POST /v1/merchants/{id}/check-keys`), moving the gateway to it, then revoking
+    the old one (`DELETE /v1/merchants/{id}/check-keys/{key id}`). `GET` on the same path lists the ids.
+- **Failed authentication is limited:** after 20 failures in a minute from one client address, the API
+  answers `429` with `Retry-After`, even for a right key, until the minute is over. Behind a reverse
+  proxy, run uvicorn with `--proxy-headers`, or every client shares the proxy's address.
+- **The audit log:** every change that succeeds goes to the merchant's stream `{rl:m:<id>}:audit`, about
+  the last 10,000 kept.
+  - *What is recorded:* who made the change (the merchant, the operator, or `tools/rlctl`), the method
+    and path, and the request body, with fields named like a secret, token, key or card masked.
+  - *Reading it:* `GET /v1/audit?after=<id>&limit=` gives the merchant its own log, oldest first.
+  - *The gap:* an entry is written just after the change, so a crash between them loses the entry,
+    not the change.
+
 ## Billing and payments (P3)
 
 `rlcontrol/billing.py` writes one invoice per customer and calendar month:

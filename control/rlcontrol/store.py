@@ -55,6 +55,17 @@ def payers_key(merchant):  # customer -> the payment provider's customer id; nev
     return f"{{rl:m:{merchant}}}:payers"
 
 
+def audit_key(merchant):  # a stream of every change to the merchant, through the API or tools/rlctl (P5)
+    return f"{{rl:m:{merchant}}}:audit"
+
+
+AUDIT_MAXLEN = 10_000  # the latest changes kept, about; XADD trims the rest
+
+
+def authfail_key(address):  # failed authentications from one client address, this minute (P5)
+    return f"{{rl:authfail:{address}}}"
+
+
 def idempotency_key(merchant, key):
     return f"{{rl:m:{merchant}}}:idem:{hashlib.sha256(key.encode()).hexdigest()}"
 
@@ -134,6 +145,21 @@ local units = tonumber(ARGV[1])
 if cur[2] == period then units = units + (tonumber(cur[1]) or 0) end
 redis.call('HSET', KEYS[1], 'topup', units, 'topup_period', period)
 return {units, period, redis.call('HGET', KEYS[1], 'topup_price') or '0'}
+"""
+
+# One failed authentication more from an address; the count lives ARGV[1] seconds from the first.
+AUTH_FAILED = """
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+return n
+"""
+
+# Replaces management key hash ARGV[1] by ARGV[2], for merchant ARGV[3], in one step.
+ROTATE = """
+if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[3] then return 0 end
+redis.call('HDEL', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
+return 1
 """
 
 # Suspends, remembering the plan, or resumes it; the numbers are kept either way.

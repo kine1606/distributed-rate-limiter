@@ -2,9 +2,11 @@
 between merchants, validation, plans, customers, custom limits, boosts, top-ups (idempotent), suspension,
 webhooks, and the usage it reports against what lua/quota.lua counted. Every merchant is new (random id)
 and every key it wrote is deleted afterwards."""
+import json
 import os
 import pathlib
 import secrets
+import subprocess
 import unittest
 from unittest import mock
 
@@ -37,10 +39,12 @@ class ApiTest(unittest.TestCase):
 
     def setUp(self):
         self.merchants = []
+        self.r.delete(store.authfail_key("testclient"))  # every TestClient call comes from this address
 
     def tearDown(self):
         for m in self.merchants:
-            for key in (store.catalog_key(m), store.webhook_key(m), store.purchases_key(m), store.customers_key(m)):
+            for key in (store.catalog_key(m), store.webhook_key(m), store.purchases_key(m), store.customers_key(m),
+                        store.audit_key(m)):
                 self.r.delete(key)
             for c in ("u1", "u2", "u3", "u4", "u5", "ghost"):
                 self.r.delete(store.plan_key(m, c))
@@ -237,6 +241,63 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.client.get(path, headers=self.op()).status_code, 404)
         self.assertEqual(self.client.delete("/v1/capacity", headers=auth).status_code, 204)
         self.assertIsNone(self.r.hget(store.CAPACITY_HASH, m))
+
+    # ---- hardening (P5): key rotation, failed authentication, the audit log ----
+
+    def test_a_merchant_rotates_its_management_key_and_the_old_one_stops_at_once(self):
+        _, auth, _ = self.new_merchant()
+        res = self.client.post("/v1/management-key", headers=auth)
+        self.assertEqual(res.status_code, 201, res.text)
+        new = {"Authorization": f"Bearer {res.json()['management_key']}"}
+        self.assertEqual(self.client.get("/v1/plans", headers=auth).status_code, 401)
+        self.assertEqual(self.client.get("/v1/plans", headers=new).status_code, 200)
+
+    def test_check_keys_are_rotated_one_at_a_time(self):
+        m, _, created = self.new_merchant()
+        path = f"/v1/merchants/{m}/check-keys"
+        added = self.client.post(path, headers=self.op()).json()
+        ids = self.client.get(path, headers=self.op()).json()["check_key_ids"]
+        self.assertEqual(sorted(ids), sorted([created["check_key_id"], added["check_key_id"]]))
+        self.assertEqual(self.client.delete(f"{path}/{created['check_key_id']}", headers=self.op()).json()["revoked"], 1)
+        self.assertEqual(self.r.hget(store.KEYS_HASH, store.sha256_hex(created["check_key"])), None)  # the old one
+        self.assertEqual(self.r.hget(store.KEYS_HASH, store.sha256_hex(added["check_key"])), m)  # the new one stays
+        self.assertEqual(self.client.delete(f"{path}/{created['check_key_id']}", headers=self.op()).status_code, 404)
+
+    def test_failed_authentications_are_limited_per_address(self):
+        _, auth, _ = self.new_merchant()
+        wrong = {"Authorization": "Bearer rlm_" + "0" * 48}
+        for _ in range(20):
+            self.assertEqual(self.client.get("/v1/plans", headers=wrong).status_code, 401)
+        self.assertGreater(self.r.ttl(store.authfail_key("testclient")), 0)  # the count expires
+        res = self.client.get("/v1/plans", headers=auth)  # even a right key, from that address
+        self.assertEqual(res.status_code, 429)
+        self.assertGreater(int(res.headers["Retry-After"]), 0)
+        self.assertEqual(self.client.get("/v1/merchants", headers=self.op()).status_code, 429)  # the operator's too
+
+    def test_every_change_is_in_the_merchants_audit_log_with_secrets_masked(self):
+        m, auth, _ = self.new_merchant()
+        self.with_plan(auth)
+        self.client.post("/v1/customers", json={"id": "u1", "plan": "basic"}, headers=auth)
+        self.client.patch("/v1/customers/u1/limits", json={"daily": 7}, headers=auth)
+        self.client.patch("/v1/customers/ghost/limits", json={"daily": 7}, headers=auth)  # 404: not a change
+        self.client.get("/v1/customers/u1", headers=auth)  # a read: not a change
+        with mock.patch("rlcontrol.webhooks.check_url", return_value="93.184.216.34"):
+            self.client.put("/v1/webhook", json={"url": "https://hooks.example/x", "secret": "s" * 20}, headers=auth)
+        self.client.put(f"/v1/merchants/{m}/check-rate", json={"rate": 50}, headers=self.op())
+        tool = subprocess.run([str(ROOT / "tools/rlctl"), "--merchant", m, "boost", "u1", "100", "60"],
+                              capture_output=True, text=True)
+        self.assertEqual(tool.returncode, 0, tool.stderr)
+        rows = self.client.get("/v1/audit", headers=auth).json()["entries"]
+        self.assertEqual([(e["actor"], e["action"]) for e in rows], [
+            ("operator", "POST /v1/merchants"), ("merchant", "PUT /v1/plans/basic"), ("merchant", "POST /v1/customers"),
+            ("merchant", "PATCH /v1/customers/u1/limits"), ("merchant", "PUT /v1/webhook"),
+            ("operator", f"PUT /v1/merchants/{m}/check-rate"), ("rlctl", "boost")])
+        self.assertEqual(json.loads(rows[3]["body"]), {"daily": 7})
+        self.assertEqual(json.loads(rows[4]["body"]), {"url": "https://hooks.example/x", "secret": "***"})
+        self.assertEqual(rows[6]["body"], "u1 100 60")
+        page = self.client.get(f"/v1/audit?after={rows[1]['id']}&limit=2", headers=auth).json()
+        self.assertEqual([e["id"] for e in page["entries"]], [rows[2]["id"], rows[3]["id"]])
+        self.assertEqual(page["next"], rows[3]["id"])
 
     # ---- the customer list, usage and the portal (the portal's prerequisites) ----
 

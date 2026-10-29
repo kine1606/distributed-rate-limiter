@@ -16,11 +16,13 @@ a gateway that leaks its key cannot change plans.
 """
 import hmac
 import json
+import logging
 import os
 import pathlib
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Response, status
+import anyio
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from redis.cluster import RedisCluster
@@ -149,6 +151,56 @@ def terms_view(fields):
             **{name: int(fields.get(name, 0)) for name in store.PRICE_FIELDS}}
 
 
+AUTH_FAILURES, AUTH_WINDOW_S = 20, 60  # failed authentications a client address may make a minute (P5)
+AUDIT_MASKED = ("secret", "token", "key", "card")  # body fields whose values never reach the audit log
+
+
+class AuditLog:
+    """Every change the API makes (a request other than GET under /v1/ that succeeds) goes to the
+    merchant's audit stream: who, what, and the request body with secrets masked. A middleware, so no
+    endpoint can be left out. The merchant is the one authenticated, else the `mid` in the path."""
+
+    def __init__(self, app, redis):
+        self.app, self.r = app, redis
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in ("GET", "HEAD", "OPTIONS") or not scope["path"].startswith("/v1/"):
+            return await self.app(scope, receive, send)
+        body, statuses = bytearray(), []
+
+        async def receive_body():
+            message = await receive()
+            if message["type"] == "http.request" and len(body) < 4096:
+                body.extend(message.get("body", b""))
+            return message
+
+        async def send_status(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+            await send(message)
+
+        await self.app(scope, receive_body, send_status)
+        state = scope.get("state") or {}
+        merchant = state.get("merchant") or (scope.get("path_params") or {}).get("mid")
+        if statuses and statuses[0] < 400 and merchant:
+            await anyio.to_thread.run_sync(self.write, merchant, state.get("actor", "unknown"),
+                                           f"{scope['method']} {scope['path']}", bytes(body))
+
+    def write(self, merchant, actor, action, body):
+        try:
+            data = json.loads(body) if body else {}
+            if isinstance(data, dict):
+                data = {k: "***" if any(w in k.lower() for w in AUDIT_MASKED) else v for k, v in data.items()}
+            text = json.dumps(data, separators=(",", ":"))
+        except ValueError:
+            text = '"(not JSON)"'
+        try:
+            self.r.xadd(store.audit_key(merchant), {"actor": actor, "action": action, "body": text[:2000]},
+                        maxlen=store.AUDIT_MAXLEN, approximate=True)
+        except Exception:  # the change is made; a lost audit entry must not hide that
+            logging.getLogger(__name__).exception("audit entry lost: %s %s", merchant, action)
+
+
 def create_app(redis=None, admin_token=None, provider=None):
     admin_token = admin_token if admin_token is not None else os.environ.get("RL_ADMIN_TOKEN", "")
     if len(admin_token) < 16:
@@ -159,26 +211,49 @@ def create_app(redis=None, admin_token=None, provider=None):
     r = redis
     provider = provider if provider is not None else payments.SandboxProvider(r)
     scripts = {name: r.register_script(getattr(store, name))
-               for name in ("CREATE", "APPLY", "UPDATE", "BOOST", "TOPUP", "SUSPEND", "RESUME")}
+               for name in ("CREATE", "APPLY", "UPDATE", "BOOST", "TOPUP", "SUSPEND", "RESUME", "AUTH_FAILED", "ROTATE")}
 
     app = FastAPI(title="Rate limiter management API",
                   description="Plans, customers, limits, boosts and top-ups of one merchant; merchants for the operator.",
                   version="1.0")
+    app.add_middleware(AuditLog, redis=r)
 
     def bearer(authorization):
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer credential")
-        return authorization[len("Bearer "):]
+        return authorization[len("Bearer "):] if authorization and authorization.startswith("Bearer ") else ""
 
-    def operator(authorization: Optional[str] = Header(None)):
-        if not hmac.compare_digest(bearer(authorization).encode(), admin_token.encode()):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not the operator")
+    def authenticate(request, authorization, owner, refused):
+        """Who `owner(token)` says the bearer token belongs to, or 401. Failures are counted per client
+        address, and an address past AUTH_FAILURES a minute gets 429 before its token is even looked at."""
+        # shortcut: behind a proxy every client shares its address; run uvicorn with --proxy-headers there.
+        failures = store.authfail_key(request.client.host if request.client else "unknown")
+        if int(r.get(failures) or 0) >= AUTH_FAILURES:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many failed authentications; try again later",
+                                headers={"Retry-After": str(max(1, r.ttl(failures)))})
+        token = bearer(authorization)
+        who = owner(token) if token else None
+        if who is None:
+            scripts["AUTH_FAILED"](keys=[failures], args=[AUTH_WINDOW_S])
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, refused)
+        return who
 
-    def merchant(authorization: Optional[str] = Header(None)) -> str:
-        m = r.hget(store.ADMIN_HASH, store.sha256_hex(bearer(authorization)))
-        if m is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "unknown management key")
+    def operator(request: Request, authorization: Optional[str] = Header(None)):
+        authenticate(request, authorization, lambda t: hmac.compare_digest(t.encode(), admin_token.encode()) or None,
+                     "not the operator")
+        request.state.actor = "operator"
+
+    def merchant(request: Request, authorization: Optional[str] = Header(None)) -> str:
+        m = authenticate(request, authorization, lambda t: r.hget(store.ADMIN_HASH, store.sha256_hex(t)),
+                         "unknown management key")
+        request.state.actor, request.state.merchant = "merchant", m
         return m
+
+    KEY_ID = 12  # hex digits of a key's hash that name it
+
+    def key_id(key):
+        return store.sha256_hex(key)[:KEY_ID]
+
+    def check_key_hashes(mid):
+        return [h for h, owner in r.hgetall(store.KEYS_HASH).items() if owner == mid]
 
     def run(name, m, customer, args=()):
         return scripts[name](keys=[store.plan_key(m, customer)], args=list(args))
@@ -223,14 +298,15 @@ def create_app(redis=None, admin_token=None, provider=None):
     # ---- the operator ----
 
     @app.post("/v1/merchants", status_code=201, dependencies=[Depends(operator)])
-    def create_merchant(body: MerchantCreate):
+    def create_merchant(body: MerchantCreate, request: Request):
         if not r.hsetnx(store.MERCHANTS, body.id, store.now_ms(r)):
             raise HTTPException(status.HTTP_409_CONFLICT, "merchant exists")
+        request.state.merchant = body.id  # whose audit log records the creation
         check, manage = store.new_key("rl_"), store.new_key("rlm_")
         r.hset(store.KEYS_HASH, store.sha256_hex(check), body.id)
         r.hset(store.ADMIN_HASH, store.sha256_hex(manage), body.id)
         r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
-        return {"id": body.id, "check_key": check, "management_key": manage,
+        return {"id": body.id, "check_key": check, "check_key_id": key_id(check), "management_key": manage,
                 "note": "the keys are shown once; only their hashes are stored"}
 
     @app.get("/v1/merchants", dependencies=[Depends(operator)])
@@ -244,7 +320,23 @@ def create_app(redis=None, admin_token=None, provider=None):
         check = store.new_key("rl_")
         r.hset(store.KEYS_HASH, store.sha256_hex(check), mid)
         r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
-        return {"id": mid, "check_key": check}
+        return {"id": mid, "check_key": check, "check_key_id": key_id(check)}
+
+    @app.get("/v1/merchants/{mid}/check-keys", dependencies=[Depends(operator)])
+    def list_check_keys(mid: str = Path(pattern=MERCHANT)):
+        """The ids of the merchant's check keys (the start of each key's hash), to revoke one by one."""
+        return {"id": mid, "check_key_ids": sorted(h[:KEY_ID] for h in check_key_hashes(mid))}
+
+    @app.delete("/v1/merchants/{mid}/check-keys/{kid}", dependencies=[Depends(operator)])
+    def revoke_check_key(mid: str = Path(pattern=MERCHANT), kid: str = Path(pattern=r"^[0-9a-f]{12}$")):
+        """Revokes one check key, so a key can be rotated: add a new one, move the gateway to it, revoke
+        the old one. Every limiter refuses it at its next call."""
+        mine = [h for h in check_key_hashes(mid) if h.startswith(kid)]
+        if not mine:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such check key")
+        r.hdel(store.KEYS_HASH, *mine)
+        r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)
+        return {"id": mid, "revoked": len(mine)}
 
     @app.put("/v1/merchants/{mid}/check-rate", dependencies=[Depends(operator)])
     def put_check_rate(body: CheckRate, mid: str = Path(pattern=MERCHANT)):
@@ -271,11 +363,32 @@ def create_app(redis=None, admin_token=None, provider=None):
 
     @app.delete("/v1/merchants/{mid}/check-keys", dependencies=[Depends(operator)])
     def revoke_check_keys(mid: str = Path(pattern=MERCHANT)):
-        mine = [h for h, owner in r.hgetall(store.KEYS_HASH).items() if owner == mid]
+        mine = check_key_hashes(mid)
         if mine:
             r.hdel(store.KEYS_HASH, *mine)
         r.publish(store.CHANNEL, store.MERCHANTS_CHANGED)  # every limiter drops them at once
         return {"id": mid, "revoked": len(mine)}
+
+    # ---- a merchant: its management key and its audit log (P5) ----
+
+    @app.post("/v1/management-key", status_code=201)
+    def rotate_management_key(authorization: Optional[str] = Header(None), m: str = Depends(merchant)):
+        """Replaces the management key this call is made with. The new key is shown once; the old one
+        stops working at once."""
+        new = store.new_key("rlm_")
+        if not scripts["ROTATE"](keys=[store.ADMIN_HASH],
+                                 args=[store.sha256_hex(bearer(authorization)), store.sha256_hex(new), m]):
+            raise HTTPException(status.HTTP_409_CONFLICT, "the key was changed meanwhile")
+        return {"id": m, "management_key": new, "note": "shown once; the previous key no longer works"}
+
+    @app.get("/v1/audit")
+    def audit(after: str = Query("", pattern=r"^(\d+-\d+)?$", description="the last id of the previous page"),
+              limit: int = Query(50, ge=1, le=200), m: str = Depends(merchant)):
+        """Every change to this merchant, oldest first: through this API (by the merchant or the operator)
+        or tools/rlctl, with the request's body, secrets masked. About the last 10,000 are kept."""
+        entries = r.xrange(store.audit_key(m), min=f"({after}" if after else "-", max="+", count=limit)
+        rows = [{"id": i, "at_ms": int(i.split("-")[0]), **fields} for i, fields in entries]
+        return {"entries": rows, "next": rows[-1]["id"] if len(rows) == limit else None}
 
     # ---- a merchant: plans ----
 
