@@ -4,14 +4,19 @@
 // a failure. Needs a running management API and a merchant seeded by tests/eval/portal_seed.py:
 //   node tests/eval/portal_ui.mjs <portal url> <management key> <screenshot folder>
 import { spawn } from "node:child_process";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const [, , url, key, outDir] = process.argv;
+const profile = mkdtempSync(join(tmpdir(), "portal-"));
 const chrome = spawn(process.env.CHROME || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  ["--headless=new", `--remote-debugging-port=${process.env.CDP_PORT || 9334}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "portal-"))}`,
+  ["--headless=new", `--remote-debugging-port=${process.env.CDP_PORT || 9334}`, `--user-data-dir=${profile}`,
    "--window-size=1280,900", "about:blank"], {stdio: "ignore"});
-process.on("exit", () => chrome.kill());  // also when a step throws
+process.on("exit", () => {  // also when a step throws
+  chrome.kill();
+  // Chrome holds the profile (EBUSY) for a moment after kill(); a failed removal must not fail the run.
+  try { rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 200}); } catch {}
+});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let targets;
 for (let i = 0; i < 50; i++) { try { targets = await (await fetch(`http://127.0.0.1:${process.env.CDP_PORT || 9334}/json`)).json(); break; } catch { await sleep(200); } }
