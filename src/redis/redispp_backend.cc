@@ -14,6 +14,7 @@
 
 #include "ratelimiter/clock.h"
 #include "redis/keys.h"
+#include "redis/redis_auth.h"
 
 namespace ratelimiter {
 namespace {
@@ -90,6 +91,7 @@ sw::redis::ConnectionOptions Options(const std::string& host, int port, std::chr
   o.port = port;
   o.connect_timeout = timeout;  // no longer than a call: a dead node must fail fast, not on connect
   o.socket_timeout = timeout;   // an idle timeout per connection, not per command: ResilientBackend adds the deadline
+  SetRedisAuth(o);
   return o;
 }
 

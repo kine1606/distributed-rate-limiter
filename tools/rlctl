@@ -110,6 +110,7 @@ esac
 customer=${args[1]}
 # The limiter accepts keys of 1 to 128 bytes (src/server/convert.h); the hash tag is built the same way.
 [ "${#customer}" -ge 1 ] && [ "${#customer}" -le 128 ] || die "customer must be 1 to 128 bytes"
+[[ $customer != *[{}]* ]] || die "customer may not contain { or } (the limiter refuses them: src/server/convert.h)"
 id=$customer
 [ -z "$merchant" ] || id="$merchant|$customer"
 key="{$id}:plan"

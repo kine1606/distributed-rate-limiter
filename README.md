@@ -105,7 +105,7 @@ you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scr
 ```bash
 # args: [listen] [rules.yaml] [redis host:port] [lua dir] [engine: leased | strict | allow_all]
 # redis = any node of the cluster (default 127.0.0.1:7001, the dev cluster)
-./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:7001 lua leased
+./build/release/rate_limiter_server 127.0.0.1:50051 config/rules.yaml 127.0.0.1:7001 lua leased
 grpcurl -plaintext -d '{"key":"cust:42","rule":"daily_quota"}' localhost:50051 ratelimiter.v1.RateLimiter/Check
 ```
 

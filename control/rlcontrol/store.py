@@ -3,6 +3,7 @@ server reads (src/plan/plan.h), and the atomic writes. Every change to a custome
 script on the customer's own hash, then announced on plan-changes, as tools/rlctl does, so every
 limiter drops its cached plan and local denial at once."""
 import hashlib
+import os
 import re
 import secrets
 import time
@@ -92,6 +93,15 @@ def quota_key(merchant, customer):  # src/redis/keys.h, RedisKey
 
 def counter_key(limiter_id):  # the quota counter of a customer as the limiter names it ("acme|u42")
     return f"{{{limiter_id}}}:{QUOTA_RULE}:q"
+
+
+def connect():
+    """The Redis Cluster at RL_REDIS (default 127.0.0.1:7001), with RL_REDIS_USER and RL_REDIS_PASSWORD
+    when Redis requires them, as the limiter reads them (src/redis/redis_auth.h)."""
+    from redis.cluster import RedisCluster  # here, so this module imports without a Redis client
+    host, port = os.environ.get("RL_REDIS", "127.0.0.1:7001").rsplit(":", 1)
+    return RedisCluster(host=host, port=int(port), decode_responses=True,
+                        username=os.environ.get("RL_REDIS_USER") or None, password=os.environ.get("RL_REDIS_PASSWORD") or None)
 
 
 def sha256_hex(s):

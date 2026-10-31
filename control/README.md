@@ -19,6 +19,10 @@ RL_REDIS=127.0.0.1:7001 control/.venv/bin/python -m rlcontrol.notifier          
 RL_TENANCY=merchants build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:7001
 ```
 
+A Redis that requires a password or an ACL user (it should, outside a private network): set
+`RL_REDIS_PASSWORD` (and `RL_REDIS_USER`) for the API, the notifier, the billing job and the limiter alike;
+`redis-cli` and `tools/rlctl` read `REDISCLI_AUTH`.
+
 ## The API
 
 There are two callers, each with its own bearer credential.

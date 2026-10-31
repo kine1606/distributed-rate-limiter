@@ -62,6 +62,7 @@ void MetricsExposer::Run(std::stop_token stop) {
     if (c < 0) continue;
     const timeval limit{1, 0};  // a scraper that sends nothing must not hold the thread
     ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof limit);
+    ::setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &limit, sizeof limit);  // nor one that never reads
     char buf[2048];
     const ssize_t n = ::recv(c, buf, sizeof buf, 0);
     const std::string_view request(buf, n > 0 ? static_cast<std::size_t>(n) : 0);

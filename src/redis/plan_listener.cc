@@ -8,6 +8,8 @@
 #include <spdlog/spdlog.h>
 #include <sw/redis++/redis++.h>
 
+#include "redis/redis_auth.h"
+
 namespace ratelimiter {
 
 PlanListener::PlanListener(std::string host, int port, std::function<void(std::string_view)> on_change,
@@ -24,6 +26,7 @@ void PlanListener::Run(std::stop_token stop) {
   o.port = port_;
   o.connect_timeout = std::chrono::milliseconds(200);
   o.socket_timeout = std::chrono::milliseconds(200);  // consume() returns this often to see `stop`
+  SetRedisAuth(o);
   bool failing = false;
   while (!stop.stop_requested()) {
     try {

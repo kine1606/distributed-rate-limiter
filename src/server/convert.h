@@ -18,6 +18,10 @@ inline const char* Invalid(const v1::CheckRequest& r) {
   if (r.key().size() > kMaxIdBytes || r.rule().size() > kMaxIdBytes || r.request_id().size() > kMaxIdBytes) {
     return "key, rule and request_id are at most 128 bytes";
   }
+  // Redis Cluster hashes the text between the key's first { and the next }: a key starting with } would
+  // leave that empty and spread one customer's keys over masters, where its scripts fail as CROSSSLOT
+  // and a fail-open plan admits uncounted (src/redis/keys.h).
+  if (r.key().find_first_of("{}") != std::string::npos) return "key may not contain { or }";
   return nullptr;
 }
 

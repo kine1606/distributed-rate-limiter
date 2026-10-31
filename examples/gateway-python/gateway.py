@@ -104,7 +104,7 @@ class Gateway(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--listen", default="0.0.0.0:8080")
+    ap.add_argument("--listen", default="127.0.0.1:8080")  # this machine: its demo keys are public
     ap.add_argument("--limiter", default="127.0.0.1:50051")
     args = ap.parse_args()
 

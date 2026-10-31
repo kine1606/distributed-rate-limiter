@@ -20,7 +20,6 @@ import argparse
 import csv
 import io
 import json
-import os
 import sys
 from collections import defaultdict
 
@@ -307,10 +306,8 @@ def main(argv=None):
     rc.add_argument("files", nargs="+")
     args = p.parse_args(argv)
 
-    from redis.cluster import RedisCluster  # here, so the module imports without a cluster client
     from .payments import SandboxProvider
-    host, port = os.environ.get("RL_REDIS", "127.0.0.1:7001").rsplit(":", 1)
-    r = RedisCluster(host=host, port=int(port), decode_responses=True)
+    r = store.connect()
     if args.command == "close":
         month = periods.month_id(args.month) if args.month else periods.month_of(store.now_ms(r)) - 1
         print(json.dumps(close(r, month, None if args.no_charge else SandboxProvider(r), args.merchant)))

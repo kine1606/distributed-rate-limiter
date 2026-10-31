@@ -25,7 +25,6 @@ import anyio
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from redis.cluster import RedisCluster
 
 from . import billing, payments, periods, store, webhooks
 
@@ -214,8 +213,7 @@ def create_app(redis=None, admin_token=None, provider=None, payment_secret=None)
     if len(admin_token) < 16:
         raise RuntimeError("RL_ADMIN_TOKEN must be set, at least 16 characters")
     if redis is None:
-        host, port = os.environ.get("RL_REDIS", "127.0.0.1:7001").rsplit(":", 1)
-        redis = RedisCluster(host=host, port=int(port), decode_responses=True)
+        redis = store.connect()
     r = redis
     provider = provider if provider is not None else payments.SandboxProvider(r)
     scripts = {name: r.register_script(getattr(store, name))

@@ -73,6 +73,14 @@ system Redis on 6379 is never touched.
 | Published ports bound to `127.0.0.1` (dev and fault Redis, the three limiters) | These Redis instances have no password, and the limiters no TLS or API key unless configured: on all interfaces, anyone on the same network could rewrite plans or flush the data. WSL still reaches them | security pass |
 | AOF with `appendfsync everysec` in `docker-compose.yml` and the fault cluster (not the dev cluster, which benchmarks flush) | The quota counters are what customers are billed for: a restarted node keeps them, less at most the last second. Replication stays asynchronous, so a killed master can still lose what it had not passed on; the P3 gate measures that | P3 |
 
+## Security of the deployment
+
+- The limiter's ports are bound to 127.0.0.1: without `RL_TENANCY=merchants` a caller is not
+  authenticated, so whoever reaches a port could spend any customer's quota.
+- The limiter's image runs as an unprivileged user (`limiter`, uid 10001), not root.
+- Redis here has no password and is reachable only on the compose network. For a Redis anyone else can
+  reach, give it `--requirepass` (or ACL users) and the limiter `RL_REDIS_PASSWORD` (and `RL_REDIS_USER`).
+
 ## Fault injection commands
 
 ```bash

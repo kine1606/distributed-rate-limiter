@@ -36,6 +36,15 @@ TEST(Convert, KeyRuleAndRequestIdAreCappedAt128Bytes) {
   EXPECT_NE(Invalid(Req("k", std::string(129, 'r'))), nullptr);  // a rule name is looked up and hashed on every check
 }
 
+// Security review 2026-10-31: a key starting with } left Redis Cluster an empty hash tag, so one
+// customer's keys spread over masters and quota.lua failed as CROSSSLOT, which a fail-open plan admits.
+TEST(Convert, AKeyCannotCarryAHashTag) {
+  for (const char* key : {"}x", "{x}", "a{b", "a}b", "cust:42}"}) {
+    EXPECT_STREQ(Invalid(Req(key, "api_default")), "key may not contain { or }") << key;
+  }
+  EXPECT_EQ(Invalid(Req("cust:42", "api_default", "req-{1}")), nullptr);  // a request id sits after the tag
+}
+
 TEST(Convert, ZeroCostMeansOne) {
   auto r = Req("k", "r");
   EXPECT_EQ(ToDomain(r).cost, 1u);

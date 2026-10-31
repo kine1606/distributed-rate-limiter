@@ -12,12 +12,10 @@ import concurrent.futures
 import hashlib
 import json
 import logging
-import os
 import threading
 import time
 
 import httpx
-from redis.cluster import RedisCluster
 
 from . import store, webhooks
 
@@ -110,8 +108,7 @@ class Notifier:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    host, port = os.environ.get("RL_REDIS", "127.0.0.1:7001").rsplit(":", 1)
-    notifier = Notifier(RedisCluster(host=host, port=int(port), decode_responses=True))
+    notifier = Notifier(store.connect())
     try:
         notifier.run()
     except KeyboardInterrupt:

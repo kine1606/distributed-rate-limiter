@@ -80,6 +80,8 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 }  // namespace
 
 // Usage: rate_limiter_server [listen] [rules.yaml] [redis cluster node host:port] [lua dir] [engine]
+//   listen defaults to 127.0.0.1:50051: without RL_TENANCY no caller is authenticated, so another address
+//   is for a private network only, and the server warns at start.
 //   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
 //   Redis; measures pure gRPC overhead). With leased and strict, customer rules (burst then quota,
 //   config/rules.yaml) go through CompositeCore.
@@ -91,13 +93,15 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
 //        RL_TLS_CERT and RL_TLS_KEY (PEM files: TLS for every call; unset: plain text),
+//        RL_REDIS_USER and RL_REDIS_PASSWORD (Redis AUTH or an ACL user; src/redis/redis_auth.h),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below), RL_ABLATE (ablation only)
 //   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
   // gRPC's mutexes are abseil's, and Ubuntu's abseil checks every lock for deadlock cycles: 2.7% of
   // the server's CPU went to GraphCycles alone under load (perf, 2026-10-23). A server needs no such check.
   absl::SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
-  const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
+  // Loopback unless told otherwise: without RL_TENANCY a caller is not authenticated at all.
+  const std::string listen = argc > 1 ? argv[1] : "127.0.0.1:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
   const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:7001";
   const std::string lua_dir = argc > 4 ? argv[4] : "lua";
@@ -167,6 +171,11 @@ int main(int argc, char** argv) {
     credentials = grpc::SslServerCredentials(tls);
   } else if (const char* tenancy = std::getenv("RL_TENANCY"); tenancy != nullptr && *tenancy != '\0') {
     spdlog::warn("no TLS (RL_TLS_CERT): merchants' API keys travel in plain text");
+  }
+  if (const char* tenancy = std::getenv("RL_TENANCY"); (tenancy == nullptr || *tenancy == '\0') &&
+      !listen.starts_with("127.") && !listen.starts_with("localhost:") && !listen.starts_with("[::1]:")) {
+    spdlog::warn("listening on {} with no caller authentication: whoever reaches it can check, and so use up, any "
+                 "customer's quota. Keep it on a private network, or use RL_TENANCY=merchants (API keys)", listen);
   }
   // RL_ABLATE=<a,b>: mechanisms switched off for the Week 7 ablation study (bench/ablation.sh), never in
   // production: early_refill, adaptive_chunk, deny_cache.
