@@ -44,9 +44,9 @@ def summarise(lines):
 def report(total, self_by, inside):
     out = [f"sample weight (perf periods): {total}", "| Category (leaf frame) | Self time |", "| --- | --- |"]
     for cat, n in sorted(self_by.items(), key=lambda kv: -kv[1]):
-        out.append(f"| {cat} | {100 * n / total:.1f}% |")
+        out.append(f"| {cat} | {100 * n / max(1, total):.1f}% |")
     out.append("")
-    out += [f"inside {c}: {100 * n / total:.1f}% of samples" for c, n in inside.items()]
+    out += [f"inside {c}: {100 * n / max(1, total):.1f}% of samples" for c, n in inside.items()]
     return "\n".join(out) + "\n"
 
 

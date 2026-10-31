@@ -14,6 +14,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <thread>
+#include <vector>
 
 namespace ratelimiter {
 namespace {
@@ -132,6 +134,72 @@ TEST(MetricsExposer, ABadAddressOrAPortInUseThrows) {
   MetricsExposer first("127.0.0.1:0", [] { return std::string(); });
   EXPECT_THROW(MetricsExposer("127.0.0.1:" + std::to_string(first.port()), [] { return std::string(); }),
                std::runtime_error);
+}
+
+// ---- Week 5 edge cases (2026-11-01): the latency histogram at its bounds ----
+
+std::string Rendered(const Histogram& h) {
+  std::string out;
+  h.Render(out, "h", "r=\"x\"");
+  return out;
+}
+bool Has(const std::string& out, const std::string& line) { return out.find(line + "\n") != std::string::npos; }
+
+TEST(Metrics, AValueExactlyOnABoundCountsInThatBucket) {  // Prometheus: le is "less than or equal"
+  Histogram h;
+  h.Observe(50'000);     // 50 µs
+  h.Observe(1'000'000);  // 1 ms
+  const std::string out = Rendered(h);
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"5e-05\"} 1")) << out;
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"0.0005\"} 1")) << out;
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"0.001\"} 2")) << out;
+}
+
+TEST(Metrics, OneNanosecondAboveABoundCountsInTheNext) {
+  Histogram h;
+  h.Observe(50'001);
+  const std::string out = Rendered(h);
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"5e-05\"} 0")) << out;
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"0.0001\"} 1")) << out;
+}
+
+TEST(Metrics, ANegativeDurationCountsInTheFirstBucketAndAddsNothingToTheSum) {  // a clock that stepped back
+  Histogram h;
+  h.Observe(-5'000);
+  const std::string out = Rendered(h);
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"5e-05\"} 1")) << out;
+  EXPECT_TRUE(Has(out, "h_sum{r=\"x\"} 0")) << out;
+  EXPECT_TRUE(Has(out, "h_count{r=\"x\"} 1")) << out;
+}
+
+TEST(Metrics, AnEmptyHistogramRendersEveryBucketAtZero) {
+  const std::string out = Rendered(Histogram{});
+  std::size_t buckets = 0;
+  for (std::size_t at = out.find("h_bucket"); at != std::string::npos; at = out.find("h_bucket", at + 1)) ++buckets;
+  EXPECT_EQ(buckets, Histogram::kBounds.size() + 1);  // the bounds and +Inf
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"+Inf\"} 0")) << out;
+  EXPECT_TRUE(Has(out, "h_count{r=\"x\"} 0")) << out;
+}
+
+TEST(Metrics, OneSecondIsTheLastBoundAndAboveItOnlyInfCounts) {
+  Histogram h;
+  h.Observe(1'000'000'000);
+  h.Observe(1'000'000'001);
+  const std::string out = Rendered(h);
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"1\"} 1")) << out;
+  EXPECT_TRUE(Has(out, "h_bucket{r=\"x\",le=\"+Inf\"} 2")) << out;
+}
+
+TEST(Metrics, ConcurrentObservationsAreAllCounted) {
+  Histogram h;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 8; ++t) {
+    threads.emplace_back([&h] {
+      for (int i = 0; i < 10'000; ++i) h.Observe(i * 1'000);
+    });
+  }
+  for (auto& t : threads) t.join();
+  EXPECT_TRUE(Has(Rendered(h), "h_count{r=\"x\"} 80000"));
 }
 
 }  // namespace

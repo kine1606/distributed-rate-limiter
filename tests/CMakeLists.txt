@@ -26,3 +26,6 @@ endforeach()
 gtest_discover_tests(rl_unit_tests PROPERTIES LABELS unit)
 gtest_discover_tests(rl_redis_tests PROPERTIES LABELS redis)
 gtest_discover_tests(rl_integration_tests PROPERTIES LABELS integration)
+# Weeks 5 to 9: the evaluation tools the thesis numbers come from (Python's unittest, one ctest entry).
+add_test(NAME tools_py COMMAND python3 -m unittest -q tools_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(tools_py PROPERTIES LABELS unit ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)
