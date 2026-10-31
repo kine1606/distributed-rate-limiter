@@ -1,4 +1,4 @@
-# Defense sheet: final numbers and evidence (2026-10-24, merchants added 2026-10-28)
+# Defense sheet: final numbers and evidence (2026-10-24; merchants 2026-10-28; P5 and security 2026-10-31)
 
 This sheet updates `Thesis_Defense_Brief.docx`: its "numbers to know by heart" with the final values,
 and each of its questions with the measurement that answers it. Every number has a source in
@@ -22,7 +22,7 @@ and each of its questions with the measurement that answers it. Every number has
 | 16,384 | Redis Cluster hash slots | a customer's keys share one slot by hash tag |
 | 3 masters | test cluster | 3 + 3 replicas for fault tests |
 | 64 bytes | lease alignment | 14 times faster per-thread counters at 16 threads (microbenchmark); within noise in the whole server (ablation) |
-| 281 tests | release, ASan, TSan | 217 unit, 43 against a real Redis, 21 integration; plus 48 of the control plane (Python); 97.1% line coverage |
+| 282 tests | release, ASan, TSan | 218 unit, 43 against a real Redis, 21 integration; plus 48 of the control plane (Python); 97.1% line coverage |
 | 42,065 checks/s | one instance, strict, uniform keys | matrix, pinned (Week 2's ghz baseline: 25,301) |
 | 67,459 / 95,913 / 400,187 checks/s | one instance, leased: Zipf keys / one hot key / `CheckBatch` of 10 | matrix and its CheckBatch section |
 | 82,700 to 91,200 checks/s | gRPC alone, one instance | the ceiling of any limiter on this laptop |
@@ -48,6 +48,17 @@ Evidence: `p4_merchants_2026-10-28.md` and `p3_gate_2026-10-25.md`; Chapter 5.12
 | 25,749 calls/s | one limiter, a random merchant and customer per call, a million customers | 5.12 |
 | 37 ms | a new merchant's key working after it is announced, with 10,000 loaded | 5.12 |
 | +2.1%, −3.9% | tenancy, and tenancy with a capacity and check rate, against none: within the ±10% noise | Table 5.19 |
+
+## P5 and security (2026-10-31): numbers to know
+
+| Number | What it is | Source |
+| --- | --- | --- |
+| day 1 to 28 | a customer's billing day when the merchant bills from subscription dates (29th to 31st: the 28th); 1 is the calendar month | 3.9.6, `lua/quota.lua` ARGV 10 |
+| 87,620 | property-test checks on plans billed from a subscription day, 547 of them crossing that day | `docs/PRODUCT_PLAN.md` P5 |
+| 1, 3, 7 days | when a declined charge is retried; the customer is suspended only after the last | 3.9.6 |
+| 5 minutes | how old a provider's signed webhook may be before it is refused; each event acts once | `control/README.md` |
+| 20 a minute | failed sign-ins allowed per address before `429` | 3.9.5 |
+| 7 findings | the 2026-10-31 security review of Phase 1: 3 medium (key with a hash tag, open default address, no Redis password), 4 low; all fixed and tested | `docs/security_review_phase1_2026-10-31.md` |
 
 ## The brief's questions, with the evidence
 
@@ -75,6 +86,10 @@ Evidence: `p4_merchants_2026-10-28.md` and `p3_gate_2026-10-25.md`; Chapter 5.12
 | What if a paying customer has an emergency? | Postpaid: past its quota it is admitted as billed overage up to a spending cap (its burst limit and the merchant's capacity still apply); or a boost, or a top-up | 3.9.4 |
 | What stops a merchant's backend being flooded? | Its capacity, a leased bucket; a reserve for plans with a fee; Free calls refused first | 3.9.7, 5.12 |
 | Are card numbers stored? | No: the API refuses them; only the payment provider's customer id is kept | 3.9.6 |
+| A customer upgrades mid-month: what do they pay? | The fee prorated by time: each fee for the part of the month it was in force; the change is recorded with Redis's time | 3.9.6 |
+| A payment fails? | Retried after 1, 3 and 7 days, each try its own idempotency key; suspended only after the last. A charge settled later is confirmed by the provider's signed webhook | 3.9.6 |
+| How do you know it is secure? | Three review passes, the last finding 7 flaws (a key with `{`/`}` could make paid calls uncounted; the default address was public with no auth; Redis had no password option), all fixed with tests; isolation tests fail with a planted shared namespace | security review, 5.12 |
+| Why no client certificates for one API owner? | Caller authentication is `RL_TENANCY=merchants` (API keys) or the network; the limiter warns at start when reachable without it. mTLS is future work | security review |
 
 ## Weak points to raise first
 

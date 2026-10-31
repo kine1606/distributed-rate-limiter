@@ -484,7 +484,16 @@ TSan, the 39 of the control plane pass, and the property tests pass at 2,000 see
 
 ### Optional Week P6 (Nov 30 to Dec 6): buffer
 
-- [ ] Fixes found by the evaluation; slides and defense sheet v2; a mock defense with the new questions.
+- [x] Fixes found by the evaluation; slides and defense sheet v2; a mock defense with the new questions.
+  - *Fixes:* made in P4 and P5 (the capacity flood, the wholly reserved capacity, a burst too small to
+    split, a billing month moving back), and the Phase 1 security review
+    (`docs/security_review_phase1_2026-10-31.md`).
+  - *Slides v2 (2026-10-31):* the deck "Thesis Defense: Quota and Rate Limiting", 21 slides with speaker
+    notes: 6 new (merchants, what a merchant can do, billing, capacity, G10 to G14, demo 2), 4 updated.
+  - *Defense sheet v2:* `docs/thesis/defense_numbers.md`, with merchants, P5 and the security review.
+  - *Mock defense:* `docs/thesis/mock_defense.md` (run sheet, question order, ten hard follow-ups, a
+    scoring checklist). The rehearsal itself needs a committee: run it with the advisor, a friend or a
+    Claude chat.
 
 Then Dec 7 to 15: the advisor's review and delivery, as planned (ROADMAP Week 9).
 
