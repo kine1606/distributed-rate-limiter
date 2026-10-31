@@ -119,5 +119,40 @@ TEST(Plan, AnAnchorIsADayFrom1To28AndPartOfTheStamp) {  // Phase 2, P5: billing 
   EXPECT_NE(QuotaStamp(ParsePlan({{"anchor", "17"}})), QuotaStamp(ParsePlan({})));  // a denial under other terms
 }
 
+
+// ---- Week 2 edge cases (2026-11-01): what a plan hash written by hand can hold ----
+
+TEST(Plan, ANumberBeyondUint32KeepsTheDefault) {
+  EXPECT_EQ(ParsePlan({{"daily", "4294967295"}}).daily, 4294967295u);  // the largest that fits
+  EXPECT_EQ(ParsePlan({{"daily", "4294967296"}}).daily, 200u);
+  EXPECT_EQ(ParsePlan({{"burst", "99999999999999999999"}}).burst, 2u);
+}
+
+TEST(Plan, SignsSpacesDecimalsAndHexAreMalformed) {
+  for (const char* v : {"+5", " 5", "5 ", "1.5", "-1", "", "0x10", "1e3", "5abc"}) {
+    EXPECT_EQ(ParsePlan({{"daily", v}}).daily, 200u) << '"' << v << '"';
+  }
+}
+
+TEST(Plan, LeadingZerosAreANumber) { EXPECT_EQ(ParsePlan({{"daily", "007"}}).daily, 7u); }
+
+TEST(Plan, UnknownFieldsAreIgnored) {
+  const Plan p = ParsePlan({{"daily", "500"}, {"colour", "blue"}, {"Daily", "9"}, {"note", "VIP"}});
+  EXPECT_EQ(p.daily, 500u);  // field names are case-sensitive: "Daily" is someone else's field
+}
+
+TEST(Plan, ValuesAreCaseSensitive) {  // only the exact words the tools write change a default
+  EXPECT_EQ(ParsePlan({{"overage", "CAP"}}).overage, Overage::kHard);
+  EXPECT_EQ(ParsePlan({{"period", "Month"}}).period, QuotaPeriod::kDay);
+  EXPECT_EQ(ParsePlan({{"failure", "OPEN"}}).failure, FailurePolicy::kFailClosed);
+  EXPECT_FALSE(ParsePlan({{"plan", "Suspended"}}).suspended);
+}
+
+TEST(Plan, ABoostEndMustBeANonNegativeWholeNumber) {
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "-5"}}).boost_until_ms, 0);
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "soon"}}).boost_until_ms, 0);
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "1893456000000"}}).boost_until_ms, 1893456000000);
+}
+
 }  // namespace
 }  // namespace ratelimiter

@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <cstdint>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -74,6 +76,53 @@ TEST(DenyCache, CustomersWhoNeverComeBackAreSweptAway) {
   for (int i = 0; i < 200'000; ++i) c.Deny("cust:" + std::to_string(i), 1, i * kMs, 1);  // each expires 1 ms later
   EXPECT_LT(c.Size(), 200'000u / 2);  // expired entries were dropped as the shards grew
   EXPECT_EQ(c.DeniedFor("cust:199999", 1, 199'999 * kMs), 1u);  // the live one is kept
+}
+
+
+// ---- Week 4 edge cases (2026-11-01) ----
+
+TEST(DenyCache, ADenialThatEndsNowDeniesNothing) {
+  DenyCache c;
+  c.Deny("cust:1", 7, 5 * kMs, 0);
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, 5 * kMs), 0u);
+  EXPECT_EQ(c.Size(), 0u);
+}
+
+TEST(DenyCache, TheTimeLeftRoundsUpSoItIsNeverZeroWhileDenied) {
+  DenyCache c;
+  c.Deny("cust:1", 7, 0, 60'000);
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, 1), 60'000u);              // 1 ns in
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, 60'000 * kMs - 1), 1u);    // 1 ns before the reset
+}
+
+TEST(DenyCache, TheLongestResetDoesNotOverflow) {
+  DenyCache c;
+  const std::uint32_t longest = std::numeric_limits<std::uint32_t>::max();  // about 49.7 days
+  c.Deny("cust:1", 7, 0, longest);
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, 0), longest);
+}
+
+TEST(DenyCache, ClearingACustomerItNeverDeniedIsHarmless) {
+  DenyCache c;
+  c.Deny("cust:1", 7, 0, 60'000);
+  c.Clear("nobody");
+  EXPECT_EQ(c.DeniedFor("cust:1", 7, kMs), 59'999u);
+}
+
+TEST(DenyCache, CustomersDifferingByOneByteAreKeptApart) {
+  DenyCache c;
+  c.Deny("cust:1", 7, 0, 60'000);
+  for (const char* other : {"cust:10", "cust:", "Cust:1", "cust:1 "}) EXPECT_EQ(c.DeniedFor(other, 7, kMs), 0u) << other;
+  EXPECT_GT(c.DeniedFor("cust:1", 7, kMs), 0u);
+}
+
+TEST(DenyCache, TenThousandDenialsAreAllKeptUntilTheirReset) {
+  DenyCache c;
+  for (int i = 0; i < 10'000; ++i) c.Deny("cust:" + std::to_string(i), 7, 0, 60'000);
+  EXPECT_EQ(c.Size(), 10'000u);
+  int denied = 0;
+  for (int i = 0; i < 10'000; ++i) denied += c.DeniedFor("cust:" + std::to_string(i), 7, kMs) > 0;
+  EXPECT_EQ(denied, 10'000);
 }
 
 }  // namespace

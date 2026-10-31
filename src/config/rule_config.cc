@@ -28,6 +28,14 @@ FailurePolicy ParsePolicy(const std::string& rule, const std::string& value) {
   throw std::runtime_error("rule '" + rule + "': unknown failure_policy '" + value + "'");
 }
 
+// A key that is there but does not parse is an error, not the default: yaml-cpp's as<T>(fallback)
+// would quietly run `window_ms: 5s` as 1000 ms.
+template <typename T>
+T Read(const YAML::Node& n, const char* key, T fallback) {
+  const YAML::Node v = n[key];
+  return v ? v.as<T>() : fallback;
+}
+
 }  // namespace
 
 RuleTable LoadRules(const std::string& path) {
@@ -43,18 +51,18 @@ RuleTable LoadRules(const std::string& path) {
     rule.name = entry.first.as<std::string>();
     const YAML::Node& n = entry.second;
 
-    rule.algorithm = ParseAlgorithm(rule.name, n["algorithm"].as<std::string>("token_bucket"));
-    rule.limit = n["limit"].as<std::uint32_t>(0);
-    rule.refill_per_sec = n["refill_per_sec"].as<double>(0.0);
-    rule.window_ms = n["window_ms"].as<std::uint32_t>(1000);
-    rule.strict = n["strict"].as<bool>(false);
-    rule.limit_from = ParseLimitFrom(rule.name, n["limit_from"].as<std::string>(""));
-    rule.failure_policy = ParsePolicy(rule.name, n["failure_policy"].as<std::string>("fail_closed"));
-    rule.burst_rule = n["burst"].as<std::string>("");
-    rule.quota_rule = n["quota"].as<std::string>("");
-    const std::string quota_mode = n["quota_mode"].as<std::string>("strict");
+    rule.algorithm = ParseAlgorithm(rule.name, Read<std::string>(n, "algorithm", "token_bucket"));
+    rule.limit = Read<std::uint32_t>(n, "limit", 0);
+    rule.refill_per_sec = Read<double>(n, "refill_per_sec", 0.0);
+    rule.window_ms = Read<std::uint32_t>(n, "window_ms", 1000);
+    rule.strict = Read<bool>(n, "strict", false);
+    rule.limit_from = ParseLimitFrom(rule.name, Read<std::string>(n, "limit_from", ""));
+    rule.failure_policy = ParsePolicy(rule.name, Read<std::string>(n, "failure_policy", "fail_closed"));
+    rule.burst_rule = Read<std::string>(n, "burst", "");
+    rule.quota_rule = Read<std::string>(n, "quota", "");
+    const std::string quota_mode = Read<std::string>(n, "quota_mode", "strict");
     rule.quota_auto = quota_mode == "auto";
-    rule.lease_chunk_pct = n["lease_chunk_pct"].as<std::uint32_t>(10);
+    rule.lease_chunk_pct = Read<std::uint32_t>(n, "lease_chunk_pct", 10);
 
     const auto fail = [&rule](const std::string& why) { throw std::runtime_error("rule '" + rule.name + "': " + why); };
     // A customer rule only names its two parts; they are checked once every rule is loaded.

@@ -331,6 +331,27 @@ TEST_F(LuaTest, QuotaCostGreaterThanRemainingIsDeniedAndNotCounted) {
   EXPECT_EQ(r.ints[1], 3);
 }
 
+// Week 1 edge cases (2026-11-01).
+TEST_F(LuaTest, AQuotaOfZeroDeniesEveryCallAndCountsNothing) {
+  const std::string k = "{q0}:quota";
+  Del(k);
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(QuotaV2(k, 0, 1, "hard", 0).ints[0], 0) << i;
+  const std::string used = HGet(k, "used");
+  EXPECT_TRUE(used.empty() || used == "0") << used;
+}
+
+TEST_F(LuaTest, ACostOfExactlyTheRemainingIsAdmittedAndTheNextUnitIsNot) {
+  const std::string k = "{qx}:quota";
+  Del(k);
+  SetUsedToday(k, 2);
+  const auto r = QuotaV2(k, 5, 3, "hard", 0);  // 2 used + 3 = 5: the limit exactly
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[1], 5);  // used
+  EXPECT_EQ(r.ints[2], 0);  // remaining
+  EXPECT_EQ(QuotaV2(k, 5, 1, "hard", 0).ints[0], 0);
+  EXPECT_EQ(HGet(k, "used"), "5");
+}
+
 TEST_F(LuaTest, QuotaResetsOnNewUtcDay) {
   const std::string k = "{q5}:quota";
   Del(k);

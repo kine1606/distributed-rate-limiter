@@ -134,3 +134,41 @@ TEST(RuleConfig, RejectsLimitFromThatDoesNotFitTheAlgorithm) {
                            "rules:\n  b:\n    algorithm: quota\n    limit_from: plan.weekly\n    strict: true\n");
   EXPECT_THROW(ratelimiter::LoadRules(unknown), std::runtime_error);
 }
+
+// ---- Week 2 edge cases (2026-11-01): a rules file that should not load ----
+
+TEST(RuleConfig, RejectsANegativeLimit) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_neg_limit.yaml",
+      "rules:\n  bad:\n    algorithm: token_bucket\n    limit: -5\n    refill_per_sec: 1\n")));
+}
+
+TEST(RuleConfig, RejectsANonNumericLimit) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_word_limit.yaml",
+      "rules:\n  bad:\n    algorithm: token_bucket\n    limit: lots\n    refill_per_sec: 1\n")));
+}
+
+TEST(RuleConfig, RejectsALimitBeyondUint32) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_big_limit.yaml",
+      "rules:\n  bad:\n    algorithm: token_bucket\n    limit: 4294967296\n    refill_per_sec: 1\n")));
+}
+
+TEST(RuleConfig, RejectsAnEmptyFile) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_empty.yaml", "")));
+}
+
+TEST(RuleConfig, RejectsARuleThatIsNotAMap) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_scalar_rule.yaml", "rules:\n  bad: 5\n")));
+}
+
+TEST(RuleConfig, RejectsAMissingFile) {
+  EXPECT_ANY_THROW(ratelimiter::LoadRules("/nonexistent/rules.yaml"));
+}
+
+TEST(RuleConfig, AValueThatIsThereButDoesNotParseIsAnErrorNotTheDefault) {  // `window_ms: 5s` must not run as 1000 ms
+  const std::string fw = "rules:\n  w:\n    algorithm: fixed_window\n    limit: 10\n";
+  EXPECT_EQ(ratelimiter::LoadRules(WriteTemp("rl_fw_ok.yaml", fw + "    window_ms: 5000\n")).at("w").window_ms, 5000u);
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_fw_5s.yaml", fw + "    window_ms: 5s\n")));
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_fw_strict.yaml", fw + "    strict: always\n")));
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_fw_pct.yaml", fw + "    lease_chunk_pct: ten\n")));
+  EXPECT_ANY_THROW(ratelimiter::LoadRules(WriteTemp("rl_fw_empty.yaml", fw + "    window_ms:\n")));
+}
