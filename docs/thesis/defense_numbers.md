@@ -22,7 +22,7 @@ and each of its questions with the measurement that answers it. Every number has
 | 16,384 | Redis Cluster hash slots | a customer's keys share one slot by hash tag |
 | 3 masters | test cluster | 3 + 3 replicas for fault tests |
 | 64 bytes | lease alignment | 14 times faster per-thread counters at 16 threads (microbenchmark); within noise in the whole server (ablation) |
-| 330 tests | release, ASan, TSan | 264 unit, 45 against a real Redis, 21 integration; plus 48 of the control plane (Python); 97.1% line coverage (measured at 282) |
+| 344 tests | release, ASan, TSan | 278 unit, 45 against a real Redis, 21 integration; plus 50 of the evaluation tools and 48 of the control plane (Python); 97.1% line coverage (measured at 282) |
 | 42,065 checks/s | one instance, strict, uniform keys | matrix, pinned (Week 2's ghz baseline: 25,301) |
 | 67,459 / 95,913 / 400,187 checks/s | one instance, leased: Zipf keys / one hot key / `CheckBatch` of 10 | matrix and its CheckBatch section |
 | 82,700 to 91,200 checks/s | gRPC alone, one instance | the ceiling of any limiter on this laptop |
@@ -105,5 +105,7 @@ Evidence: `p4_merchants_2026-10-28.md` and `p3_gate_2026-10-25.md`; Chapter 5.12
   another merchant, until the operator set a check rate. The design leaves that to the operator.
 - **The reserve is a floor, not a priority:** paying customers asking for more than the reserve compete
   with Free calls for the rest.
+- **The bound needs a Redis clock that moves at the real rate.** On 2026-11-01 a WSL2 clock stepped
+  by up to 3.7 s and a burst bucket over-admitted by about rate × step (`remeasure_2026-11-01.md`).
 - **Billing through failover:** three runs lost nothing, but asynchronous replication can lose an
   acknowledged increment; invoices would then undercount, in the customer's favour.
