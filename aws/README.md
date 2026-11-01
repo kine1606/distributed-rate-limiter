@@ -138,6 +138,7 @@ thesis section get written from it.
 
 | What you see | What to do |
 | --- | --- |
+| `check` says `EC2: denied` with `service control policy` | The account belongs to an AWS Organization whose policy blocks EC2 in every region; nothing inside the account can lift it. As root, open **AWS Organizations** to see which organization. A school or company account: ask its administrator to allow EC2 in your region. Otherwise ask AWS Support (**Support Center**, account and billing, free) why the account has that policy |
 | `the AWS CLI has no working credentials` | `aws configure` again; on the IAM page check that the access key is **Active** |
 | `too few vCPUs` | `SIZE=small`, or the quota request of step 5 |
 | `up` fails with `not authorized` | step 2: the policy is attached to `thesis-cli`; it was pasted whole |

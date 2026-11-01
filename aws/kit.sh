@@ -98,6 +98,13 @@ cmd_check() {
   echo "region:   $REGION"
   echo "vCPUs:    SIZE=$SIZE needs $VCPUS; your quota of running on-demand standard instances is $quota"
   echo "cost:     about \$$USD_HOUR an hour while up, nothing once down"
+  local ec2  # one read-only call: an AWS Organization's policy (SCP) can deny EC2 whatever IAM allows
+  if ! ec2=$(aws ec2 describe-vpcs --max-results 5 --query 'length(Vpcs)' --output text 2>&1); then
+    echo "EC2:      denied: ${ec2#*error occurred }" >&2
+    [[ $ec2 == *"service control policy"* ]] &&
+      echo "          an AWS Organization above this account blocks EC2 (aws/README.md, When something goes wrong)" >&2
+    return 1
+  fi
   if [ "$quota" != unknown ] && [ "${quota%.*}" -lt "$VCPUS" ]; then
     echo "too few vCPUs: run with SIZE=small (14 vCPUs), or ask for more (aws/README.md, step 5)" >&2
     return 1
