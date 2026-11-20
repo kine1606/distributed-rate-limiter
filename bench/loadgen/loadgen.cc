@@ -14,6 +14,8 @@
 // a stall shows in the percentiles (no coordinated omission). in_flight per channel then caps the
 // calls outstanding; a call the cap stops is counted as skipped, and any skip spoils the run. Open
 // loop also counts answers by reason, in total and per second of the run (the fault tests' timeline).
+// Merchants (Phase 2): RL_API_KEYS=k1,k2 or RL_API_KEYS_FILE=<one key a line> sends a merchant's API key
+// as x-api-key metadata, a random one per call, for a limiter with RL_TENANCY=merchants.
 #include <grpcpp/grpcpp.h>
 
 #include <algorithm>
@@ -23,9 +25,12 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -51,6 +56,7 @@ struct KeyPicker {
   }
 };
 KeyPicker g_key;  // set in main, read-only after
+std::vector<std::string> g_api_keys;  // merchants' API keys, one picked per call; empty: none sent
 int Bucket(double us) {
   if (us < 1) return 0;
   return std::min(kBuckets - 1, static_cast<int>(std::log2(us) * kBucketsPerDoubling));
@@ -86,6 +92,7 @@ struct Slot {
   void Issue() {
     ctx = std::make_unique<grpc::ClientContext>();
     ctx->set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+    if (!g_api_keys.empty()) ctx->AddMetadata("x-api-key", g_api_keys[rng() % g_api_keys.size()]);
     if (rls != nullptr) {
       rls_req.set_domain(rule);
       rls_req.clear_descriptors();
@@ -246,6 +253,7 @@ int OpenLoop(std::vector<std::unique_ptr<ratelimiter::v1::RateLimiter::Stub>>& s
         c->measure_from = measure_from;
         c->measured = measured;
         c->ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+        if (!g_api_keys.empty()) c->ctx.AddMetadata("x-api-key", g_api_keys[rng() % g_api_keys.size()]);
         c->req.set_key(prefix + std::to_string(g_key(rng)));
         c->req.set_rule(rule);
         ++st.outstanding;
@@ -316,6 +324,24 @@ int main(int argc, char** argv) {
   } else if (dist != "uniform") {
     std::fprintf(stderr, "dist must be uniform or zipf\n");
     return 2;
+  }
+
+  const auto add_keys = [](std::istream& in, char separator) {
+    for (std::string k; std::getline(in, k, separator);) {
+      if (!k.empty()) g_api_keys.push_back(k);
+    }
+  };
+  if (const char* list = std::getenv("RL_API_KEYS")) {
+    std::stringstream in(list);
+    add_keys(in, ',');
+  }
+  if (const char* path = std::getenv("RL_API_KEYS_FILE")) {
+    std::ifstream in(path);
+    if (!in) {
+      std::fprintf(stderr, "cannot read RL_API_KEYS_FILE %s\n", path);
+      return 2;
+    }
+    add_keys(in, '\n');
   }
 
   const bool envoy = rule.starts_with("envoy:");

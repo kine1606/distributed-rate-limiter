@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sequence: A Merchant Joins",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sequence-2-merchant-joins.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "participants": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "the platform",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 133,
+          "end_line": 135,
+          "label": "operator token"
+        }
+      ]
+    },
+    {
+      "id": "merchant",
+      "type": "external",
+      "label": "Merchant acme",
+      "sublabel": "admin and gateway",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 137,
+          "end_line": 141,
+          "label": "management key"
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Management API",
+      "sublabel": "FastAPI",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 176,
+          "end_line": 186,
+          "label": "create_merchant"
+        },
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 210,
+          "end_line": 243,
+          "label": "plans, customers"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis Cluster",
+      "sublabel": "keys, catalog, plans",
+      "sources": [
+        {
+          "path": "control/rlcontrol/store.py",
+          "line": 10,
+          "end_line": 12,
+          "label": "key hashes"
+        },
+        {
+          "path": "control/rlcontrol/store.py",
+          "line": 73,
+          "end_line": 77,
+          "label": "CREATE"
+        }
+      ]
+    },
+    {
+      "id": "limiter",
+      "type": "backend",
+      "label": "Limiter instances",
+      "sublabel": "MerchantKeys",
+      "sources": [
+        {
+          "path": "src/server/main.cc",
+          "line": 262,
+          "end_line": 281,
+          "label": "!merchants"
+        },
+        {
+          "path": "src/server/merchants.h",
+          "line": 62,
+          "end_line": 102,
+          "label": "Reload, Resolve"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 162,
+      "to": 470,
+      "label": "The operator creates acme"
+    },
+    {
+      "from": 498,
+      "to": 680,
+      "label": "acme defines plans and customers"
+    },
+    {
+      "from": 708,
+      "to": 834,
+      "label": "First check"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-create",
+      "from": "operator",
+      "to": "api",
+      "y": 176,
+      "label": "POST /v1/merchants {id: acme}",
+      "variant": "emphasis",
+      "note": "Bearer operator token"
+    },
+    {
+      "id": "m-keys",
+      "from": "api",
+      "to": "redis",
+      "y": 238,
+      "label": "HSET the two key hashes",
+      "variant": "default",
+      "note": "SHA-256 of each key; the keys are never stored"
+    },
+    {
+      "id": "m-pub",
+      "from": "api",
+      "to": "redis",
+      "y": 300,
+      "label": "PUBLISH plan-changes !merchants",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-sub",
+      "from": "redis",
+      "to": "limiter",
+      "y": 330,
+      "label": "!merchants",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-reload",
+      "from": "limiter",
+      "to": "redis",
+      "y": 360,
+      "label": "HGETALL {rl:merchants}:keys",
+      "variant": "default"
+    },
+    {
+      "id": "m-index",
+      "from": "redis",
+      "to": "limiter",
+      "y": 390,
+      "label": "key hash -> merchant",
+      "variant": "return"
+    },
+    {
+      "id": "m-created",
+      "from": "api",
+      "to": "operator",
+      "y": 420,
+      "label": "check key, management key",
+      "variant": "return",
+      "note": "shown once; the operator hands them to acme"
+    },
+    {
+      "id": "m-plan",
+      "from": "merchant",
+      "to": "api",
+      "y": 512,
+      "label": "PUT /v1/plans/pay",
+      "variant": "emphasis",
+      "note": "Bearer management key"
+    },
+    {
+      "id": "m-catalog",
+      "from": "api",
+      "to": "redis",
+      "y": 574,
+      "label": "HSET {rl:m:acme}:catalog",
+      "variant": "default"
+    },
+    {
+      "id": "m-customer",
+      "from": "merchant",
+      "to": "api",
+      "y": 604,
+      "label": "POST /v1/customers {u42, pay}",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-hash",
+      "from": "api",
+      "to": "redis",
+      "y": 634,
+      "label": "create {acme|u42}:plan",
+      "variant": "default"
+    },
+    {
+      "id": "m-view",
+      "from": "api",
+      "to": "merchant",
+      "y": 664,
+      "label": "201, the customer",
+      "variant": "return"
+    },
+    {
+      "id": "m-first",
+      "from": "merchant",
+      "to": "limiter",
+      "y": 722,
+      "label": "Check(u42), x-api-key",
+      "variant": "emphasis",
+      "note": "the gateway's check key"
+    },
+    {
+      "id": "m-ok",
+      "from": "limiter",
+      "to": "merchant",
+      "y": 784,
+      "label": "OK, remaining",
+      "variant": "return",
+      "note": "found by its hash, then cached per thread"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two keys, two jobs",
+      "items": [
+        "The check key only lets a gateway ask the limiter",
+        "The management key only manages acme's own plans and customers: a leaked gateway key cannot change limits"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Revoking",
+      "items": [
+        "DELETE /v1/merchants/acme/check-keys removes the hashes and publishes !merchants: every limiter refuses the key on its next call"
+      ]
+    }
+  ]
+}

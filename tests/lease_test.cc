@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstdint>
+#include <limits>
 #include <set>
 #include <string>
 #include <thread>
@@ -111,6 +113,99 @@ TEST(ChunkPolicy, DoublesWhenTheLeaseRanDryHalvesWhenTokensSatUnused) {
 }
 
 TEST(ChunkPolicy, ANewLeaseStartsAtTheCap) { EXPECT_EQ(Lease(kRule, "k").chunk.load(), ChunkCap(kRule)); }
+
+
+// ---- Week 3 edge cases (2026-11-01) ----
+
+TEST(Lease, TakingExactlyEveryTokenLeavesZeroAndTheNextTakeFails) {
+  Lease lease(kRule, "k");
+  lease.tokens = 5;
+  EXPECT_EQ(TryTake(lease, 5), 0);
+  EXPECT_EQ(TryTake(lease, 1), -1);
+  EXPECT_EQ(lease.tokens.load(), 0);
+}
+
+TEST(Lease, ConcurrentTakesOfMixedCostsNeverOverdraw) {
+  Lease lease(kRule, "k");
+  lease.tokens = 10'000;
+  std::atomic<std::int64_t> taken{0};
+  std::vector<std::thread> threads;
+  for (const std::uint32_t cost : {1u, 2u, 3u, 7u, 1u, 2u, 3u, 7u}) {
+    threads.emplace_back([&, cost] {
+      for (int i = 0; i < 2'000; ++i) {
+        if (TryTake(lease, cost) >= 0) taken += cost;
+      }
+    });
+  }
+  for (auto& t : threads) t.join();
+  EXPECT_GE(lease.tokens.load(), 0);
+  EXPECT_EQ(taken.load() + lease.tokens.load(), 10'000);  // every token either taken once or still there
+}
+
+TEST(Lease, TheLargestCostFailsCleanly) {
+  Lease lease(kRule, "k");
+  lease.tokens = 5;
+  EXPECT_EQ(TryTake(lease, std::numeric_limits<std::uint32_t>::max()), -1);
+  EXPECT_EQ(lease.tokens.load(), 5);
+}
+
+TEST(LeaseTable, ManyKeysEachGetTheirOwnLeaseAndKeepIt) {
+  LeaseTable table(1 << 16);
+  std::set<Lease*> seen;
+  std::vector<Lease*> first;
+  for (int i = 0; i < 5'000; ++i) first.push_back(table.FindOrCreate(kRule, "cust:" + std::to_string(i)));
+  for (int i = 0; i < 5'000; ++i) {
+    ASSERT_NE(first[i], nullptr);
+    EXPECT_EQ(table.FindOrCreate(kRule, "cust:" + std::to_string(i)), first[i]);  // the same lease again
+    seen.insert(first[i]);
+  }
+  EXPECT_EQ(seen.size(), 5'000u);
+}
+
+TEST(LeaseTable, KeysDifferingOnlyInTheirLastByteAreKeptApart) {
+  LeaseTable table(1024);
+  const std::string prefix(120, 'p');
+  Lease* a = table.FindOrCreate(kRule, prefix + "a");
+  Lease* b = table.FindOrCreate(kRule, prefix + "b");
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  EXPECT_NE(a, b);
+  EXPECT_EQ(a->key, prefix + "a");
+}
+
+TEST(ChunkPolicy, ATinyLimitStillLeasesOneTokenAndNeverMoreThanTheLimit) {
+  for (const std::uint32_t limit : {1u, 2u, 5u, 9u}) {
+    const Rule r{.name = "tiny", .limit = limit, .refill_per_sec = 1};
+    EXPECT_GE(ChunkCap(r), 1u) << limit;
+    EXPECT_LE(ChunkMin(r), ChunkCap(r)) << limit;
+    EXPECT_LE(NextChunk(ChunkCap(r), true, false, r), limit) << limit;
+  }
+}
+
+TEST(ChunkPolicy, ALeasedQuotaBelowAThousandStillLeasesOne) {
+  EXPECT_EQ(ChunkCap({.name = "q", .algorithm = Algorithm::kQuota, .limit = 999}), 1u);
+}
+
+TEST(ChunkPolicy, TheLargestLimitCapsTheChunkWithoutOverflow) {
+  const std::uint32_t max = std::numeric_limits<std::uint32_t>::max();
+  EXPECT_EQ(ChunkCap({.name = "b", .limit = max, .refill_per_sec = 1, .lease_chunk_pct = 100}), max);
+  EXPECT_EQ(ChunkCap({.name = "b", .limit = max, .refill_per_sec = 1}), max / 10);
+}
+
+TEST(ChunkPolicy, DoublingAHugeChunkStaysAtTheCap) {  // chunk * 2 must not wrap around to a tiny chunk
+  const Rule r{.name = "b", .limit = std::numeric_limits<std::uint32_t>::max(), .refill_per_sec = 1, .lease_chunk_pct = 100};
+  EXPECT_EQ(NextChunk(1u << 31, true, false, r), ChunkCap(r));
+  EXPECT_EQ(NextChunk(3'000'000'000u, true, false, r), ChunkCap(r));
+}
+
+TEST(ChunkPolicy, RepeatedHalvingStopsAtTheMinimumAndDoublingAtTheCap) {
+  const Rule r{.name = "b", .limit = 1'000'000, .refill_per_sec = 1};
+  std::uint32_t c = ChunkCap(r);
+  for (int i = 0; i < 40; ++i) c = NextChunk(c, false, true, r);
+  EXPECT_EQ(c, ChunkMin(r));
+  for (int i = 0; i < 40; ++i) c = NextChunk(c, true, false, r);
+  EXPECT_EQ(c, ChunkCap(r));
+}
 
 }  // namespace
 }  // namespace ratelimiter

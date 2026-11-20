@@ -1,0 +1,384 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Activity: A Check Served From a Lease",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/activity-3-leased-check.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Limiter step"
+        },
+        "security": {
+          "label": "Decision or failure policy"
+        },
+        "database": {
+          "label": "Redis script"
+        },
+        "external": {
+          "label": "Gateway side"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "caller",
+      "label": "Gateway"
+    },
+    {
+      "id": "local",
+      "label": "Lease engine, in this instance's memory"
+    },
+    {
+      "id": "exact",
+      "label": "Exact path"
+    },
+    {
+      "id": "redis",
+      "label": "Redis Cluster"
+    },
+    {
+      "id": "failure",
+      "label": "Redis unreachable",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "check",
+    "leased",
+    "take",
+    "answer"
+  ],
+  "nodes": [
+    {
+      "id": "check",
+      "lane": "caller",
+      "col": 1,
+      "type": "external",
+      "label": "Check",
+      "sublabel": "rule api_default, cost",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 42,
+          "end_line": 51,
+          "label": "LeasedCore::Check"
+        }
+      ]
+    },
+    {
+      "id": "answer",
+      "lane": "caller",
+      "col": 5,
+      "type": "external",
+      "label": "Answer",
+      "sublabel": "allowed or retry after",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 14,
+          "end_line": 28,
+          "label": "Allowed, Denied"
+        }
+      ],
+      "height": 76
+    },
+    {
+      "id": "leased",
+      "lane": "local",
+      "col": 1,
+      "type": "security",
+      "label": "Lease it?",
+      "sublabel": "plain rule, cost <= chunk",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 43,
+          "end_line": 68,
+          "label": "exact-path cases"
+        }
+      ]
+    },
+    {
+      "id": "take",
+      "lane": "local",
+      "col": 2,
+      "type": "backend",
+      "label": "Take from lease",
+      "sublabel": "one CAS, no Redis",
+      "tag": "refill early < 30%",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 70,
+          "end_line": 80,
+          "label": "fast path"
+        },
+        {
+          "path": "src/lease/lease_table.h",
+          "line": 55,
+          "end_line": 63,
+          "label": "TryTake"
+        }
+      ]
+    },
+    {
+      "id": "recent",
+      "lane": "local",
+      "col": 3,
+      "type": "security",
+      "label": "Denied recently?",
+      "sublabel": "Redis said no until t",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 82,
+          "end_line": 87,
+          "label": "deny_until"
+        }
+      ]
+    },
+    {
+      "id": "park",
+      "lane": "local",
+      "col": 4,
+      "type": "backend",
+      "label": "Wait, one refill",
+      "sublabel": "waiters share it",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 90,
+          "end_line": 117,
+          "label": "Park, StartRefill"
+        }
+      ]
+    },
+    {
+      "id": "exactpath",
+      "lane": "exact",
+      "col": 1,
+      "type": "backend",
+      "label": "StrictCore",
+      "sublabel": "one script per check",
+      "sources": [
+        {
+          "path": "src/core/strict_core.h",
+          "line": 22,
+          "end_line": 31,
+          "label": "StrictCore"
+        }
+      ]
+    },
+    {
+      "id": "bucket",
+      "lane": "redis",
+      "col": 4,
+      "type": "database",
+      "label": "token_bucket.lua",
+      "sublabel": "top up to one chunk",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 119,
+          "end_line": 124,
+          "label": "Refill"
+        },
+        {
+          "path": "lua/token_bucket.lua",
+          "line": 1,
+          "end_line": 58,
+          "label": "bucket"
+        }
+      ]
+    },
+    {
+      "id": "serve",
+      "lane": "local",
+      "col": 5,
+      "type": "backend",
+      "label": "Serve waiters",
+      "sublabel": "in arrival order",
+      "tag": "chunk adapts",
+      "sources": [
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 126,
+          "end_line": 183,
+          "label": "OnRefill"
+        }
+      ]
+    },
+    {
+      "id": "policy",
+      "lane": "failure",
+      "col": 4,
+      "type": "security",
+      "label": "Rule's failure policy",
+      "sublabel": "open or closed",
+      "sources": [
+        {
+          "path": "src/core/strict_core.h",
+          "line": 13,
+          "end_line": 20,
+          "label": "RedisDownResult"
+        },
+        {
+          "path": "src/core/leased_core.cc",
+          "line": 162,
+          "end_line": 163,
+          "label": "waiters on error"
+        }
+      ]
+    },
+    {
+      "id": "exactanswer",
+      "lane": "exact",
+      "col": 2,
+      "type": "external",
+      "label": "Answer",
+      "sublabel": "from one script",
+      "sources": [
+        {
+          "path": "src/core/strict_core.h",
+          "line": 31,
+          "end_line": 56,
+          "label": "StrictCore::Check"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-leased",
+      "from": "check",
+      "to": "leased",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-take",
+      "from": "leased",
+      "to": "take",
+      "label": "yes",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-hit",
+      "from": "take",
+      "to": "answer",
+      "label": "tokens left: allowed",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "e-exact",
+      "from": "leased",
+      "to": "exactpath",
+      "label": "no",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "e-exact-answer",
+      "from": "exactpath",
+      "to": "exactanswer",
+      "label": "allowed or denied",
+      "variant": "default"
+    },
+    {
+      "id": "e-empty",
+      "from": "take",
+      "to": "recent",
+      "label": "lease empty",
+      "variant": "default"
+    },
+    {
+      "id": "e-recent",
+      "from": "recent",
+      "to": "answer",
+      "label": "yes: RATE_LIMITED",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e-park",
+      "from": "recent",
+      "to": "park",
+      "label": "no",
+      "variant": "default"
+    },
+    {
+      "id": "e-refill",
+      "from": "park",
+      "to": "bucket",
+      "label": "EVALSHA",
+      "variant": "default"
+    },
+    {
+      "id": "e-granted",
+      "from": "bucket",
+      "to": "serve",
+      "label": "tokens or no",
+      "variant": "default"
+    },
+    {
+      "id": "e-served",
+      "from": "serve",
+      "to": "answer",
+      "label": "allowed, or denied till retry",
+      "variant": "default",
+      "role": "return"
+    },
+    {
+      "id": "e-down",
+      "from": "bucket",
+      "to": "policy",
+      "label": "timeout or down",
+      "variant": "dashed",
+      "role": "error"
+    },
+    {
+      "id": "e-policy",
+      "from": "policy",
+      "to": "answer",
+      "label": "UNVERIFIED or UNAVAILABLE",
+      "variant": "security",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Why leases",
+      "items": [
+        "Most checks never reach Redis: each instance holds a small chunk of the bucket and takes from it with one CAS",
+        "Over-admission is bounded: at most N instances x one chunk C"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Exact path cases",
+      "items": [
+        "Rules marked strict, rules whose limit comes from a customer's plan, a cost above one chunk, a full lease table"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Chunk size",
+      "items": [
+        "Grows when waiters emptied the lease, halves after 10 s idle, between 8 and the cap"
+      ]
+    }
+  ]
+}

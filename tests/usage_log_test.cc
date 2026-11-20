@@ -128,5 +128,72 @@ TEST(UsageLog, UnopenableFileThrows) {
   EXPECT_THROW(UsageLog("/nonexistent-dir/usage.jsonl", "i"), std::runtime_error);
 }
 
+
+// ---- Week 4 edge cases (2026-11-01) ----
+
+TEST(UsageLog, EveryLineIsPrintableAscii) {  // whatever bytes a customer id holds
+  const std::string path = TempPath("ascii");
+  {
+    UsageLog log(path, "i");
+    for (const char* id : {"tab\there", "del\x7f", "\xe6\x97\xa5\xe6\x9c\xac", "\xc3\xa9t\xc3\xa9", "nul-less"}) {
+      log.Record(id, Reason::kAllowed, 1);
+    }
+  }
+  const auto lines = Lines(path);
+  ASSERT_EQ(lines.size(), 5u);
+  for (const auto& l : lines) {
+    for (const char ch : l) EXPECT_TRUE(ch >= 0x20 && ch <= 0x7e) << l;
+  }
+}
+
+TEST(UsageLog, EachOutcomeIsCountedInItsOwnField) {
+  const std::string path = TempPath("fields");
+  {
+    UsageLog log(path, "i", 1024, std::chrono::hours(1));
+    log.Record("c", Reason::kAllowed, 1);
+    log.Record("c", Reason::kRateLimited, 2);
+    log.Record("c", Reason::kQuotaExhausted, 3);
+    log.Record("c", Reason::kUnavailable, 4);
+    log.Record("c", Reason::kUnverified, 5);
+    log.Record("c", Reason::kOverage, 6);
+    log.Record("c", Reason::kSuspended, 7);
+  }
+  const auto lines = Lines(path);
+  EXPECT_EQ(Sum(lines, "c", "allowed"), 1u);
+  EXPECT_EQ(Sum(lines, "c", "rate_limited"), 2u);
+  EXPECT_EQ(Sum(lines, "c", "quota_exhausted"), 3u);
+  EXPECT_EQ(Sum(lines, "c", "unavailable"), 4u);
+  EXPECT_EQ(Sum(lines, "c", "unverified"), 5u);
+  EXPECT_EQ(Sum(lines, "c", "overage"), 6u);
+  EXPECT_EQ(Sum(lines, "c", "suspended"), 7u);
+}
+
+TEST(UsageLog, AnUnknownRuleIsNotAnOutcomeAndWritesNoCount) {  // the service never gets that far
+  const std::string path = TempPath("unknown");
+  { UsageLog(path, "i").Record("c", Reason::kUnknownRule, 9); }
+  for (const auto& l : Lines(path)) {
+    EXPECT_EQ(l.find("null"), std::string::npos) << l;
+    EXPECT_EQ(l.find(":9"), std::string::npos) << l;
+  }
+}
+
+TEST(UsageLog, TheInstanceNameIsEscapedToo) {
+  const std::string path = TempPath("instance");
+  { UsageLog(path, "lim\"1").Record("c", Reason::kAllowed, 1); }
+  const auto lines = Lines(path);
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_NE(lines[0].find("\"instance\":\"lim\\\"1\""), std::string::npos) << lines[0];
+}
+
+TEST(UsageLog, ManyCustomersEachGetTheirOwnCount) {
+  const std::string path = TempPath("many");
+  {
+    UsageLog log(path, "i", 4096, std::chrono::hours(1));
+    for (int i = 0; i < 200; ++i) log.Record("cust:" + std::to_string(i), Reason::kAllowed, 1);
+  }
+  const auto lines = Lines(path);
+  for (int i = 0; i < 200; ++i) EXPECT_EQ(Sum(lines, "cust:" + std::to_string(i), "allowed"), 1u) << i;
+}
+
 }  // namespace
 }  // namespace ratelimiter

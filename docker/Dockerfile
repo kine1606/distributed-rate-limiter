@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /src/build/rate_limiter_server /usr/local/bin/rate_limiter_server
 COPY config /etc/ratelimiter
 COPY lua /usr/share/ratelimiter/lua
+# Not root: the limiter needs no privilege (its port is above 1024 and it writes no files by default).
+RUN useradd --system --no-create-home --uid 10001 limiter
+USER limiter
 EXPOSE 50051
 ENTRYPOINT ["rate_limiter_server"]
 CMD ["0.0.0.0:50051", "/etc/ratelimiter/rules.yaml", "redis-1:6379", "/usr/share/ratelimiter/lua"]

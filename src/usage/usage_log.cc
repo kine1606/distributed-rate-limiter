@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 namespace ratelimiter {
 namespace {
 
@@ -39,8 +42,14 @@ std::string Json(std::string_view s) {
 
 UsageLog::UsageLog(const std::string& path, std::string instance, std::size_t capacity,
                    std::chrono::milliseconds every)
-    : instance_(Json(instance)), every_(every), file_(std::fopen(path.c_str(), "a")) {
-  if (!file_) throw std::runtime_error("cannot open usage file " + path);
+    : instance_(Json(instance)), every_(every) {
+  // Owner-only (0600) when it is created: usage by customer is the merchant's business data.
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+  file_.reset(fd < 0 ? nullptr : ::fdopen(fd, "a"));
+  if (!file_) {
+    if (fd >= 0) ::close(fd);
+    throw std::runtime_error("cannot open usage file " + path);
+  }
   const std::size_t cells = std::bit_ceil(std::max<std::size_t>(2, capacity / kRings));
   for (Ring& r : rings_) {
     r.cells = std::make_unique<Cell[]>(cells);

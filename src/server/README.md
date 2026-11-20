@@ -81,3 +81,39 @@ grpc::ServerUnaryReactor* RateLimiterService::Check(grpc::CallbackServerContext*
 - [x] Week 2: server runs with `StrictCore` against the Docker cluster; `grpcurl` call works.
 - [ ] Week 4: all proto v1 fields filled and tested through a real gRPC client.
 - [ ] Week 5: shutdown drains without dropping in-flight calls (test with load running).
+
+## Merchants (Phase 2, P1)
+
+`merchants.h`: with `RL_TENANCY=merchants`, every call must carry a merchant's API key in the gRPC
+metadata `x-api-key`, or it is refused with `UNAUTHENTICATED`. The service then checks customer
+`cust:42` of merchant `acme` as `acme|cust:42`, so merchants share no key, plan, lease or denial.
+- **Keys:** stored hashed (SHA-256) in `{rl:merchants}:keys`. Every instance loads them at start and
+  on `!merchants` on `plan-changes`. Each thread caches the keys it has resolved, with no lock, and
+  drops them when the keys change.
+- **Admin:** `tools/rlctl merchant-add` and `merchant-revoke`.
+- **Default:** unset, the service serves one API owner, as before.
+- **TLS:** an API key is a bearer credential, so whoever reads it can use it. When gateways reach the
+  limiter over a network the platform does not own, set `RL_TLS_CERT` and `RL_TLS_KEY` (PEM files) and
+  every call is encrypted. Unset, calls are plain text, and with tenancy on the server warns at start.
+
+## A merchant's limits (Phase 2, P3)
+
+Each merchant loads with its limits (`MerchantLimits` in `include/ratelimiter/types.h`), from two hashes
+written by the management API:
+- `{rl:merchants}:capacity`: the merchant's backend capacity, `rate R burst B reserve P`.
+- `{rl:merchants}:check_rate`: the checks a second the platform takes from it, `rate R burst B`.
+
+How the limiter uses them:
+- **Rules:** each becomes a token-bucket rule, the capacity split into a shared part and the reserve
+  (P% of rate and burst). A rule is made once per set of numbers and never freed, because leases refer
+  to their rule by address. So a reload with the same numbers keeps every lease, and merchants with
+  the same numbers share a rule (their keys keep the buckets apart).
+- **Memory:** a merchant too is made once per set of limits and never freed, since a check still
+  waiting holds its limits. A reload with unchanged limits adds nothing, and the table of keys it
+  replaces is freed once no lookup reads it (`std::atomic<std::shared_ptr>`; lookups are rare, as each
+  thread caches the keys it has seen).
+- **Order:** of reloads that overlap, the one started last wins. An older one finishing late (after a
+  retry) cannot bring back a revoked key.
+- **In the service:** `Resolve` returns the merchant, and the service passes its limits to the engine
+  with each check (`CheckRequest::merchant`).
+- **Enforcement:** `CompositeCore` applies them (`src/core/README.md`).

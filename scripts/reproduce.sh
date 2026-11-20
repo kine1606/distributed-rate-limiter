@@ -9,6 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 scripts/test.sh release
+control/run_tests.sh  # the control plane (Phase 2); creates control/.venv on first use
 
 if [ "${1:-}" = --rerun ]; then
   for s in bench/run_matrix.sh bench/open_loop.sh bench/ablation.sh bench/concurrency_sweep.sh bench/profile.sh \

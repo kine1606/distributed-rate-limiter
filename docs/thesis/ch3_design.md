@@ -1,9 +1,5 @@
 # Chapter 3. Design
 
-> Drafted in Weeks 2 to 5: product decisions (3.1.3) in Week 2, the lease protocol (3.5) in Week 3,
-> quota and overage logic (3.4) in Week 4, and the rest in Week 5 (complete draft 2026-10-22).
-> Results still to come are marked **[Pending: Week N]**. Tables are numbered in reading order.
-
 ## 3.1 Requirements
 
 The goals of Section 1.3 say what the service must achieve. This section turns them into
@@ -29,8 +25,8 @@ must do it (3.1.2), and the product decisions that no technical argument settles
 
 The API separates two kinds of "no". A decision is an answer: the call succeeds, and a reason says
 what was decided. There are seven reasons (`OK`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, `OVERAGE`,
-`SUSPENDED`, `UNAVAILABLE`, `UNVERIFIED`), which the gateway maps to HTTP: 429 for the two limits, 403
-for a suspended account, 503 for `UNAVAILABLE`. A gRPC error means that no decision could be made:
+`SUSPENDED`, `UNAVAILABLE`, `UNVERIFIED`), which the gateway maps to HTTP: 429 [18] for the two limits, with `Retry-After` [17] in whole seconds
+from the answer's `retry_after_ms`, 403 for a suspended account, 503 for `UNAVAILABLE`. A gRPC error means that no decision could be made:
 `INVALID_ARGUMENT` for a malformed request (an empty key or rule, a key or request id longer than 128
 bytes, a rule the configuration does not have) and `RESOURCE_EXHAUSTED` for an overloaded instance. A
 Redis outage is deliberately an answer, not an error. The limiter applies the plan's failure policy
@@ -100,7 +96,7 @@ service the customer has already paid for.
 **Fail-open traffic is not billed.** When Redis cannot be asked and a plan fails open, the call is
 admitted without being counted, and the response says so (`REASON_UNVERIFIED`). Billing such calls
 would bill traffic that was never measured and might exceed the quota; the exactness promise of this
-thesis covers counted traffic only. Usage events (Week 4) mark these calls `unverified`, so a billing
+thesis covers counted traffic only. Usage events mark these calls `unverified`, so a billing
 system can apply its own policy to them.
 
 **A missing plan means Free.** A plan hash can be missing because a sign-up has not propagated yet,
@@ -110,8 +106,7 @@ call races the sign-up. The same rule applies to individual fields: a missing or
 takes its Free default (`plan_test.cc`).
 
 **Grace of 10% of the quota.** A single rule is easy to state in a price list and to test: a Pay
-customer with 2,000 calls per day may make 2,200 before being denied (the grace policy is built in
-Week 4). The amount is stored per plan
+customer with 2,000 calls per day may make 2,200 before being denied. The amount is stored per plan
 in the `extra` field of the plan hash, written by the seed tool and the admin tool, so a plan can
 carry a different allowance without a code change; 10% is the value of the shipped presets.
 
@@ -123,28 +118,10 @@ Figure 3.1 shows the processes that take part in a check: the provider's API gat
 limiter instances, and one Redis Cluster. Only Redis holds state that matters; everything an instance
 holds can be lost.
 
-```mermaid
-flowchart LR
-  G[API gateway] -->|Check / CheckBatch, gRPC| S
-  subgraph L[Limiter instance, one of N]
-    S[gRPC service<br/>validation, admission] --> C[Engine<br/>CompositeCore]
-    C --> D[Deny cache]
-    C --> P[Plan cache]
-    C --> LE[Leases<br/>LeasedCore]
-    C --> ST[Exact path<br/>StrictCore]
-    C -.-> U[Usage log]
-    LE --> RB[Resilient backend<br/>timeouts, retries,<br/>slot-group breakers]
-    ST --> RB
-    P --> RB
-    RB --> RC[4 Redis clients]
-  end
-  RC -->|EVALSHA, HGETALL| R[(Redis Cluster)]
-  A[Admin tool rlctl] -->|HSET plan, PUBLISH| R
-  R -.->|plan-changes| P
-  M[Prometheus] -.->|GET /metrics| L
-```
+![Components of the service](figures/components.png)
 
-*Figure 3.1: Components. Solid arrows are calls on the path of a check; dashed ones are not.*
+*Figure 3.1: Components. Solid arrows are calls on the path of a check; dashed ones are not.
+(Source: `figures/components.mmd`, Mermaid.)*
 
 **API gateway.** The gateway is outside the system built here; a small demo gateway
 (`examples/gateway-python`) plays its part in the tests. It authenticates the end user's API key,
@@ -407,7 +384,7 @@ call on three customers whose plans differ only in the policy.
 
 Grace answers `OK`, not `OVERAGE`, because the extra units are free: the reason field tells the
 gateway what to bill, and only cap overage is billed. That choice is also what gives request 2,001
-three different answers, which is the Week 4 gate. It is tested on the script alone and end to end
+three different answers, one of the acceptance tests. It is tested on the script alone and end to end
 through gRPC (`Request2001GivesThreeAnswersOnThreePolicies`). Both counters reset with the UTC day,
 derived from the Redis clock so every instance agrees on the reset instant.
 
@@ -437,7 +414,7 @@ A call under a different plan ignores and drops the entry, so an upgrade lifts t
 call even if no plan-change message arrives.
 
 Plans themselves are cached on each instance for five seconds, which removed the plan read from
-every call: on the Week 2 strict benchmark the cache alone raised throughput from 16,738 to 19,480
+every call: on an early strict benchmark the cache alone raised throughput from 16,738 to 19,480
 checks per second (median of five runs each, same session). The admin tool writes a plan, then
 publishes the customer id on a Pub/Sub channel, and every instance drops its cached plan and its local
 denial. A read in flight when the message arrives is discarded and sent again, because it may have
@@ -462,7 +439,7 @@ billed, is therefore always counted exactly.
 The bound of 3.5.3 applies with no refill during the day. Redis grants at most `limit` units in a day.
 Units leased before midnight and used after it were counted for the old day, so N instances admit at
 most limit + N × C in one day: 0.4% of the day for four instances. Units leased and not used before
-the reset are an under-admission of at most N × C. In the gate test four instances shared one
+the reset are an under-admission of at most N × C. In the acceptance test four instances shared one
 customer of 100,000 a day (C = 100) with 20% more demand than the bound allows. They admitted exactly
 100,000 units, with 1,253 quota calls for 12,048 checks instead of one per check. A leased call does
 not deduplicate request ids: a retry inside the plan counts again and uses up one more unit of the
@@ -477,7 +454,7 @@ instances admitted what Redis granted minus at most N × C held in leases (5.2).
 ### 3.5.1 Why leases
 
 A strict check costs one Redis round trip, and its throughput on one instance is bounded by how many
-round trips are in flight: the Week 2 baseline admits 10,024 checks per second at a p99 of 10.5 ms
+round trips are in flight: an early baseline admits 10,024 checks per second at a p99 of 10.5 ms
 with 64 concurrent calls, and needs 1,024 concurrent calls to reach 25,301. The burst limit is
 checked on every API call, almost always for customers far below their limit, so most of those round
 trips only confirm that tokens remain. A lease removes them: each limiter instance takes a share of a
@@ -712,12 +689,12 @@ raised no false alarm. A tighter timeout needs the I/O thread freed of finishing
 future work.
 
 The timeout is a deadline on each attempt, which the client library alone did not provide. Its
-timeout is an idle timeout per connection, re-armed by any reply that arrives. The fault test of
-Week 6 gave one master 80 ms of extra latency under load: its connection was never idle for 50 ms,
+timeout is an idle timeout per connection, re-armed by any reply that arrives. The fault test
+(5.7) gave one master 80 ms of extra latency under load: its connection was never idle for 50 ms,
 no call timed out, and that master's customers waited about 250 ms for three slow round trips
 instead of getting their plan's policy. The resilient layer now answers every attempt as timed out
 at its deadline, whichever comes first of the reply and the deadline, and drops the late reply. The
-deadlines wait in a lock-free queue in send order (Vyukov's multi-producer, single-consumer queue),
+deadlines wait in a lock-free queue in send order (Vyukov's multi-producer, single-consumer queue [26]),
 which a timer thread empties and checks in batches. In the whole server its cost is within run-to-run
 noise, and no deadline was missed at saturation or under open-loop overload at 30,000 checks per
 second (`docs/thesis/evidence/faults_2026-10-23.md`). A first version guarded the queue with a mutex:
@@ -814,7 +791,7 @@ Goal G5 asks for about 1,000,000 checks per second, which is a figure for a clus
 thesis has one laptop, so this section does what Section 1.3 announced: it takes what one instance
 and one Redis master were measured to do, and computes how many of each the target would need, with
 every assumption named. **The results are estimates, not measurements.** The final version, with the
-scaling measurements of Week 7, is in Chapter 5 (5.11).
+scaling measurements, is in Chapter 5 (5.11).
 
 ### 3.8.1 Inputs
 
@@ -822,12 +799,12 @@ scaling measurements of Week 7, is in Chapter 5 (5.11).
 
 | Input | Value | Source (`docs/thesis/evidence/`) |
 | --- | --- | --- |
-| One instance, leased rule, one check per call, 192 calls in flight | 89,743 checks/s, p99 4.28 ms (75,652 before the Week 6 tuning) | `verification_and_speedups_2026-10-23.md` |
+| One instance, leased rule, one check per call, 192 calls in flight | 89,743 checks/s, p99 4.28 ms (75,652 before the tuning of 5.10) | `verification_and_speedups_2026-10-23.md` |
 | One instance, leased rule, fixed arrival rate: the highest rate tried with p99 below 2 ms | 20,000 checks/s, p99 1.80 ms | `week5_gate_2026-10-21.md` |
 | One instance, leased rule, batches of 10 | 538,605 checks/s, p99 7.51 ms per call | `ceiling_and_envoy_2026-10-19.md` |
 | One instance, exact daily quota (one script per check), 192 in flight | 30,376 checks/s, p99 24.2 ms (one run) | `reliability_2026-10-21.md` |
 | One instance, customer check of Pay customers (two scripts), fixed arrival rate | 20,000 checks/s, all answered, p99 19.5 ms | `week5_gate_2026-10-21.md` |
-| Script calls one Redis master absorbs | about 120,000/s | `docs/DESIGN.md` section 3 (Week 1: 360,000/s on three masters, each at about one core) |
+| Script calls one Redis master absorbs | about 120,000/s | `docs/DESIGN.md` section 3 (an early spike: 360,000/s on three masters, each at about one core) |
 | Redis calls per check of a leased rule (refills) | 0.016 | `throughput_2026-10-19.md` |
 | Redis calls per enterprise customer check | 1 script + 0.036 refills | `throughput_2026-10-19.md` |
 | Redis memory per stored request-id answer | 181 bytes | 3.6.2 |
@@ -901,7 +878,7 @@ Each assumption is a way the estimate can be wrong; Chapter 5 checks those it ca
   should help, but no server was measured.
 - **Instances scale linearly.** They share nothing but Redis, which makes it plausible. Four instances
   on the laptop reached 116,515 checks per second, which only shows that the laptop ran out of cores,
-  not how instances scale. The Week 7 matrix confirms it: one to four instances on the same laptop
+  not how instances scale. The benchmark matrix confirms it: one to four instances on the same laptop
   share its CPUs and add no capacity, and none of the engines degrades with more instances (5.6).
 - **A master absorbs 120,000 script calls per second.** This was measured with the token-bucket
   script. The quota script does more work (deduplication, overage) and was not measured on its own.
@@ -910,3 +887,254 @@ Each assumption is a way the estimate can be wrong; Chapter 5 checks those it ca
   quota.
 - **A loopback network.** A real network adds its round trip to every Redis call. Leases hide it from
   most checks; the exact path and the customer check do not.
+
+## 3.9 Merchants: one service, many API owners
+
+Sections 3.1 to 3.8 serve one API owner. The service is meant to be sold to many: each API owner (a
+**merchant**) has its own customers and plans, and must not see or affect another's. This section adds
+that layer. It changes how a call is named, not how it is decided.
+
+### 3.9.1 Who is calling
+
+A call carries its merchant's API key in the gRPC metadata `x-api-key`. The service resolves the key to
+a merchant before any engine work, and refuses a call without a known key with `UNAUTHENTICATED`.
+- **Keys are stored hashed.** The hash `{rl:merchants}:keys` maps the SHA-256 of each key to its
+  merchant, so a copy of Redis does not hand out working keys. The admin tool prints a new key once.
+- **No lock and no round trip per call.** Each instance loads the hash at start and again on a control
+  message (`!merchants` on `plan-changes`). Each gRPC thread keeps the keys it has resolved, and drops
+  them when a new index is published, so a revoked key stops at its next call.
+- **Encrypted on the way.** A key is a bearer credential: whoever reads it can use it. When gateways
+  reach the limiter over a network the platform does not own, the server runs with TLS (a certificate
+  and key in `RL_TLS_CERT` and `RL_TLS_KEY`). Plain text remains for a limiter beside its gateway.
+
+Rejected alternatives:
+- *A merchant field in the request:* any caller could claim to be any merchant.
+- *A Redis read per call:* a round trip on every call, the cost leases exist to avoid.
+- *A TLS client certificate per merchant:* stronger, but every merchant's gateway would then manage
+  certificates. It remains possible later.
+
+### 3.9.2 Isolation by name
+
+The service turns customer `cust:42` of merchant `acme` into the key `acme|cust:42` before the engine
+sees it. Every Redis key, plan, lease, cached denial and usage event below the service is built from
+that key, so merchants share nothing but capacity.
+- **Unambiguous:** a merchant id is 1 to 64 of A-Z, a-z, 0-9, `_` and `-`, so it cannot contain `|`.
+- **Spread:** the hash tag stays per customer (3.3.3), so a merchant's customers spread over all
+  masters.
+- **No allocation:** the key is built in a buffer each thread reuses, and the engines copy what they
+  keep before the call returns.
+
+Rejected alternatives:
+- *A Redis database per merchant:* Redis Cluster has only one database.
+- *A cluster per merchant:* the cost would grow with the number of merchants, not with the traffic.
+
+### 3.9.3 Limits that are not fixed
+
+Each customer's plan hash already holds its own numbers (3.3.2); a plan is a template copied into it.
+- **A catalogue per merchant:** a merchant defines its plans with any numbers
+  (`{rl:m:<merchant>}:catalog`); the platform's plans remain the defaults.
+- **Custom limits:** any field of one customer's plan can be set for that customer alone.
+- **Boosts:** extra units until a given time, for example +500 for a day in an emergency.
+- **Monthly quotas:** with `period month`, the quota counts per UTC calendar month.
+
+Every change is written first, then announced on `plan-changes`, so it applies on the next call on
+every instance. A test measured under one second; the plan change of 3.4.4 took 22 ms. Applying a
+plan replaces the whole hash, so custom limits and boosts end with it.
+
+The Redis clock decides both when a boost ends and when a month turns, as it decides the daily reset.
+So instances never disagree. A lease cannot see that clock, so monthly and boosted quotas take the
+exact path; plain daily plans keep the leased path of 3.4.5.
+
+### 3.9.4 A paying customer at the limit in an emergency
+
+| Answer | Policy | What the customer gets | Built |
+| --- | --- | --- | --- |
+| Block | `hard` | an outage at the worst moment | yes (3.4.2) |
+| A bounded grace | `grace`, e.g. +10% | survives small spikes, free | yes (3.4.2) |
+| Allow now, bill later | `cap` (`postpaid` in the API): counted exactly as billable overage, up to a spending cap | no outage; pays for the overage | yes, per plan and per customer (3.9.5), invoiced monthly (3.9.6) |
+| A boost | granted by the merchant, until a time | no outage, on the merchant's terms | yes (3.9.3) |
+| A prepaid top-up | bought by the customer, for this period | no outage; paid in advance | yes (3.9.5) |
+
+The recommended default:
+- *Free plans:* block.
+- *Paid plans:* a small grace, then billable overage up to a spending cap per quota period (a day on
+  a daily plan, so a month's bill holds at most the cap times its days). The cap is what keeps a
+  faulty client from running up an unbounded bill.
+
+Billing a card later never means storing card numbers. A payment provider keeps the card; the service
+keeps only the provider's customer id.
+
+### 3.9.5 Managing the service
+
+A management API (`control/`) changes what the limiters answer, while the limiters answer checks. The
+two meet only in Redis. Every change is one atomic script on the customer's hash, followed by the
+plan-change message of 3.4.4. The API's main choices, each against the alternative it rejects:
+
+- **Two credentials per merchant.**
+  - *The two keys:* a check key for its gateway's calls to the limiter, and a management key for the
+    API, both stored as hashes.
+  - *Why separate:* a gateway that leaks its key cannot change plans.
+  - *Isolation:* the merchant always comes from the credential, never from the URL.
+  - *Rejected:* one key for both; or the merchant in the path, checked against the key, where a single
+    missing check would open another merchant's customers.
+- **Top-ups belong to a period.**
+  - *How:* the plan hash holds the prepaid units and the period they were bought for. The script adds
+    them only in that period, by the Redis clock, so they end without a cleanup job.
+  - *What survives:* moving a customer to another plan keeps them, since they were paid for.
+  - *Retries:* a top-up request may carry an idempotency key, so a client retrying after a timeout
+    does not buy twice. Each purchase is also recorded for the invoice.
+  - *Rejected:* a separate counter of prepaid units, which a plan change or a new period would have
+    to reset in a second place.
+- **Alerts come from the quota script.**
+  - *How:* the script is the one place that sees a threshold being crossed atomically. It publishes
+    the first time in a period that a customer reaches 80% of its limit in force, reaches the limit,
+    goes into billed overage, or is denied. A bitmask in the counter makes each alert once a period,
+    and a replayed answer sends none.
+  - *Delivery:* a separate notifier sends each alert to the merchant's webhook, signed, and retries
+    on errors, so nothing is added to the limiter's request path.
+  - *The cost:* delivery is at most once while the notifier is down, because Pub/Sub keeps no
+    messages. The same state stays readable through the API.
+  - *Rejected:* a scan of counters for crossings, which grows with the number of customers and
+    reports late.
+- **The platform calls only public addresses.**
+  - *Why:* a webhook URL is chosen by the merchant, so it could point the platform at its own
+    internal network.
+  - *How:* URLs that resolve to private, loopback, link-local or reserved addresses are refused, when
+    registered and again before every delivery, and redirects are not followed. A delivery connects
+    to the very address that was checked, with the name kept for the `Host` header and the
+    certificate, so a name that answers a public address first and a private one next (DNS
+    rebinding) cannot redirect it.
+- **Hardening.**
+  - *Keys are rotated without a gap:* a merchant replaces its own management key in one step, and the
+    old one stops at once. The operator revokes check keys one at a time, so a gateway moves to a new
+    key before the old one goes.
+  - *Guessing is limited:* after 20 failed authentications in a minute, the client's address is
+    refused with `429`. The limit is checked before the key is looked at.
+  - *Every change is in an audit log:* who made it (the merchant, the operator or the admin tool), when,
+    and the request with its secrets masked. It is kept in a stream per merchant, written in one place,
+    a middleware, so no endpoint can be left out.
+
+### 3.9.6 Metering and invoices
+
+A merchant bills its customers for what the service admitted, so the numbers on an invoice must be the
+numbers the quota decided with. The service keeps them where they are made.
+- **Counted in the decision.** The quota script (3.4.2) also keeps the calendar month's totals in the
+  customer's counter, in the same atomic step as the decision: units within the plan (free grace
+  included) and billed overage units. This holds for a daily quota too, since invoices are monthly.
+- **Kept until invoiced.**
+  - *Filing:* when a new month begins, the script files the last month's totals, if it had billed
+    overage, as a field of its own.
+  - *Retention:* a counter holding billed overage is kept 35 days past its month, so the billing job
+    finds it even if the customer never calls again.
+  - *Cleanup:* the billing job removes the filed month once it is invoiced.
+  - *What stays as before:* a counter with nothing to bill expires after its period. So a flood of
+    unknown customer ids costs no more memory than before.
+- **One invoice per customer and month.**
+  - *Contents:* the plan's monthly fee, the billed overage at the plan's price, and each top-up bought
+    in the month at the price recorded when it was bought.
+  - *Amounts:* integers in cents, each line rounded half up once.
+  - *Once:* the invoice id names the customer and the month, so closing a month again writes nothing
+    twice.
+- **Charged without a card number.**
+  - *How:* the card is typed into the payment provider's form, which returns a token. The service keeps
+    only the provider's customer id and charges it when the month closes, with the invoice as the
+    idempotency key.
+  - *Outcomes:* a declined charge is tried again after 1, 3 and 7 days, each try with its own
+    idempotency key. Only when the last one fails is the customer suspended (the `suspended` plan of
+    3.3.2). A charge the provider settles later stays pending until the provider's signed webhook says
+    how it ended. A customer without a card keeps an open invoice for the merchant to collect.
+  - *Not stored:* a card number sent to the API is refused.
+  - *The provider:* a sandbox here, which takes the test tokens of a real provider.
+- **Months from the subscription date,** if the merchant chooses: a customer's month then starts on the
+  day it joined. The day is a field of its plan hash, kept when the plan changes, and the script counts
+  the monthly quota and the billing month from it. A billing month never moves back, so a filed month
+  is never reopened and overwritten.
+- **Proration.** A change of fee during the month is recorded with its time, and the invoice charges each
+  fee for the part of the month it was in force.
+- **Persistence.** Redis appends every write to a file and syncs it once a second, so a restarted node
+  keeps its counters, less at most the last second. Replication stays asynchronous, so a killed master
+  can still lose writes it had not passed on; the evaluation measures this rather than hiding it
+  (Chapter 5).
+
+Rejected alternatives:
+- *Invoices from usage events* (3.3.4): exact enough for reports, but best effort, written per instance
+  and dropped when a buffer is full. Reconciling them against the counters is kept as a check.
+- *A billing database written on every call:* a second write on the request path, and a second record
+  that could disagree with the decision.
+- *Waiting for a replica on every quota write (`WAIT`):* closes the failover gap, but adds a replication
+  round trip to every exact check.
+
+### 3.9.7 Protecting the merchant's backend
+
+A quota is a count per day or month; a backend fails on calls per second. Quotas can be sold beyond
+what a backend takes at once, because not every customer uses its quota at the same moment.
+- **A capacity per merchant.**
+  - *The setting:* the merchant sets how many calls a second its backend takes from all its customers.
+  - *Where it is taken:* after the customer's own burst and before its quota, so a call it refuses is
+    never counted or billed. While Redis says the capacity is out, a call is refused before the burst
+    check too, from the lease alone. Otherwise a flood over the capacity would cost Redis a burst script
+    and a token return per refused call, which the evaluation found slowing other merchants (5.12).
+  - *How:* a token bucket keyed by the merchant, served from leases (3.5) like any other bucket. One
+    merchant's capacity is one hot key, the case leases serve best. N instances admit at most the
+    capacity plus N times one lease chunk.
+- **A reserve for paying customers.**
+  - *The split:* a share of the capacity (for example 20%) is a second bucket, which only plans with a
+    fee may use.
+  - *Under a flood:* Free calls exhaust the first bucket and are refused, while paying customers still
+    get the reserve.
+  - *Measured:* a property test floods Free calls at three times the capacity over 2 to 4 instances,
+    and checks every window from 1 ms to 4 s against the bound. Paying customers asking for 70% of the
+    reserve kept every call.
+- **A check rate per merchant.**
+  - *Why:* the platform protects itself too. The operator sets how many checks a second it takes from
+    each merchant, so one merchant's flood costs the others nothing.
+  - *Where it is taken:* first, before any other step, for any rule.
+  - *The cost:* a lease hit is one atomic instruction, with no allocation.
+- **Endpoint weights** need no new mechanism. A gateway already sends a cost per check (F1, 3.1.1), so an
+  expensive endpoint takes more of the capacity.
+
+Rejected alternatives:
+- *An exact check of the capacity on every call:* one hot key per merchant on one master serialises
+  every call of that merchant (3.5.1).
+- *A priority queue in the limiter:* queueing would hold calls the limiter must answer at once; the
+  reserve gives the same guarantee with a refusal instead of a wait.
+- *A reserve taken from the same bucket by a threshold* (Free refused below 20% of tokens): a lease
+  cannot see how many tokens the shared bucket holds, so the threshold would leak by N × C.
+
+### 3.9.8 The merchant portal
+
+A merchant runs its business from one page, served by the management API at `/portal`. It has no
+state of its own: every value it shows is read from the API, and every button is one API call, so the
+portal can do exactly what the API allows and nothing more.
+- **What a merchant sees.**
+  - *The month:* calls admitted and billed overage, summed from the quota counters (3.9.6). The
+    counters are where every instance's calls are counted, so the numbers cover all instances. Two
+    readings a few seconds apart give the calls a second, timed by the Redis clock.
+  - *Customers:* a page at a time, each with its use of the period as a bar, its billed overage and the
+    alerts sent. The customers of a merchant are listed from an index kept in the merchant's slot,
+    so a page never scans the cluster.
+  - *One customer:* its terms, its boost and top-up, and the invoice so far this month, made by the
+    same function that closes a month (3.9.6).
+  - *Actions:* move to a plan, set custom limits, grant or end a boost, add a top-up, suspend and
+    resume, define plans, set the capacity and its reserve (3.9.7), read a month's invoices and
+    download them, set the webhook.
+- **Signed in with the management key,** sent as a bearer token to the same server and kept only in
+  the browser tab's session storage. The API decides who the merchant is from the key alone (3.9.5).
+- **Built against the usual attacks on a web page.**
+  - *A strict Content Security Policy:* the page may load scripts, styles and data only from its own
+    server, may not be framed, and runs no inline script. Code injected into the page through a
+    customer id or a plan name would not run.
+  - *Text, never markup:* every value from the server is written into the page as text, so a customer
+    named `<img onerror=…>` is shown, not run.
+  - *Retries buy once:* a top-up from the page carries a new idempotency key, and a button is
+    disabled while its call runs, so a double click does not buy twice.
+
+Rejected alternatives:
+- *A separate web application:* a second deployment and a build step, for a page that only calls the
+  API.
+- *A session cookie:* the browser would send it on requests that other sites start, which needs
+  protection against cross-site request forgery. A bearer token is sent only by the page's own code.
+- *A live count of refusals:* the counters hold admitted calls, which is what is billed. Counting
+  refusals per merchant would add work to every refused call on the limiter, the calls a flood makes.
+  The portal shows admitted calls, and a customer's first refusal at its quota in a period reaches
+  the merchant as an alert; refusals for capacity are not shown.

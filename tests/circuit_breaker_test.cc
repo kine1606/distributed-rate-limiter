@@ -10,6 +10,7 @@
 #include <chrono>
 #include <deque>
 #include <future>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -554,6 +555,91 @@ TEST(SlotBreakers, HashSlotFollowsRedis) {
   EXPECT_EQ(HashSlot("foo{{bar}}zap"), Crc16Slot("{bar"));     // the tag ends at the first }
   SlotBreakers b;
   EXPECT_EQ(&b.ForEntity("cust:42"), &b.ForKey("{cust:42}:daily_quota:q"));  // keys.h builds this form
+}
+
+// ---- Week 5 edge cases (2026-11-01): the breaker's timing and its transitions ----
+
+TEST_F(CircuitBreakerTest, TheProbeWaitsTheWholeOpenTimeToTheNanosecond) {
+  Fail(20);
+  g_now = 500 * kMs - 1;
+  EXPECT_FALSE(breaker.Allow());
+  g_now = 500 * kMs;
+  EXPECT_TRUE(breaker.Allow());
+}
+
+TEST_F(CircuitBreakerTest, OnlyTheChangesOfStateAreReported) {  // what main logs: one line per change
+  for (int i = 0; i < 19; ++i) EXPECT_FALSE(breaker.OnFailure()) << i;
+  EXPECT_TRUE(breaker.OnFailure());   // the 20th opens it
+  EXPECT_FALSE(breaker.OnFailure());  // already open
+  EXPECT_FALSE(breaker.OnSuccess());  // a late success while open changes nothing
+  EXPECT_EQ(breaker.state(), State::kOpen);
+  g_now = 500 * kMs;
+  ASSERT_TRUE(breaker.Allow());
+  EXPECT_TRUE(breaker.OnSuccess());   // the probe closes it
+  EXPECT_FALSE(breaker.OnSuccess());  // closed stays closed
+}
+
+TEST_F(CircuitBreakerTest, FailuresWhileOpenDoNotPushTheProbeBack) {
+  Fail(20);
+  g_now = 400 * kMs;
+  Fail(50);  // late answers to calls sent before it opened
+  g_now = 500 * kMs;
+  EXPECT_TRUE(breaker.Allow());
+}
+
+TEST_F(CircuitBreakerTest, AfterAProbeClosesItTwentyNewFailuresAreNeeded) {
+  Fail(20);
+  g_now = 500 * kMs;
+  ASSERT_TRUE(breaker.Allow());
+  breaker.OnSuccess();
+  Fail(19);
+  EXPECT_EQ(breaker.state(), State::kClosed);
+  Fail(1);
+  EXPECT_EQ(breaker.state(), State::kOpen);
+}
+
+TEST_F(CircuitBreakerTest, WhileTheProbeIsOutEveryOtherCallIsRefused) {
+  Fail(20);
+  g_now = 500 * kMs;
+  ASSERT_TRUE(breaker.Allow());
+  g_now = 10'000 * kMs;  // however long the probe takes (ResilientBackend's deadline ends it)
+  for (int i = 0; i < 5; ++i) EXPECT_FALSE(breaker.Allow()) << i;
+  EXPECT_EQ(breaker.state(), State::kHalfOpen);
+}
+
+TEST(CircuitBreaker, AThresholdOfOneOpensOnTheFirstFailure) {
+  g_now = 0;
+  CircuitBreaker b({.failure_threshold = 1, .open_for = milliseconds(10)}, &FakeNow);
+  EXPECT_TRUE(b.OnFailure());
+  EXPECT_FALSE(b.Allow());
+  g_now = 10 * kMs;
+  EXPECT_TRUE(b.Allow());
+}
+
+TEST(SlotBreakers, EachGroupCoversItsOwn256Slots) {
+  SlotBreakers b;
+  std::map<int, std::vector<std::string>> in_group;  // slot / 256 -> entities
+  for (int i = 0; in_group[0].size() < 2 || in_group[1].empty() || in_group[63].empty(); ++i) {
+    const std::string e = "cust:" + std::to_string(i);
+    in_group[Crc16Slot(e) / 256].push_back(e);
+  }
+  EXPECT_EQ(&b.ForEntity(in_group[0][0]), &b.ForEntity(in_group[0][1]));
+  EXPECT_NE(&b.ForEntity(in_group[0][0]), &b.ForEntity(in_group[1][0]));
+  EXPECT_NE(&b.ForEntity(in_group[0][0]), &b.ForEntity(in_group[63][0]));
+}
+
+TEST(SlotBreakers, OpeningOneGroupLeavesTheOthersClosed) {
+  g_now = 0;
+  SlotBreakers b({.failure_threshold = 1, .open_for = milliseconds(500)}, &FakeNow);
+  std::string other;
+  for (int i = 0; other.empty(); ++i) {
+    const std::string e = "cust:" + std::to_string(i);
+    if (Crc16Slot(e) / 256 != Crc16Slot("cust:42") / 256) other = e;
+  }
+  b.ForEntity("cust:42").OnFailure();
+  EXPECT_EQ(b.Open(), 1u);
+  EXPECT_FALSE(b.ForEntity("cust:42").Allow());
+  EXPECT_TRUE(b.ForEntity(other).Allow());
 }
 
 }  // namespace

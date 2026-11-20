@@ -30,10 +30,10 @@ inline constexpr std::int64_t kChunkIdleNs = 10'000'000'000;
 // the refill was out, so demand outran the chunk within one round trip: double. `idle`: the
 // previous chunk lasted longer than kChunkIdleNs: halve. Both or neither: keep.
 inline std::uint32_t NextChunk(std::uint32_t chunk, bool emptied, bool idle, const Rule& r) {
-  std::uint32_t next = chunk;
-  if (emptied && !idle) next = chunk * 2;
+  std::uint64_t next = chunk;  // 64 bits: doubling a chunk of 2^31 or more must not wrap to a tiny one
+  if (emptied && !idle) next = std::uint64_t{chunk} * 2;
   if (idle && !emptied) next = chunk / 2;
-  return std::clamp(next, ChunkMin(r), ChunkCap(r));
+  return static_cast<std::uint32_t>(std::clamp<std::uint64_t>(next, ChunkMin(r), ChunkCap(r)));
 }
 
 }  // namespace ratelimiter

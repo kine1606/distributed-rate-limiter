@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Plants one bug at a time in the engine, runs the property tests (tests/property_test.cc), and restores
-the file from git. Run from a clean tree: tests/eval/planted_bugs.py
+the file exactly as it was, uncommitted changes included: tests/eval/planted_bugs.py
 A mutation the tests do not catch is a gap in the tests."""
 import pathlib
 import subprocess
@@ -30,8 +30,8 @@ MUTATIONS = [
     ("a leased quota chunk may grow to twice the cap", "src/lease/chunk_policy.h",
      "return std::clamp(next, ChunkMin(r), ChunkCap(r));", "return std::clamp(next, ChunkMin(r), 2 * ChunkCap(r));"),
     ("a lease refill adds a chunk instead of topping up", "src/core/leased_core.cc",
-     "Refill(l, static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have)), 0);",
-     "Refill(l, static_cast<std::uint32_t>(std::max<std::int64_t>(1, target)), 0);"),
+     "const auto amount = static_cast<std::uint32_t>(std::max<std::int64_t>(1, target - have));",
+     "const auto amount = static_cast<std::uint32_t>(std::max<std::int64_t>(1, target));"),
 ]
 
 
@@ -57,11 +57,13 @@ for name, path, old, new in MUTATIONS:
         first = next((l for l in t.stdout.splitlines() if " seed " in l and ": " in l and "replay" not in l), "")
         results.append((name, f"caught by {len(failed)} test(s): {first.strip()[:160]}" if failed else "NOT CAUGHT"))
     finally:
-        run(f"git checkout -- {path}")
+        f.write_text(text)  # the file as it was, uncommitted changes included (git checkout would drop them)
     print(results[-1], flush=True)
 
 run("cmake --build build/release --target rl_unit_tests")
 print("\nsummary:")
 for name, outcome in results:
     print(f"- {name}: {outcome}")
-sys.exit(0)
+# Fails unless every bug was planted and caught: a mutation whose text drifted away from the code is a
+# test that silently stopped running.
+sys.exit(0 if all(outcome.startswith("caught") for _, outcome in results) else 1)

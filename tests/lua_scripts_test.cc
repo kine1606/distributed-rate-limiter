@@ -40,6 +40,8 @@ class LuaTest : public ::testing::Test {
       host = a.substr(0, c);
       if (c != std::string::npos) port = std::stoi(a.substr(c + 1));
     }
+    host_ = host;
+    port_ = port;
     ctx_.reset(redisConnect(host.c_str(), port));
     if (!ctx_ || ctx_->err) GTEST_SKIP() << "Redis not reachable at " << host << ":" << port;
     tb_sha_ = Load(std::string(RL_SOURCE_DIR) + "/lua/token_bucket.lua");
@@ -101,6 +103,28 @@ class LuaTest : public ::testing::Test {
     if (!req_key.empty()) keys.push_back(req_key);
     return RunKeys(quota_sha_, keys, {std::to_string(limit), std::to_string(cost), policy, std::to_string(extra)});
   }
+  // quota.lua with a period ("day" | "month") and a boost of `boost` units until `boost_until_ms`.
+  Reply QuotaV3(const std::string& key, int limit, const std::string& period, int boost = 0,
+                long long boost_until_ms = 0) {
+    return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", period, std::to_string(boost),
+                                 std::to_string(boost_until_ms)});
+  }
+  // quota.lua with a prepaid top-up of `topup` units bought for `topup_period` ("d<day>" or "m<month>").
+  Reply QuotaTopUp(const std::string& key, int limit, int topup, const std::string& topup_period) {
+    return Run(quota_sha_, key, {std::to_string(limit), "1", "hard", "0", "day", "0", "0", std::to_string(topup),
+                                 topup_period});
+  }
+  // The month starting on day `anchor` (P5; 1: the UTC calendar month) that `ms` falls in, numbered as
+  // the script numbers it (year * 12 + month - 1 of the month it starts in), and the ms to the next one.
+  static std::pair<long long, long long> MonthOf(long long ms, unsigned anchor = 1) {
+    using namespace std::chrono;
+    const year_month_day ymd{floor<days>(sys_time<milliseconds>(milliseconds(ms)))};
+    year_month start = ymd.year() / ymd.month();
+    if (static_cast<unsigned>(ymd.day()) < anchor) start -= months(1);
+    const sys_days next{(start + months(1)) / day(anchor)};
+    return {static_cast<int>(start.year()) * 12LL + static_cast<unsigned>(start.month()) - 1,
+            duration_cast<milliseconds>(next.time_since_epoch()).count() - ms};
+  }
   // Today's quota state, as if `used` units were already consumed (request used + 1 comes next).
   void SetUsedToday(const std::string& key, int used) {
     const std::string day = std::to_string(RedisNowMs() / 86400000);
@@ -161,6 +185,8 @@ class LuaTest : public ::testing::Test {
 
   struct Closer { void operator()(redisContext* c) const { redisFree(c); } };
   std::unique_ptr<redisContext, Closer> ctx_;
+  std::string host_;
+  int port_ = 0;
   std::string tb_sha_, quota_sha_, fw_sha_, sw_sha_, return_sha_;
   std::chrono::steady_clock::time_point mono_start_;
   long long wall_start_ = 0;
@@ -305,6 +331,27 @@ TEST_F(LuaTest, QuotaCostGreaterThanRemainingIsDeniedAndNotCounted) {
   EXPECT_EQ(r.ints[1], 3);
 }
 
+// Week 1 edge cases (2026-11-01).
+TEST_F(LuaTest, AQuotaOfZeroDeniesEveryCallAndCountsNothing) {
+  const std::string k = "{q0}:quota";
+  Del(k);
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(QuotaV2(k, 0, 1, "hard", 0).ints[0], 0) << i;
+  const std::string used = HGet(k, "used");
+  EXPECT_TRUE(used.empty() || used == "0") << used;
+}
+
+TEST_F(LuaTest, ACostOfExactlyTheRemainingIsAdmittedAndTheNextUnitIsNot) {
+  const std::string k = "{qx}:quota";
+  Del(k);
+  SetUsedToday(k, 2);
+  const auto r = QuotaV2(k, 5, 3, "hard", 0);  // 2 used + 3 = 5: the limit exactly
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[1], 5);  // used
+  EXPECT_EQ(r.ints[2], 0);  // remaining
+  EXPECT_EQ(QuotaV2(k, 5, 1, "hard", 0).ints[0], 0);
+  EXPECT_EQ(HGet(k, "used"), "5");
+}
+
 TEST_F(LuaTest, QuotaResetsOnNewUtcDay) {
   const std::string k = "{q5}:quota";
   Del(k);
@@ -324,6 +371,137 @@ TEST_F(LuaTest, QuotaKeyExpiresAfterDayEnds) {
   EXPECT_LE(ttl, 86400000 + 3600000);
 }
 
+// ---- quota v3: monthly periods and boosts (Phase 2, P1) ----
+
+TEST_F(LuaTest, MonthlyQuotaCountsAcrossDaysAndStartsAgainInANewMonth) {
+  const std::string k = "{qm1}:quota";
+  Del(k);
+  const auto [month, until_next] = MonthOf(RedisNowMs());
+  // 4 used earlier this month, on other days: a monthly quota of 5 has one left.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s month %lld used 4", k.c_str(), month));
+  const auto r = QuotaV3(k, 5, "month");
+  ASSERT_EQ(r.ints.size(), 7u);
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[2], 0);
+  EXPECT_NEAR(static_cast<double>(r.ints[3]), static_cast<double>(until_next), 2000.0);  // to the 1st, 00:00 UTC
+  EXPECT_EQ(QuotaV3(k, 5, "month").ints[0], 0);
+  EXPECT_EQ(HGet(k, "month"), std::to_string(month));
+  EXPECT_EQ(HGet(k, "day"), "");
+  EXPECT_GT(Pttl(k), until_next - 2000);  // kept past the month's end, for the invoice
+
+  // Last month full: this month starts at zero.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s month %lld used 5", k.c_str(), month - 1));
+  const auto fresh = QuotaV3(k, 5, "month");
+  EXPECT_EQ(fresh.ints[0], 1);
+  EXPECT_EQ(fresh.ints[1], 1);
+}
+
+// P5: billing from the subscription date. Redis's clock cannot be moved, so the anchors are around
+// today: on or before today the period began this month; after today (only possible up to the 27th)
+// it began last month. The property tests cover every date on a fake clock.
+TEST_F(LuaTest, AnAnchoredMonthRunsFromItsDayToTheSameDayOfTheNextMonth) {
+  const std::string k = "{qa1}:quota";
+  const long long now = RedisNowMs();
+  const unsigned today = static_cast<unsigned>(std::chrono::year_month_day{
+      std::chrono::floor<std::chrono::days>(std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(now)))}
+                                                   .day());
+  std::vector<unsigned> anchors{std::min(today, 28u)};
+  if (today < 28) anchors.push_back(today + 1);
+  for (const unsigned anchor : anchors) {
+    Del(k);
+    const auto [month, until_next] = MonthOf(now, anchor);
+    const auto r = Run(quota_sha_, k, {"5", "1", "hard", "0", "month", "0", "0", "0", "", std::to_string(anchor)});
+    ASSERT_EQ(r.ints.size(), 7u);
+    EXPECT_EQ(r.ints[0], 1) << anchor;
+    EXPECT_NEAR(static_cast<double>(r.ints[3]), static_cast<double>(until_next), 2000.0) << anchor;
+    EXPECT_EQ(HGet(k, "month"), std::to_string(month)) << anchor;
+    EXPECT_EQ(HGet(k, "bm"), std::to_string(month)) << anchor;  // the billing month follows the anchor too
+  }
+  Del(k);  // a day out of range is the calendar month
+  Run(quota_sha_, k, {"5", "1", "hard", "0", "month", "0", "0", "0", "", "31"});
+  EXPECT_EQ(HGet(k, "month"), std::to_string(MonthOf(now).first));
+}
+
+TEST_F(LuaTest, ABoostRaisesTheLimitUntilItEnds) {
+  const std::string k = "{qb1}:quota", ended = "{qb2}:quota";
+  Del(k);
+  Del(ended);
+  const long long now = RedisNowMs();
+  for (int i = 1; i <= 3; ++i) {  // a limit of 1, plus 2 for the next minute
+    const auto r = QuotaV3(k, 1, "day", 2, now + 60000);
+    EXPECT_EQ(r.ints[0], 1) << "call " << i;
+    EXPECT_EQ(r.ints[6], 3);
+  }
+  EXPECT_EQ(QuotaV3(k, 1, "day", 2, now + 60000).ints[0], 0);
+  const auto r = QuotaV3(ended, 1, "day", 2, now - 1000);  // the boost ended a second ago
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[6], 1);
+  EXPECT_EQ(QuotaV3(ended, 1, "day", 2, now - 1000).ints[0], 0);
+}
+
+// ---- quota v4: prepaid top-ups and alerts (Phase 2, P2) ----
+
+TEST_F(LuaTest, ATopUpCountsOnlyInThePeriodItWasBoughtFor) {
+  const std::string k = "{qt1}:quota", old = "{qt2}:quota";
+  Del(k);
+  Del(old);
+  const std::string today = "d" + std::to_string(RedisNowMs() / 86400000);
+  for (int i = 1; i <= 3; ++i) EXPECT_EQ(QuotaTopUp(k, 1, 2, today).ints[0], 1) << "call " << i;
+  const auto denied = QuotaTopUp(k, 1, 2, today);
+  EXPECT_EQ(denied.ints[0], 0);
+  EXPECT_EQ(denied.ints[6], 3);  // 1 + the top-up
+  const std::string yesterday = "d" + std::to_string(RedisNowMs() / 86400000 - 1);
+  const auto r = QuotaTopUp(old, 1, 2, yesterday);
+  EXPECT_EQ(r.ints[0], 1);
+  EXPECT_EQ(r.ints[6], 1);  // bought for another period: no effect
+  EXPECT_EQ(QuotaTopUp(old, 1, 2, yesterday).ints[0], 0);
+}
+
+TEST_F(LuaTest, EachAlertIsPublishedOncePerPeriodAndNeverForAReplay) {
+  std::unique_ptr<redisContext, Closer> sub(redisConnect(host_.c_str(), port_));
+  ASSERT_TRUE(sub && !sub->err);
+  freeReplyObject(redisCommand(sub.get(), "SUBSCRIBE rl-alerts"));
+  redisSetTimeout(sub.get(), timeval{2, 0});
+  const auto next = [&sub]() -> std::string {  // the next message on rl-alerts
+    void* reply = nullptr;
+    if (redisGetReply(sub.get(), &reply) != REDIS_OK || reply == nullptr) return "(none)";
+    auto* r = static_cast<redisReply*>(reply);
+    std::string payload = r->type == REDIS_REPLY_ARRAY && r->elements == 3 ? r->element[2]->str : "(other)";
+    freeReplyObject(r);
+    return payload;
+  };
+  const std::string k = "{acme|ca1}:daily_quota:q", req = "{acme|ca1}:daily_quota:req:x";
+  Del(k);
+  Del(req);
+  std::vector<int> allowed;
+  for (int i = 1; i <= 7; ++i) allowed.push_back(static_cast<int>(QuotaV2(k, 5, 1, "cap", 2).ints[0]));
+  EXPECT_EQ(allowed, (std::vector<int>{1, 1, 1, 1, 1, 1, 1}));  // 5 in the plan, 2 billed
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2, req).ints[0], 0);      // the first denial
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2, req).ints[5], 1);      // its replay
+  EXPECT_EQ(QuotaV2(k, 5, 1, "cap", 2).ints[0], 0);           // a second denial
+  freeReplyObject(redisCommand(ctx_.get(), "PUBLISH rl-alerts end"));
+
+  const std::vector<std::pair<std::string, std::string>> want{
+      {"quota.80", "\"used\":4"}, {"quota.100", "\"used\":5"}, {"overage.started", "\"overage_used\":1"},
+      {"quota.denied", "\"overage_used\":2"}};
+  for (const auto& [event, detail] : want) {
+    const std::string m = next();
+    EXPECT_NE(m.find("\"event\":\"" + event + "\""), std::string::npos) << m;
+    EXPECT_NE(m.find(detail), std::string::npos) << m;
+    EXPECT_NE(m.find("\"customer\":\"acme|ca1\""), std::string::npos) << m;
+    EXPECT_NE(m.find("\"limit\":5"), std::string::npos) << m;
+  }
+  EXPECT_EQ(next(), "end");  // nothing more: not for the replay, not for the second denial
+
+  // A new period starts the alerts again.
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s day %lld", k.c_str(), RedisNowMs() / 86400000 - 1));
+  for (int i = 1; i <= 4; ++i) QuotaV2(k, 5, 1, "cap", 2);
+  freeReplyObject(redisCommand(ctx_.get(), "PUBLISH rl-alerts end"));
+  const std::string again = next();
+  EXPECT_NE(again.find("\"event\":\"quota.80\""), std::string::npos) << again;
+  EXPECT_EQ(next(), "end");
+}
+
 // ---- quota v2: overage policies and request id (Week 4) ----
 
 // The Week 4 gate on the script: the same request 2,001 on three plans gives three answers.
@@ -336,7 +514,8 @@ TEST_F(LuaTest, Request2001OnHardGraceAndCapGivesThreeDifferentAnswers) {
   const auto h = QuotaV2(hard, 2000, 1, "hard", 0);
   const auto g = QuotaV2(grace, 2000, 1, "grace", 200);
   const auto c = QuotaV2(cap, 2000, 1, "cap", 1000);
-  ASSERT_EQ(h.ints.size(), 6u);
+  ASSERT_EQ(h.ints.size(), 7u);
+  EXPECT_EQ(h.ints[6], 2000);  // the limit in force
   EXPECT_EQ(h.ints[0], 0);  // hard: denied
   EXPECT_EQ(h.ints[4], 0);
   EXPECT_EQ(g.ints[0], 1);  // grace: allowed, free
@@ -380,6 +559,71 @@ TEST_F(LuaTest, CapBillsOnlyThePartOfARequestBeyondTheLimit) {
   EXPECT_EQ(r.ints[4], 1);
   EXPECT_EQ(HGet(k, "used"), "3");
   EXPECT_EQ(HGet(k, "overage_used"), "1");
+}
+
+// ---- billing totals per calendar month (Phase 2, P3) ----
+
+TEST_F(LuaTest, TheMonthCountsUnitsInThePlanAndBilledOverageSeparately) {
+  const std::string cap = "{qb1}:quota", grace = "{qb2}:quota";
+  Del(cap);
+  Del(grace);
+  const long long month = MonthOf(RedisNowMs()).first;
+  for (int i = 0; i < 2; ++i) QuotaV2(cap, 3, 1, "cap", 5);
+  QuotaV2(cap, 3, 2, "cap", 5);                     // straddles the limit: 1 in the plan, 1 billed
+  QuotaV2(cap, 3, 3, "cap", 5);                     // all billed
+  EXPECT_EQ(QuotaV2(cap, 3, 2, "cap", 5).ints[0], 0);  // past the cap: denied, counts nowhere
+  EXPECT_EQ(HGet(cap, "bm"), std::to_string(month));
+  EXPECT_EQ(HGet(cap, "bu"), "3");
+  EXPECT_EQ(HGet(cap, "bo"), "4");
+  for (int i = 0; i < 5; ++i) QuotaV2(grace, 2, 1, "grace", 2);  // 2 in the plan, 2 free, 1 denied
+  EXPECT_EQ(HGet(grace, "bu"), "4");
+  EXPECT_EQ(HGet(grace, "bo"), "0");
+}
+
+TEST_F(LuaTest, ARetriedRequestIsBilledOnce) {
+  const std::string k = "{qb3}:quota", req = "{qb3}:quota:req:r1";
+  Del(k);
+  Del(req);
+  QuotaV2(k, 1, 1, "cap", 5);
+  QuotaV2(k, 1, 2, "cap", 5, req);
+  const auto again = QuotaV2(k, 1, 2, "cap", 5, req);
+  EXPECT_EQ(again.ints[5], 1);  // replayed
+  EXPECT_EQ(HGet(k, "bo"), "2");
+}
+
+TEST_F(LuaTest, ANewMonthFilesTheLastMonthsBilledOverage) {
+  const std::string k = "{qb4}:quota";
+  Del(k);
+  const auto [month, month_left] = MonthOf(RedisNowMs());
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s bm %lld bu 7 bo 3", k.c_str(), month - 1));
+  QuotaV2(k, 10, 1, "cap", 5);
+  EXPECT_EQ(HGet(k, "closed:m" + std::to_string(month - 1)), "7,3");
+  EXPECT_EQ(HGet(k, "bm"), std::to_string(month));
+  EXPECT_EQ(HGet(k, "bu"), "1");
+  EXPECT_EQ(HGet(k, "bo"), "0");
+  const long long retain = 35LL * 86400000;
+  EXPECT_NEAR(std::stod(HGet(k, "keep_until")), static_cast<double>(RedisNowMs() + retain), 2000.0);
+  EXPECT_GT(Pttl(k), retain - 2000);  // kept for the billing job though this month bills nothing yet
+}
+
+TEST_F(LuaTest, AMonthWithoutBilledOverageIsNotFiledNorKept) {
+  const std::string k = "{qb5}:quota";
+  Del(k);
+  const long long month = MonthOf(RedisNowMs()).first;
+  freeReplyObject(redisCommand(ctx_.get(), "HSET %s bm %lld bu 7 bo 0", k.c_str(), month - 1));
+  QuotaV2(k, 10, 1, "cap", 5);
+  EXPECT_EQ(HGet(k, "closed:m" + std::to_string(month - 1)), "");
+  EXPECT_LE(Pttl(k), 86400000 + 3600000);  // a key with nothing to bill goes after its day, as before
+}
+
+TEST_F(LuaTest, BilledOverageKeepsTheCounterPastItsMonth) {
+  const std::string k = "{qb6}:quota";
+  Del(k);
+  const long long month_left = MonthOf(RedisNowMs()).second;
+  QuotaV2(k, 1, 1, "cap", 5);
+  EXPECT_LE(Pttl(k), 86400000 + 3600000);
+  QuotaV2(k, 1, 1, "cap", 5);  // billed overage
+  EXPECT_GT(Pttl(k), month_left + 35LL * 86400000 - 2000);
 }
 
 TEST_F(LuaTest, NewUtcDayResetsOverageToo) {

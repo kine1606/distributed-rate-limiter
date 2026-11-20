@@ -2,8 +2,9 @@
 
 Numbered as cited in the chapters. **V** = content checked online on 2026-10-17/18 while drafting
 (the quoted statements were read on the page). **L** = well-known literature cited from memory;
-check the bibliographic details against the original before submission. Web pages: accessed
-2026-10-17 unless noted.
+check the bibliographic details against the original before submission. **B** = bibliographic
+details checked online on 2026-10-25, cited for its standard result. Web pages: accessed 2026-10-17
+unless noted.
 
 1. **V** Amazon Web Services. "Usage plans and API keys for REST APIs in API Gateway." *Amazon API
    Gateway Developer Guide.* https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-api-usage-plans.html
@@ -94,3 +95,23 @@ check the bibliographic details against the original before submission. Web page
     `maxUnsynchronizedTokens` and a maximum time between synchronizations; `predicting()` "tries to
     predict aggregated consumption rate in whole cluster in order to reduce the risk of
     overconsumption that caused by DelayOptimization".
+22. **B** J. D. C. Little. "A Proof for the Queuing Formula: L = λW." *Operations Research* 9(3),
+    pp. 383–387, 1961. doi:10.1287/opre.9.3.383. The mean number in a system equals the arrival rate
+    times the mean time spent in it.
+23. **B** N. J. Gunther. *Guerrilla Capacity Planning: A Tactical Approach to Planning for Highly
+    Scalable Applications and Services.* Springer, Berlin and Heidelberg, 2007.
+    doi:10.1007/978-3-540-31010-5. The Universal Scalability Law, with one coefficient for contention
+    and one for coherency delay.
+24. **V** B. F. Cooper, A. Silberstein, E. Tam, R. Ramakrishnan, R. Sears. "Benchmarking Cloud
+    Serving Systems with YCSB." *Proc. 1st ACM Symposium on Cloud Computing (SoCC '10)*,
+    pp. 143–154, 2010. Zipfian requests: "some records will be extremely popular (the head of the
+    distribution) while most records will be unpopular (the tail)". The exponent 0.99 is the YCSB
+    tool's `ZIPFIAN_CONSTANT` (`core/src/main/java/site/ycsb/generator/ZipfianGenerator.java`,
+    read 2026-10-25); the paper does not state it.
+25. **B** B. Gregg. "The Flame Graph." *Communications of the ACM* 59(6), pp. 48–57, 2016.
+    doi:10.1145/2909476.
+26. **V** D. Vyukov. "Intrusive MPSC node-based queue." 1024cores.
+    http://www.1024cores.net/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue
+    (the site redirected away on 2026-10-25). gRPC v1.51.1 credits it in
+    `src/core/lib/gprpp/mpscq.h`: "Multiple-producer single-consumer lock free queue, based upon the
+    implementation from Dmitry Vyukov here", followed by that URL (read 2026-10-25).

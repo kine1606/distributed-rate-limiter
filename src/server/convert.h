@@ -9,15 +9,19 @@
 namespace ratelimiter {
 
 // Request limits promised in proto/rate_limiter.proto.
-inline constexpr std::size_t kMaxIdBytes = 128;  // key and request_id
+inline constexpr std::size_t kMaxIdBytes = 128;  // key, rule and request_id
 inline constexpr int kMaxBatch = 1000;
 
 // Why a request is malformed (the INVALID_ARGUMENT message), or nullptr if it is fine.
 inline const char* Invalid(const v1::CheckRequest& r) {
   if (r.key().empty() || r.rule().empty()) return "key and rule are required";
-  if (r.key().size() > kMaxIdBytes || r.request_id().size() > kMaxIdBytes) {
-    return "key and request_id are at most 128 bytes";
+  if (r.key().size() > kMaxIdBytes || r.rule().size() > kMaxIdBytes || r.request_id().size() > kMaxIdBytes) {
+    return "key, rule and request_id are at most 128 bytes";
   }
+  // Redis Cluster hashes the text between the key's first { and the next }: a key starting with } would
+  // leave that empty and spread one customer's keys over masters, where its scripts fail as CROSSSLOT
+  // and a fail-open plan admits uncounted (src/redis/keys.h).
+  if (r.key().find_first_of("{}") != std::string::npos) return "key may not contain { or }";
   return nullptr;
 }
 

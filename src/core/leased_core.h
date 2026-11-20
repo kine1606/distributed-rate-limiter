@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "core/strict_core.h"
 #include "lease/lease_table.h"
@@ -47,6 +48,17 @@ class LeasedCore final : public RateLimiterCore {
   // under request.rule; a denial from the lease itself answers kRateLimited.
   void CheckLease(const Rule& rule, const CheckRequest& request, CheckCallback done);
 
+  // What this instance's lease of (rule, key) answers alone, with no callback, Redis call or
+  // allocation: allowed when it holds `cost` tokens (taken; the early refill starts as on any hit),
+  // or denied while Redis said no recently. nullopt: nothing was taken and only Redis can tell;
+  // CheckLease then decides, waiting for a refill if it must. For CompositeCore's merchant check
+  // rate, which every check of a merchant passes, a flood over it included.
+  std::optional<CheckResult> TakeLocal(const Rule& rule, std::string_view key, std::uint32_t cost);
+  // The denial TakeLocal would answer, without taking a token: set while the lease holds less than
+  // `cost` and Redis said no recently; nullopt otherwise. For CompositeCore to refuse a flood over a
+  // merchant's capacity before the customer's burst script.
+  std::optional<CheckResult> DeniedLocal(const Rule& rule, std::string_view key, std::uint32_t cost);
+
   // Shutdown (Week 5): gives the unused tokens of every token-bucket lease back to Redis
   // (lua/return_lease.lua) and waits for the answers (1.5 x `wait` at most in all), so a restart does not burn part
   // of each bucket. Refills still in flight are waited for first (within the same `wait`), so the
@@ -74,6 +86,13 @@ class LeasedCore final : public RateLimiterCore {
   }
 
  private:
+  // The exact path for what a lease cannot serve: a rule with its own numbers is asked as it is (it
+  // may not be in the rule table: CompositeCore's merchant rules); a rule that takes its numbers from
+  // a plan goes back to request.rule, which reads the plan.
+  void Exact(const Rule& rule, const CheckRequest& request, CheckCallback done);
+  void RefillEarly(Lease& l, std::int64_t left);  // after a hit: tops the lease up before it runs dry
+  std::optional<CheckResult> Local(Lease& l, std::uint32_t cost);  // a hit, a local denial, or nullopt
+  std::optional<CheckResult> RecentDenial(const Lease& l) const;  // while Redis's last no lasts
   void Park(Lease& l, std::uint32_t cost, CheckCallback done);
   void StartRefill(Lease& l, std::uint32_t target);  // tops the lease up to `target` tokens
   void Refill(Lease& l, std::uint32_t amount, std::uint32_t partial_retry_ms);

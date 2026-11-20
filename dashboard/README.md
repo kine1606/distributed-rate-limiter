@@ -25,7 +25,7 @@ Where the data comes from:
 `scripts/live_demo.sh` starts a limiter and plays a 90-second story against it: normal traffic, one
 customer flooding (refused by its burst, then out of quota and refused by the deny cache), an upgrade
 with `tools/rlctl`, and one Redis master stalled for 4 s. Watch it at http://127.0.0.1:8090/
-(opened for you on Windows).
+(opened for you on Windows). `live_demo.png` is a recorded run of it, the backup if a live demo fails.
 
 To watch any running limiter instead, start it with metrics on (`RL_METRICS_ADDR`, default
 127.0.0.1:9100) and run `tools/live_dashboard.py`. It serves `live.html` and relays `/metrics` from

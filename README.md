@@ -5,11 +5,22 @@ p99 < 2 ms, using a hybrid design: a local token lease served with atomics, refi
 from Redis through Lua scripts. See `docs/DESIGN.md` for the architecture and `docs/THESIS_PLAN.md`
 for the schedule.
 
-**Status: Weeks 1 to 7 done (2026-10-24).** Business rules (plans, daily quotas with request ids and
-three overage policies, burst limits, a deny cache, a plan cache kept fresh over Pub/Sub, usage
-events, `tools/rlctl`), leases with a proved bound, failure handling per plan, metrics, SIGHUP
-reload, the evaluation, and Chapters 1 to 5 of the thesis in draft (`docs/thesis/`). The limiter runs
-on a 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md` section 3).
+**Status (2026-10-28): built, evaluated and written up, for one API owner and for many.**
+- **The limiter (Phase 1):** business rules (plans, daily quotas with request ids and three overage
+  policies, burst limits, a deny cache, a plan cache kept fresh over Pub/Sub, usage events,
+  `tools/rlctl`), leases with a proved bound, failure handling per plan, metrics, SIGHUP reload.
+- **Merchants (Phase 2, `docs/PRODUCT_PLAN.md`):** the service sold to many API owners.
+  - *Isolation:* each merchant's customers are named apart (`RL_TENANCY=merchants`, an API key per call).
+  - *Plans that change while running:* monthly quotas, boosts, prepaid top-ups and usage alerts.
+  - *Billing:* invoices made from totals the quota script keeps, and a payment sandbox.
+  - *Capacity:* a merchant's backend capacity with a reserve for paying customers.
+  - *Management:* an API with a web portal (`control/`, see [control/README.md](control/README.md)).
+
+The thesis is assembled in `docs/thesis/thesis.pdf` (85 pages; built by `docs/thesis/build.sh`).
+- *Demos:* `scripts/live_demo.sh` plays a 90-second live demo, and `scripts/demo_v2.py` the merchant one.
+- *Still to come:* the faculty template, the advisor's review, and an optional run on separate machines.
+- *Redis:* the limiter runs on a 3-master Redis Cluster through redis-plus-plus (`docs/DESIGN.md`
+  section 3).
 
 Measured on one laptop, where client, limiter and Redis share 12 hardware threads (evidence in
 `docs/thesis/evidence/`, raw data in `results/`, git-ignored):
@@ -21,7 +32,14 @@ Measured on one laptop, where client, limiter and Redis share 12 hardware thread
 - **Burst over-admission:** at most N × C, measured within 0.3 tokens of a model.
 - **Faults:** a slow, silent or killed master costs only its own customers, who get their plan's policy;
   no call failed.
-- **Tests:** 240, passing in release, ASan and TSan; 97.3% line coverage.
+- **Merchants** (`docs/thesis/evidence/p4_merchants_2026-10-28.md`):
+  - *Isolation:* isolated by name; a flood refused by a merchant's own limits or the operator's check
+    rate costs the others almost nothing.
+  - *Changes:* a limit change is in force on two instances within 6.6 ms of the API's answer.
+  - *Billing:* invoices equal the counters with a master killed.
+  - *Cost and scale:* tenancy costs less than the measurement noise; 10,000 merchants of 100 customers
+    take 193 bytes of Redis a customer.
+- **Tests:** 281, passing in release, ASan and TSan, plus 48 of the control plane; 97.1% line coverage.
 
 1,000,000 checks/s is an estimate, not a measurement (`tools/extrapolate.py`): 15 to 50 instances,
 depending on the latency target, and 17 Redis masters for customer checks. **Start with
@@ -48,7 +66,10 @@ tools/                  seed_plans, rlctl, usage_report, plots         tools/REA
 tests/                  GoogleTest unit, script, integration, eval     tests/README.md
 bench/                  Google Benchmark, load generator               bench/README.md
 docker/                 Redis Cluster + limiter instances              docker/README.md
-examples/               Spring Boot demo gateway (bonus)               examples/gateway-springboot/README.md
+control/                Management API, billing, payments, portal      control/README.md
+aws/                    Benchmark on separate machines, on demand      aws/README.md
+scripts/                Setup, build, test, demos (demo_v2.py: merchants)
+examples/               Python gateway (API keys); Spring Boot notes   examples/gateway-springboot/README.md
 docs/                   ROADMAP, CUSTOMER_PLANS, DESIGN, EVALUATION, THESIS_PLAN, thesis/OUTLINE
 results/                Raw benchmark output (git-ignored)             results/README.md
 ```
@@ -84,7 +105,7 @@ you prefer vcpkg: `cmake --preset release -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scr
 ```bash
 # args: [listen] [rules.yaml] [redis host:port] [lua dir] [engine: leased | strict | allow_all]
 # redis = any node of the cluster (default 127.0.0.1:7001, the dev cluster)
-./build/release/rate_limiter_server 0.0.0.0:50051 config/rules.yaml 127.0.0.1:7001 lua leased
+./build/release/rate_limiter_server 127.0.0.1:50051 config/rules.yaml 127.0.0.1:7001 lua leased
 grpcurl -plaintext -d '{"key":"cust:42","rule":"daily_quota"}' localhost:50051 ratelimiter.v1.RateLimiter/Check
 ```
 
@@ -95,7 +116,9 @@ scripts/demo.sh
 ```
 
 Gateway alone: `python3 examples/gateway-python/gateway.py`, then
-`curl -H 'X-User-Id: alice' localhost:8080/api/hello` (rule `demo`: 5 burst, 1/s; 429 after that).
+`curl -H 'X-Api-Key: demo-alice' localhost:8080/api/hello` (rule `demo`: 5 burst, 1/s; 429 after that).
+The gateway limits the user whose API key a request carries, and a request with no key by its IP; an
+unknown key gets 401.
 
 `SIGINT`/`SIGTERM` marks health NOT_SERVING and drains in-flight requests for up to 5 seconds.
 

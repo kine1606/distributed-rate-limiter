@@ -1,0 +1,82 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --text: #1c2430;
+  --text-2: #5a6575;
+  --line: #dde2e8;
+  --accent: #2457c5;
+  --on-accent: #ffffff;
+  --danger: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --surface: #1b2129;
+    --text: #e6e9ee;
+    --text-2: #9aa5b4;
+    --line: #2d3540;
+    --accent: #7aa2ff;
+    --on-accent: #0d1420;
+    --danger: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* above any display a rule below sets */
+body {
+  margin: 0;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header, main, #signin { max-width: 1100px; margin: 0 auto; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 1.4rem; margin: 8px 0 16px; }
+h2 { font-size: 1.15rem; margin: 32px 0 12px; scroll-margin-top: 16px; }
+h3 { font-size: 1rem; margin: 0 0 8px; width: 100%; }
+h4 { font-size: 0.95rem; margin: 20px 0 8px; }
+h2 span { color: var(--text-2); font-weight: normal; }
+section { scroll-margin-top: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+#signin { display: grid; gap: 8px; max-width: 420px; }
+#customer { margin-top: 16px; }
+#customer:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--text-2); }
+input, select, button { font: inherit; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); }
+input, select { background: var(--surface); color: var(--text); min-width: 0; }
+button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); cursor: pointer; }
+button.quiet { background: transparent; color: var(--accent); }
+button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+button:disabled { opacity: 0.4; cursor: default; }
+:is(button, input, select, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+form.inline, div.inline { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; margin: 12px 0; }
+form.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; align-items: end;
+            margin-top: 16px; }
+form.grid h3 { grid-column: 1 / -1; }
+.actions { border-top: 1px solid var(--line); margin-top: 12px; }
+
+nav.sections { display: flex; flex-wrap: wrap; gap: 4px 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+nav.sections a { color: var(--accent); text-decoration: none; }
+nav.sections a:hover { text-decoration: underline; }
+.error { color: var(--danger); margin: 0; min-height: 1.5em; }
+.hint { color: var(--text-2); font-size: 0.9rem; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 0; }
+.tiles div { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+.tiles dt { color: var(--text-2); font-size: 0.85rem; }
+.tiles dd { margin: 4px 0 0; font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+dl.terms { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+dl.terms dt { color: var(--text-2); }
+dl.terms dd { margin: 0; }
+
+.scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+th { color: var(--text-2); font-weight: 600; font-size: 0.85rem; }
+td button { padding: 3px 10px; }
+meter { width: 120px; vertical-align: middle; }
+.pager { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }

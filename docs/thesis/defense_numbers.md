@@ -1,4 +1,4 @@
-# Defense sheet: final numbers and evidence (2026-10-24)
+# Defense sheet: final numbers and evidence (2026-10-24; merchants 2026-10-28; P5 and security 2026-10-31)
 
 This sheet updates `Thesis_Defense_Brief.docx`: its "numbers to know by heart" with the final values,
 and each of its questions with the measurement that answers it. Every number has a source in
@@ -22,13 +22,43 @@ and each of its questions with the measurement that answers it. Every number has
 | 16,384 | Redis Cluster hash slots | a customer's keys share one slot by hash tag |
 | 3 masters | test cluster | 3 + 3 replicas for fault tests |
 | 64 bytes | lease alignment | 14 times faster per-thread counters at 16 threads (microbenchmark); within noise in the whole server (ablation) |
-| 240 tests | release, ASan, TSan | 188 unit, 33 against a real Redis, 19 integration; 97.3% line coverage |
+| 344 tests | release, ASan, TSan | 278 unit, 45 against a real Redis, 21 integration; plus 50 of the evaluation tools and 48 of the control plane (Python); 97.1% line coverage (measured at 282) |
 | 42,065 checks/s | one instance, strict, uniform keys | matrix, pinned (Week 2's ghz baseline: 25,301) |
 | 67,459 / 95,913 / 400,187 checks/s | one instance, leased: Zipf keys / one hot key / `CheckBatch` of 10 | matrix and its CheckBatch section |
 | 82,700 to 91,200 checks/s | gRPC alone, one instance | the ceiling of any limiter on this laptop |
 | 99.06% | lease hit ratio, Week 2 load | `results/2026-10-18_week3_gate` |
 | about 120,000/s | script calls one master absorbs | Week 1 spike (360,000 on 3 masters); FCALL = EVALSHA |
 | 4 to 6% | the limiter's own code in the CPU profile | gRPC 40 to 53%, allocation 16 to 20% (`profile_2026-10-24.md`) |
+
+## Merchants (Phase 2): numbers to know
+
+Evidence: `p4_merchants_2026-10-28.md` and `p3_gate_2026-10-25.md`; Chapter 5.12.
+
+| Number | What it is | Source |
+| --- | --- | --- |
+| `<merchant>\|<customer>` | how merchants are kept apart: every key, lease and denial below the service | 3.9.2 |
+| 9 of 9 | isolation checks; a planted shared namespace fails 4 | 5.12 |
+| 10,135 → 30,144 Redis calls/s | another merchant's flood over one customer's burst (the open gap); with the operator's check rate: 10,281 | Table 5.14 |
+| 42,000 → 12,400 Redis calls/s | a flood over a merchant's capacity, before and after the early refusal found by this test | Table 5.15 |
+| 6.6 ms | a change (suspend, quota, boost, capacity) in force on both of two limiters after the API answered; 16 ms with the API call (G11: 1 s) | Table 5.16 |
+| 0 customers | with an invoice different from the counters, in 3 runs, 2 with a master killed (G12) | Table 5.17 |
+| seed 2 | where a planted bug letting overage pass the cap by one call is caught (G13) | 5.12 |
+| 1,003 of 1,000/s | the most a capacity of 1,000 admitted; Free kept to 687 of its 700; paying customers kept the reserve (G14) | Table 5.18 |
+| 193 bytes | Redis memory per customer, 10,000 merchants of 100 customers | 5.12 |
+| 25,749 calls/s | one limiter, a random merchant and customer per call, a million customers | 5.12 |
+| 37 ms | a new merchant's key working after it is announced, with 10,000 loaded | 5.12 |
+| +2.1%, −3.9% | tenancy, and tenancy with a capacity and check rate, against none: within the ±10% noise | Table 5.19 |
+
+## P5 and security (2026-10-31): numbers to know
+
+| Number | What it is | Source |
+| --- | --- | --- |
+| day 1 to 28 | a customer's billing day when the merchant bills from subscription dates (29th to 31st: the 28th); 1 is the calendar month | 3.9.6, `lua/quota.lua` ARGV 10 |
+| 87,620 | property-test checks on plans billed from a subscription day, 547 of them crossing that day | `docs/PRODUCT_PLAN.md` P5 |
+| 1, 3, 7 days | when a declined charge is retried; the customer is suspended only after the last | 3.9.6 |
+| 5 minutes | how old a provider's signed webhook may be before it is refused; each event acts once | `control/README.md` |
+| 20 a minute | failed sign-ins allowed per address before `429` | 3.9.5 |
+| 7 findings | the 2026-10-31 security review of Phase 1: 3 medium (key with a hash tag, open default address, no Redis password), 4 low; all fixed and tested | `docs/security_review_phase1_2026-10-31.md` |
 
 ## The brief's questions, with the evidence
 
@@ -48,9 +78,18 @@ and each of its questions with the measurement that answers it. Every number has
 | A Redis master dies? | Only its third of the customers get their plan's policy for 4 to 5 s; no call fails | 5.7 |
 | Could retries make an outage worse? | Retries only on timeouts, never for quota, at most two, jittered, and counted by the breaker, which stops calls after 20 failures | 3.7, 4.6 |
 | Leased tokens when an instance restarts? | A clean stop returns them (`return_lease.lua`); a crash loses them, which is stricter, never looser | 3.5, `DESIGN.md` 8 |
-| Why only one machine? | No budget for a cluster; the extrapolation names what a run on separate machines would test | 5.12, 6.3 |
+| Why only one machine? | No budget for a cluster; the extrapolation names what a run on separate machines would test | 5.13, 6.3 |
 | Why drop the sliding window? | **It was not dropped:** `lua/sliding_window.lua` (a sliding-window counter, O(1) state) serves `login_attempts`, exactly | `config/rules.yaml` |
 | What next? | Lease the burst per customer, route customers to one instance, batch at the gateway, multi-region | 6.3 |
+| Can one merchant see or slow another? | No key, plan, lease or denial is shared: the service names every customer `<merchant>\|<customer>` from the API key. Floods refused by the merchant's own limits cost Redis almost nothing; a burst flood needs the operator's check rate | 3.9.2, 5.12 |
+| Why trust the invoice? | It is made from totals the quota script keeps in the same atomic step as each decision; equal to the counters with a master killed, in every run | 3.9.6, 5.12 |
+| What if a paying customer has an emergency? | Postpaid: past its quota it is admitted as billed overage up to a spending cap (its burst limit and the merchant's capacity still apply); or a boost, or a top-up | 3.9.4 |
+| What stops a merchant's backend being flooded? | Its capacity, a leased bucket; a reserve for plans with a fee; Free calls refused first | 3.9.7, 5.12 |
+| Are card numbers stored? | No: the API refuses them; only the payment provider's customer id is kept | 3.9.6 |
+| A customer upgrades mid-month: what do they pay? | The fee prorated by time: each fee for the part of the month it was in force; the change is recorded with Redis's time | 3.9.6 |
+| A payment fails? | Retried after 1, 3 and 7 days, each try its own idempotency key; suspended only after the last. A charge settled later is confirmed by the provider's signed webhook | 3.9.6 |
+| How do you know it is secure? | Three review passes, the last finding 7 flaws (a key with `{`/`}` could make paid calls uncounted; the default address was public with no auth; Redis had no password option), all fixed with tests; isolation tests fail with a planted shared namespace | security review, 5.12 |
+| Why no client certificates for one API owner? | Caller authentication is `RL_TENANCY=merchants` (API keys) or the network; the limiter warns at start when reachable without it. mTLS is future work | security review |
 
 ## Weak points to raise first
 
@@ -62,3 +101,11 @@ and each of its questions with the measurement that answers it. Every number has
   load generator now counts such answers.
 - **The Universal Scalability Law did not fit one instance's curve.** The data shows instead that
   throughput never falls with concurrency.
+- **A merchant's flood over one customer's burst still costs Redis** (30,144 calls/s) and slowed
+  another merchant, until the operator set a check rate. The design leaves that to the operator.
+- **The reserve is a floor, not a priority:** paying customers asking for more than the reserve compete
+  with Free calls for the rest.
+- **The bound needs a Redis clock that moves at the real rate.** On 2026-11-01 a WSL2 clock stepped
+  by up to 3.7 s and a burst bucket over-admitted by about rate × step (`remeasure_2026-11-01.md`).
+- **Billing through failover:** three runs lost nothing, but asynchronous replication can lose an
+  acknowledged increment; invoices would then undercount, in the customer's favour.

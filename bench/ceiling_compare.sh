@@ -10,6 +10,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 runs=${RUNS:-3} port=7001 eport=${ENVOY_REDIS_PORT:-6390}
+# A port from the environment could be a real Redis: refuse any that saves its data (the throwaway
+# instances run with save ""), before loading, benchmarking or flushing anything there.
+[ "$(redis-cli -p "$eport" config get save | tail -1)" = "" ] ||
+  { echo "Redis on port $eport saves its data: not a throwaway instance, refusing to touch it" >&2; exit 1; }
 envoy_bin=${ENVOY_RL:?set ENVOY_RL to the envoyproxy/ratelimit binary}
 out="results/$(date +%F)_ceiling"
 mkdir -p "$out"

@@ -126,6 +126,24 @@ Hint: the plan doc also allows the gateway to send quota and burst as two entrie
 `CheckBatch`. `CompositeCore` is the server-side version of the same idea, so the gateway only
 sends one `Check`. Which one you expose is your proto v1 decision; implement the one you chose.
 
+## A merchant's limits (Phase 2, P3)
+
+A call that names its merchant (`CheckRequest::merchant`, tenancy on) passes that merchant's limits,
+each a token bucket keyed by the merchant, leased when the engine leases:
+1. **Check rate**, first and for any rule: one token per check. A lease hit is `LeasedCore::TakeLocal`,
+   one CAS with no callback or allocation; only an empty lease takes the asynchronous path.
+2. **Capacity**, for a customer rule, after the customer's burst and before its quota: a refused call is
+   never counted or billed, and its burst token goes back. A plan with a fee may take the reserve when
+   the shared part is out; a Free plan never may. While Redis says the capacity a plan may use is out
+   (`LeasedCore::DeniedLocal`, no token taken), the call is refused before the burst script, so a flood
+   over the capacity costs Redis nothing (P4: it cost two calls per refused call, and slowed other
+   merchants on the same master).
+3. **Results:** a refusal answers `kRateLimited` with the bucket's retry time. A bucket Redis cannot
+   answer refuses nothing; the customer's own steps still follow its plan.
+
+`LeasedCore::CheckLease` falls back to the exact path with the rule itself when the rule carries its own
+numbers, since the merchant rules are not in the rule table.
+
 ## Done when
 
 - [x] Week 2: `StrictCore` unit tests on `FakeBackend`; gRPC gate test (exactly 200) passes.

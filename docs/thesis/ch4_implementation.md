@@ -1,10 +1,8 @@
 # Chapter 4. Implementation
 
-> Draft, Week 7 (2026-10-24). Target 8 to 10 pages. Results still to come are marked
-> **[Pending: Week N]**.
-
-The design of Chapter 3 is implemented in C++20: 3,966 lines in `src/` and `include/`, 283 lines of
-Lua for the Redis scripts, and 5,557 lines of tests. This chapter shows how the parts that carry the
+The design of Chapter 3 is implemented in C++20: 4,705 lines in `src/` and `include/`, 379 lines of
+Lua for the Redis scripts, and 6,786 lines of tests. The control plane for merchants (4.7) adds 1,313
+lines of Python, 629 lines of the portal's page, script and style sheet, and 1,167 lines of tests. This chapter shows how the parts that carry the
 thesis claims are built, with short excerpts and the measurements that decided them. The full code,
 every script that produced a number, and the raw results are in the repository.
 
@@ -33,6 +31,8 @@ transcription of the scripts on a fake clock, or the real cluster behind the sam
 The build uses CMake with five presets: `release` (`-O3 -march=native`), `debug`, `asan`, `tsan`
 and `coverage`. `scripts/test.sh <preset>` builds a preset and runs every test. The libraries are
 Ubuntu 24.04 packages except redis-plus-plus, which is built from source:
+
+*Table 4.2: Libraries and their versions.*
 
 | Library | Version | Used for |
 | --- | --- | --- |
@@ -99,7 +99,7 @@ the call is sent once more as `EVAL` with the source.
 
 ## 4.3 Redis client and batching
 
-**Client choice.** The backend uses redis-plus-plus's `AsyncRedisCluster`. A Week 1 spike reached
+**Client choice.** The backend uses redis-plus-plus's `AsyncRedisCluster`. An early spike reached
 290,000 script calls a second from one thread on one connection per master, and about 360,000 on
 three masters, where each master used about one core (`docs/DESIGN.md`, section 3). Pipelining came
 free: calls issued without waiting leave together on the connection, and the pool size made no
@@ -119,7 +119,7 @@ threads.
 **The batcher, measured and left off.** A batcher was built that collects calls and sends them
 together, on a timer or adaptively. It gained nothing:
 
-*Table 4.2: Batcher modes on the exact path (3 runs, `results/2026-10-18_batcher/NOTES.md`).*
+*Table 4.3: Batcher modes on the exact path (3 runs, `results/2026-10-18_batcher/NOTES.md`).*
 
 | Mode | p50 at 1,000 checks/s | Checks/s at 192 in flight |
 | --- | --- | --- |
@@ -156,7 +156,7 @@ struct alignas(64) Lease {
 The table is open addressing over a fixed array of atomic pointers. A slot goes from empty to a lease
 exactly once, by compare-and-swap, and is never cleared or moved, so a lease pointer stays valid for
 the table's life and lookups take no lock. A lookup compares the 64-bit id first and reads the key
-string only on a match. The price is that leases are never evicted, a recorded shortcut: one
+string only on a match. The price is that leases are never evicted, a known limitation (6.2): one
 instance used 224 MB for about 650,000 leases over 1,000,000 keys
 (`flood_cardinality_2026-10-22.md`).
 
@@ -248,10 +248,10 @@ timer thread and are counted against the breaker.
 
 **Deadlines.** Each attempt is answered as timed out after 50 ms unless Redis answered first. The
 client library's own timeout is an idle timeout per connection, re-armed by any reply, so it did not
-bound a call: the fault test of Week 6 found a slow master never timed out (3.7.2). Every Redis call
+bound a call: the fault test (5.7) found a slow master never timed out (3.7.2). Every Redis call
 registers a deadline, so the structure that holds them is on a busy path, and a first version guarded
 by a mutex cost 448 ns a call and serialised the threads. The final version is Vyukov's intrusive
-multi-producer, single-consumer queue.
+multi-producer, single-consumer queue [26].
 
 *Listing 4.5: Adding an attempt to the deadline queue: one atomic exchange.*
 
@@ -285,15 +285,89 @@ void ResilientBackend::Push(Pending* p) {
 
 The measured overhead of metrics was within noise.
 
-## 4.7 Testing
+## 4.7 Merchants and the control plane
 
-*Table 4.3: Tests by kind (240 in all; every one passes in release, ASan and TSan).*
+Section 3.9 adds merchants. On the limiter this is a layer in the service and two steps in the
+composite engine; beside it, a control plane in Python manages merchants, customers and invoices
+through Redis alone.
+
+**Resolving the API key** (`src/server/merchants.h`). The service hands the `x-api-key` metadata to
+`MerchantKeys::Resolve` before any engine work.
+- *The common case costs a hash-map lookup:* each gRPC thread keeps the keys it has resolved in a
+  `thread_local` map, valid while a generation counter is unchanged. A reload publishes a new index
+  and bumps the counter, so every thread drops its keys, and a revoked key stops at its next call.
+- *A key the thread has not seen* is hashed with SHA-256 and looked up in the shared index, an
+  immutable snapshot behind `std::atomic<std::shared_ptr>`. A reload builds the next snapshot off the
+  request path and swaps it in.
+- *A wrong key is not remembered,* so a stream of random keys cannot fill a thread's map. Each one
+  costs a hash and a lookup, then `UNAUTHENTICATED`.
+- *Reloads that overlap* carry tickets; the last one started wins, so a reload retried late cannot
+  bring back a revoked key.
+
+**The merchant's limits.** A merchant's capacity, its reserve and the operator's check rate become
+token-bucket rules that `CompositeCore` takes through the lease table (3.5), keyed by the merchant.
+- *Rules live for good:* a lease points at its rule, so a reload never frees one. Merchants with the
+  same numbers share a rule (their keys keep their buckets apart), and a reload with unchanged numbers
+  creates nothing.
+- *The order of a check:* the check rate first, for any rule. Then, for the customer rule:
+  suspended, the deny cache, the burst limit, the capacity and its reserve, the quota. A refusal for
+  capacity gives the burst token back, so it is neither counted nor billed.
+- *A flood over the capacity is refused early:* `LeasedCore::DeniedLocal` reads, without taking a token,
+  whether Redis said recently that a lease's bucket is empty. While it says so for the capacity (and the
+  reserve, for a plan with a fee), the check is refused before the burst script, at the cost of one
+  lease lookup.
+- *When Redis cannot answer* for a merchant's bucket, the bucket admits. The customer's own limits,
+  checked around it, still apply with their failure policy (3.7).
+
+**Metering in the script** (`lua/quota.lua`). The quota script keeps, in the same counter and the
+same atomic step as the decision, the calendar month's units within the plan and its billed overage.
+When a new month begins it files the old totals under `closed:m<month>`, if they hold billed
+overage, and keeps the counter 35 days past its month. The property tests' transcription and model
+(4.8) were extended with the same rules.
+
+**The control plane** (`control/rlcontrol/`, Python 3.12) is a separate process. It shares nothing
+with the limiter but Redis and the `plan-changes` channel.
+
+*Table 4.4: The control plane.*
+
+| Module | Lines | Does |
+| --- | --- | --- |
+| `store.py` | 181 | every key name and plan field the Python side uses, mirroring `keys.h` and `plan.h`; the atomic scripts that change a customer |
+| `api.py` | 558 | the management API (FastAPI): operators create merchants and keys; merchants manage plans, customers, boosts, top-ups, capacity, webhooks and invoices |
+| `billing.py` | 241 | closing a month into invoices, previews, CSV export, reconciliation with the usage events |
+| `payments.py` | 82 | a payment sandbox: provider tokens only; a card number is refused |
+| `notifier.py`, `webhooks.py` | 200 | alerts from `rl-alerts` to the merchants' webhooks, signed with HMAC-SHA256, to checked public addresses only |
+| `periods.py` | 49 | calendar months by the Redis clock, as the script counts them |
+| `portal/` | 629 | the merchant portal: one HTML page, its script and its style sheet |
+
+- *One write per change:* every change to a customer is one Lua script on its plan hash, then its
+  name on `plan-changes`, the same contract as the admin tool `tools/rlctl`. A script refuses to
+  create a customer that exists or to change one that does not, so two operators cannot interleave.
+- *The merchant comes from the credential:* the API resolves the management key's SHA-256 to its
+  merchant and builds every key from that, never from the URL.
+- *Invoices are made once:* the invoice id is the customer and the month, and a charge sends it to
+  the payment provider as its idempotency key.
+- *A spreadsheet cannot be attacked through the CSV export:* a cell starting with `=`, `+`, `-` or `@`
+  is escaped.
+- *Dependencies are pinned:* every package and its dependencies to an exact version, and the
+  installer to a SHA-256.
+
+**The portal** is three static files served by the API from a fixed list, under a Content Security
+Policy that allows nothing but its own server. The script, without a framework or a build step,
+writes every value with `textContent`. It is tested end to end in headless Chrome: a script signs in,
+uses every action, checks what the page then shows, and fails on any script error
+(`tests/eval/portal_ui.mjs`, 21 checks).
+
+## 4.8 Testing
+
+*Table 4.5: Tests by kind (281 C++ tests, every one passing in release, ASan and TSan; 48 of the control plane).*
 
 | Kind | Count | Against | Examples |
 | --- | --- | --- | --- |
-| Unit | 188 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines |
-| Script | 33 | a real Redis (port 6380) | each algorithm's limits, request ids, overage, clock jumps, day rollover |
-| Integration | 19 | the three-master cluster | exactly 200 of 400 concurrent calls; plan changes reaching two instances; leased quota on four instances; a killed subscription coming back |
+| Unit | 217 | fakes on a fake clock | each branch of the composite engine, lease protocol, plan cache races, breaker states, deadlines; the merchant key index, a merchant's check rate, capacity and reserve |
+| Script | 43 | a real Redis (port 6380) | each algorithm's limits, request ids, overage, clock jumps, day rollover; months, boosts, top-ups, alerts, billing totals |
+| Integration | 21 | the three-master cluster | exactly 200 of 400 concurrent calls; plan changes reaching two instances; leased quota on four instances; a killed subscription coming back; merchants end to end |
+| Control plane (Python) | 48 | the cluster and the real limiter | the API's isolation and idempotency, invoices and the payment sandbox, signed webhooks to pinned public addresses, TLS, the gateway example |
 
 Some tests do more than check examples:
 
@@ -309,7 +383,7 @@ Some tests do more than check examples:
     planted in the engine, one at a time, were all caught (`property_tests_2026-10-23.md`).
 - **Sanitizers.** Every test runs under AddressSanitizer and ThreadSanitizer. TSan sometimes cannot
   start under the kernel's address randomisation, so the TSan suite runs with it off (`setarch -R`).
-- **Coverage.** `scripts/coverage.sh` measures line and branch coverage of `src/` and `include/`: 97.3%
+- **Coverage.** `scripts/coverage.sh` measures line and branch coverage of `src/` and `include/`: 97.1%
   of lines. The uncovered lines are defensive checks the scripts never trigger, and paths reachable
   only by a race between threads.
 - **Evaluation scripts.** Each claim of Chapter 5 has a script in `tests/eval/` or `bench/`:

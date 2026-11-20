@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,6 +43,7 @@
 #include "redis/sharded_backend.h"
 #include "reliability/resilient_backend.h"
 #include "reliability/slot_breakers.h"
+#include "server/merchants.h"
 #include "server/service.h"
 #include "usage/usage_log.h"
 
@@ -78,21 +80,28 @@ std::pair<std::string, int> ParseHostPort(const std::string& addr) {
 }  // namespace
 
 // Usage: rate_limiter_server [listen] [rules.yaml] [redis cluster node host:port] [lua dir] [engine]
+//   listen defaults to 127.0.0.1:50051: without RL_TENANCY no caller is authenticated, so another address
+//   is for a private network only, and the server warns at start.
 //   engine: leased (default; strict rules still go to Redis per check) | strict | allow_all (no
 //   Redis; measures pure gRPC overhead). With leased and strict, customer rules (burst then quota,
 //   config/rules.yaml) go through CompositeCore.
 //   env: RL_PLAN_TTL_MS (plan cache, default 5000; 0 reads the plan on every check),
 //        RL_REDIS_TIMEOUT_MS (each Redis call, default 50), RL_REDIS_LOOPS (Redis clients, default 4),
+//        RL_TENANCY (unset: one API owner; "merchants": every call carries a merchant's API key, see
+//        src/server/merchants.h),
 //        RL_MAX_IN_FLIGHT (checks waiting at once before RESOURCE_EXHAUSTED, default 10000),
 //        RL_METRICS_ADDR (Prometheus endpoint ip:port, default 127.0.0.1:9100; off disables it),
 //        RL_MAX_STREAMS (concurrent calls per client connection, default 100; 0: unlimited),
+//        RL_TLS_CERT and RL_TLS_KEY (PEM files: TLS for every call; unset: plain text),
+//        RL_REDIS_USER and RL_REDIS_PASSWORD (Redis AUTH or an ACL user; src/redis/redis_auth.h),
 //        RL_USAGE_FILE, RL_BATCHER, RL_BATCHER_DELAY_US, RL_CHUNK_LOG (below), RL_ABLATE (ablation only)
 //   SIGHUP reloads rules.yaml (a file that does not load keeps the old rules); SIGTERM drains and stops.
 int main(int argc, char** argv) {
   // gRPC's mutexes are abseil's, and Ubuntu's abseil checks every lock for deadlock cycles: 2.7% of
   // the server's CPU went to GraphCycles alone under load (perf, 2026-10-23). A server needs no such check.
   absl::SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
-  const std::string listen = argc > 1 ? argv[1] : "0.0.0.0:50051";
+  // Loopback unless told otherwise: without RL_TENANCY a caller is not authenticated at all.
+  const std::string listen = argc > 1 ? argv[1] : "127.0.0.1:50051";
   const std::string rules_path = argc > 2 ? argv[2] : "config/rules.yaml";
   const std::string redis_addr = argc > 3 ? argv[3] : "127.0.0.1:7001";
   const std::string lua_dir = argc > 4 ? argv[4] : "lua";
@@ -135,6 +144,39 @@ int main(int argc, char** argv) {
   // client on one connection with 192 calls in flight on the exact path, 28,251 to 22,957 checks/s.
   const auto max_streams = EnvNumber("RL_MAX_STREAMS", 100, 0, 1'000'000);
   if (!loops || !timeout_ms || !batcher_us || !plan_ttl_ms || !max_in_flight || !max_streams) return 1;
+  // TLS: needed once gateways call over a network the platform does not own, since with tenancy every
+  // call carries a merchant's API key. Plain text otherwise (local runs, a limiter beside its gateway).
+  std::shared_ptr<grpc::ServerCredentials> credentials = grpc::InsecureServerCredentials();
+  const char* tls_cert = std::getenv("RL_TLS_CERT");
+  const char* tls_key = std::getenv("RL_TLS_KEY");
+  if ((tls_cert == nullptr) != (tls_key == nullptr)) {
+    spdlog::critical("RL_TLS_CERT and RL_TLS_KEY go together");
+    return 1;
+  }
+  if (tls_cert != nullptr) {
+    const auto read = [](const char* path) -> std::optional<std::string> {
+      std::ifstream f(path);
+      std::stringstream ss;
+      ss << f.rdbuf();
+      if (!f) return std::nullopt;
+      return ss.str();
+    };
+    const auto cert = read(tls_cert), key = read(tls_key);
+    if (!cert || !key) {
+      spdlog::critical("cannot read the TLS certificate {} or key {}", tls_cert, tls_key);
+      return 1;
+    }
+    grpc::SslServerCredentialsOptions tls;
+    tls.pem_key_cert_pairs.push_back({*key, *cert});
+    credentials = grpc::SslServerCredentials(tls);
+  } else if (const char* tenancy = std::getenv("RL_TENANCY"); tenancy != nullptr && *tenancy != '\0') {
+    spdlog::warn("no TLS (RL_TLS_CERT): merchants' API keys travel in plain text");
+  }
+  if (const char* tenancy = std::getenv("RL_TENANCY"); (tenancy == nullptr || *tenancy == '\0') &&
+      !listen.starts_with("127.") && !listen.starts_with("localhost:") && !listen.starts_with("[::1]:")) {
+    spdlog::warn("listening on {} with no caller authentication: whoever reaches it can check, and so use up, any "
+                 "customer's quota. Keep it on a private network, or use RL_TENANCY=merchants (API keys)", listen);
+  }
   // RL_ABLATE=<a,b>: mechanisms switched off for the Week 7 ablation study (bench/ablation.sh), never in
   // production: early_refill, adaptive_chunk, deny_cache.
   LeaseTuning tuning;
@@ -242,18 +284,39 @@ int main(int argc, char** argv) {
   // Declared after `redis`, so they are destroyed first: nothing outlives the backend.
   PlanStore plans(*backend, std::chrono::milliseconds(*plan_ttl_ms));
   DenyCache deny(deny_cache);
+  // RL_TENANCY=merchants: calls name their merchant by API key (Phase 2, src/server/merchants.h).
+  std::unique_ptr<MerchantKeys> merchants;
+  if (const char* tenancy = std::getenv("RL_TENANCY"); tenancy != nullptr && *tenancy != '\0') {
+    if (std::string_view(tenancy) != "merchants") {
+      spdlog::critical("RL_TENANCY: '{}' is not 'merchants'", tenancy);
+      return 1;
+    }
+    merchants = std::make_unique<MerchantKeys>(*backend);
+    if (merchants->ReloadAndWait(std::chrono::seconds(2))) {
+      spdlog::info("tenancy: merchants, {} API keys", merchants->Size());
+    } else {
+      spdlog::warn("tenancy: merchants, keys not loaded (Redis did not answer); every call is refused until they are");
+    }
+  }
   // An announced plan change drops the cached plan and the local denial at once (step B5); the TTL
-  // covers a message missed while the subscription was down.
+  // covers a message missed while the subscription was down. "!merchants" reloads the API keys.
   std::unique_ptr<PlanListener> listener;
   if (engine != "allow_all") {
     const auto [host, port] = ParseHostPort(redis_addr);
     listener = std::make_unique<PlanListener>(
         host, port,
-        [&plans, &deny](std::string_view customer) {
+        [&plans, &deny, &merchants](std::string_view customer) {
+          if (customer == kMerchantsChanged) {
+            if (merchants) merchants->Reload();
+            return;
+          }
           plans.Invalidate(customer);
           deny.Clear(customer);
         },
-        [&plans] { plans.InvalidateAll(); });
+        [&plans, &merchants] {
+          plans.InvalidateAll();
+          if (merchants) merchants->Reload();  // a key change may have been missed too
+        });
   }
   // One engine per rule table: a reload builds a new one from the new file (see the main loop).
   struct Engine {
@@ -304,7 +367,8 @@ int main(int argc, char** argv) {
     return total;
   };
   spdlog::info("engine: {}, plan cache {} ms, at most {} checks in flight", engine, *plan_ttl_ms, *max_in_flight);
-  RateLimiterService service(engines.back()->core, *max_in_flight, metrics_on ? &check_metrics : nullptr);
+  RateLimiterService service(engines.back()->core, *max_in_flight, metrics_on ? &check_metrics : nullptr,
+                             merchants.get());
 
   // After everything it reads, so it stops first. A port in use (several servers on one machine)
   // leaves the server running without an endpoint.
@@ -354,7 +418,7 @@ int main(int argc, char** argv) {
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
 
   grpc::ServerBuilder builder;
-  builder.AddListeningPort(listen, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(listen, credentials);
   if (*max_streams > 0) builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, static_cast<int>(*max_streams));
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
@@ -363,7 +427,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   server->GetHealthCheckService()->SetServingStatus(true);
-  spdlog::info("rate limiter listening on {}", listen);
+  spdlog::info("rate limiter listening on {}{}", listen, tls_cert != nullptr ? " (TLS)" : "");
 
   // Readiness follows the breakers: NOT_SERVING while every slot group's breaker is open, that is
   // while this instance reaches no Redis master, so a load balancer prefers instances that do. One
@@ -422,6 +486,7 @@ int main(int argc, char** argv) {
                  r.tokens, r.leases, r.failed, r.refills_unfinished);
   }
   if (usage && usage->Dropped() > 0) spdlog::warn("usage events: {} dropped", usage->Dropped());
+  listener.reset();  // its messages reload merchant keys through Redis, which stops below
   resilient.StopRetries();  // no retry may reach Redis after this
   batcher.reset();  // sends what it holds and waits for the replies, while Redis is still there
   redis.reset();    // stop Redis I/O while the core lives: an early refill may still be in flight

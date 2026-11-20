@@ -23,6 +23,7 @@ struct ScriptResult {
   std::uint32_t reset_after_ms{0};  // quota only: until 00:00 UTC
   bool overage{false};              // quota only: admitted as billed overage (cap policy)
   bool replayed{false};             // quota only: a retried request ID's stored answer, not counted again
+  std::uint32_t limit{0};           // quota only: the limit in force, a boost included; 0 = not reported
 };
 
 using ScriptCallback = std::function<void(const ScriptResult&)>;

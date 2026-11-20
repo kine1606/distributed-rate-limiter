@@ -6,7 +6,7 @@ include(GoogleTest)
 add_executable(rl_unit_tests config_test.cc convert_test.cc core_test.cc keys_test.cc plan_test.cc
                              strict_core_test.cc lease_test.cc leased_core_test.cc lease_harness_test.cc
                              batcher_test.cc deny_cache_test.cc composite_core_test.cc plan_store_test.cc
-                             usage_log_test.cc service_test.cc circuit_breaker_test.cc
+                             usage_log_test.cc service_test.cc circuit_breaker_test.cc merchants_test.cc
                              metrics_test.cc property_test.cc sharded_backend_test.cc)
 # Script: Lua scripts against a plain Redis (127.0.0.1:6380, or RL_TEST_REDIS).
 add_executable(rl_redis_tests lua_scripts_test.cc)
@@ -26,3 +26,6 @@ endforeach()
 gtest_discover_tests(rl_unit_tests PROPERTIES LABELS unit)
 gtest_discover_tests(rl_redis_tests PROPERTIES LABELS redis)
 gtest_discover_tests(rl_integration_tests PROPERTIES LABELS integration)
+# Weeks 5 to 9: the evaluation tools the thesis numbers come from (Python's unittest, one ctest entry).
+add_test(NAME tools_py COMMAND python3 -m unittest -q tools_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(tools_py PROPERTIES LABELS unit ENVIRONMENT PYTHONDONTWRITEBYTECODE=1)

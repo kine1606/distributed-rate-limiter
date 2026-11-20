@@ -1,0 +1,327 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Activity: A Redis Call When Redis Fails",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/activity-4-redis-failure.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    },
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "Limiter step"
+        },
+        "security": {
+          "label": "Decision or failure policy"
+        },
+        "database": {
+          "label": "Redis"
+        },
+        "external": {
+          "label": "The engine"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "engine",
+      "label": "Engine (a check)"
+    },
+    {
+      "id": "resilient",
+      "label": "ResilientBackend"
+    },
+    {
+      "id": "redis",
+      "label": "Redis master of the key's slot"
+    },
+    {
+      "id": "failure",
+      "label": "No answer from Redis",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "call",
+    "open",
+    "send",
+    "redis",
+    "intime",
+    "answer"
+  ],
+  "nodes": [
+    {
+      "id": "call",
+      "lane": "engine",
+      "col": 0,
+      "type": "external",
+      "label": "Redis call",
+      "sublabel": "script or plan read",
+      "sources": [
+        {
+          "path": "src/redis/redis_backend.h",
+          "line": 45,
+          "end_line": 70,
+          "label": "RedisBackend"
+        }
+      ]
+    },
+    {
+      "id": "answer",
+      "lane": "engine",
+      "col": 5,
+      "type": "external",
+      "label": "Result to the check",
+      "sublabel": "decision or failure answer",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 104,
+          "end_line": 113,
+          "label": "RedisDown -> PlanDown"
+        }
+      ]
+    },
+    {
+      "id": "open",
+      "lane": "resilient",
+      "col": 1,
+      "type": "security",
+      "label": "Breaker open?",
+      "sublabel": "per slot group",
+      "sources": [
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 157,
+          "end_line": 163,
+          "label": "Allow()"
+        },
+        {
+          "path": "src/reliability/circuit_breaker.h",
+          "line": 33,
+          "end_line": 41,
+          "label": "probe after 500 ms"
+        },
+        {
+          "path": "src/reliability/slot_breakers.h",
+          "line": 50,
+          "label": "ForEntity"
+        }
+      ]
+    },
+    {
+      "id": "send",
+      "lane": "resilient",
+      "col": 2,
+      "type": "backend",
+      "label": "Send attempt",
+      "sublabel": "with a deadline",
+      "sources": [
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 130,
+          "end_line": 148,
+          "label": "Watch"
+        },
+        {
+          "path": "src/reliability/resilient_backend.h",
+          "line": 21,
+          "end_line": 29,
+          "label": "RetryOptions"
+        }
+      ]
+    },
+    {
+      "id": "intime",
+      "lane": "resilient",
+      "col": 3,
+      "type": "security",
+      "label": "Answered in time?",
+      "sublabel": "feeds the breaker",
+      "sources": [
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 150,
+          "end_line": 155,
+          "label": "Account"
+        },
+        {
+          "path": "src/reliability/circuit_breaker.h",
+          "line": 53,
+          "end_line": 63,
+          "label": "20 failures open it"
+        }
+      ]
+    },
+    {
+      "id": "retry",
+      "lane": "resilient",
+      "col": 4,
+      "type": "security",
+      "label": "Retry allowed?",
+      "sublabel": "never quota or returns",
+      "sources": [
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 164,
+          "end_line": 174,
+          "label": "quota: no retry"
+        },
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 179,
+          "end_line": 196,
+          "label": "retry on timeout"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "lane": "redis",
+      "col": 3,
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "EVALSHA or HGETALL",
+      "sources": [
+        {
+          "path": "src/reliability/resilient_backend.cc",
+          "line": 172,
+          "label": "inner_.Eval"
+        }
+      ]
+    },
+    {
+      "id": "policy",
+      "lane": "failure",
+      "col": 4,
+      "type": "security",
+      "label": "Failure policy",
+      "sublabel": "rule's or plan's",
+      "sources": [
+        {
+          "path": "src/core/strict_core.h",
+          "line": 13,
+          "end_line": 20,
+          "label": "RedisDownResult"
+        },
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 17,
+          "end_line": 24,
+          "label": "PlanDown"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-open",
+      "from": "call",
+      "to": "open",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-send",
+      "from": "open",
+      "to": "send",
+      "label": "no",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-redis",
+      "from": "send",
+      "to": "redis",
+      "label": "attempt",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-reply",
+      "from": "redis",
+      "to": "intime",
+      "label": "reply, or nothing",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-yes",
+      "from": "intime",
+      "to": "answer",
+      "label": "yes",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "e-no",
+      "from": "intime",
+      "to": "retry",
+      "label": "timed out",
+      "variant": "security"
+    },
+    {
+      "id": "e-again",
+      "from": "retry",
+      "to": "redis",
+      "label": "again, after backoff",
+      "variant": "dashed",
+      "role": "return",
+      "toSide": "right"
+    },
+    {
+      "id": "e-giveup",
+      "from": "retry",
+      "to": "policy",
+      "label": "no, or 2 retries used",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e-fast",
+      "from": "open",
+      "to": "policy",
+      "label": "yes: fail at once",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e-policy",
+      "from": "policy",
+      "to": "answer",
+      "label": "UNVERIFIED or UNAVAILABLE",
+      "variant": "security",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "What is never retried",
+      "items": [
+        "A quota script: a timed-out one may have counted the call, so a retry would count it twice, or come back replayed and never be billed",
+        "A token return"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "The breaker",
+      "items": [
+        "One per slot group, so a dead master stops calls to its own slots only",
+        "20 failures in a row open it; after 500 ms one probe goes out; its success closes it",
+        "An error reply (MOVED, a script error) means Redis answered: it does not count"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "The failure answer",
+      "items": [
+        "Fail open (paid plans): allowed, reason UNVERIFIED, not billed",
+        "Fail closed (Free): denied, reason UNAVAILABLE"
+      ]
+    }
+  ]
+}

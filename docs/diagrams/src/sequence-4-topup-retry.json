@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sequence: A Top-Up, Sent Twice",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sequence-4-topup-retry.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "participants": [
+    { "id": "merchant", "type": "external", "label": "Merchant admin", "sublabel": "buys 1,000 units for u42",
+      "sources": [{ "path": "control/rlcontrol/api.py", "line": 137, "end_line": 141, "label": "management key" }] },
+    { "id": "api", "type": "backend", "label": "Management API", "sublabel": "POST .../topups",
+      "sources": [{ "path": "control/rlcontrol/api.py", "line": 275, "end_line": 301, "label": "top_up" }] },
+    { "id": "redis", "type": "database", "label": "Redis Cluster", "sublabel": "plan hash, purchases",
+      "sources": [{ "path": "control/rlcontrol/store.py", "line": 107, "end_line": 116, "label": "TOPUP" },
+                  { "path": "control/rlcontrol/store.py", "line": 37, "end_line": 43, "label": "purchases, idempotency" }] },
+    { "id": "limiter", "type": "backend", "label": "Limiter instances", "sublabel": "plan cache",
+      "sources": [{ "path": "src/server/main.cc", "line": 262, "end_line": 281, "label": "listener" },
+                  { "path": "lua/quota.lua", "line": 69, "end_line": 70, "label": "top-up in force" }] }
+  ],
+  "segments": [
+    { "from": 160, "to": 542, "label": "First request" },
+    { "from": 544, "to": 676, "label": "The same request, retried" }
+  ],
+  "messages": [
+    { "id": "m-post", "from": "merchant", "to": "api", "y": 172, "label": "POST /v1/customers/u42/topups", "variant": "emphasis", "note": "units: 1000, Idempotency-Key: k1" },
+    { "id": "m-claim", "from": "api", "to": "redis", "y": 218, "label": "SET idem:k1 pending NX", "variant": "default" },
+    { "id": "m-first", "from": "redis", "to": "api", "y": 246, "label": "OK: first time", "variant": "return" },
+    { "id": "m-topup", "from": "api", "to": "redis", "y": 274, "label": "TOPUP script on the plan hash", "variant": "default", "note": "units for this period only" },
+    { "id": "m-total", "from": "redis", "to": "api", "y": 320, "label": "period total", "variant": "return" },
+    { "id": "m-xadd", "from": "api", "to": "redis", "y": 348, "label": "XADD purchases", "variant": "dashed", "note": "the record an invoice will read" },
+    { "id": "m-pub", "from": "api", "to": "redis", "y": 394, "label": "PUBLISH plan-changes acme|u42", "variant": "dashed" },
+    { "id": "m-msg", "from": "redis", "to": "limiter", "y": 422, "label": "acme|u42", "variant": "dashed", "note": "the next check sees the higher limit" },
+    { "id": "m-save", "from": "api", "to": "redis", "y": 468, "label": "SET idem:k1 = the answer", "variant": "default" },
+    { "id": "m-reply", "from": "api", "to": "merchant", "y": 496, "label": "201 {units, period, total}", "variant": "return", "note": "suppose this reply is lost" },
+    { "id": "m-again", "from": "merchant", "to": "api", "y": 556, "label": "POST again, Idempotency-Key: k1", "variant": "emphasis" },
+    { "id": "m-get", "from": "api", "to": "redis", "y": 584, "label": "SET NX fails; GET idem:k1", "variant": "default" },
+    { "id": "m-stored", "from": "redis", "to": "api", "y": 612, "label": "the first answer", "variant": "return" },
+    { "id": "m-replayed", "from": "api", "to": "merchant", "y": 640, "label": "the first answer, Idempotent-Replayed", "variant": "return", "note": "nothing is bought twice" }
+  ],
+  "cards": [
+    { "dot": "amber", "title": "Known limit",
+      "items": ["The purchase is written after the units: a crash between them gives units away unbilled, never bills units not given (a shortcut noted in api.py)"] },
+    { "dot": "cyan", "title": "While the first is running",
+      "items": ["A retry that finds `pending` gets 409: the same top-up is in progress"] }
+  ]
+}

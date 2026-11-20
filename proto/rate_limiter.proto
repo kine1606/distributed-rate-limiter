@@ -34,11 +34,11 @@ message CheckRequest {
   // (1) Who is limited: the caller's entity id, e.g. "cust:42", "user:42", "ip:203.0.113.7".
   // It is not a Redis key. The limiter builds every Redis key from it ("{cust:42}:api_default:tb"),
   // so the hash tag that keeps one entity's keys in one Redis Cluster slot is written in one place,
-  // never by a gateway. Required, at most 128 bytes.
+  // never by a gateway. Required, at most 128 bytes, without { or } (Redis Cluster's hash-tag marks).
   string key = 1;
 
-  // Rule name from config/rules.yaml, e.g. "api_default". Required; an unknown name is
-  // INVALID_ARGUMENT.
+  // Rule name from config/rules.yaml, e.g. "api_default". Required, at most 128 bytes; an unknown
+  // name is INVALID_ARGUMENT.
   // (2) One Check per API call, not a quota entry plus a burst entry in a CheckBatch. From Week 4 a
   // plan rule names the customer's quota and burst together: the limiter checks burst first, then
   // quota, and gives the burst token back when quota denies. Server side, that order and that refund

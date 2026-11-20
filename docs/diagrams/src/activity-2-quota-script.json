@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Activity: The Quota Script Decides",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/activity-2-quota-script.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    },
+    "legend": {
+      "entries": {
+        "backend": { "label": "Script step" },
+        "security": { "label": "Decision" },
+        "database": { "label": "Redis state" },
+        "external": { "label": "The limiter" },
+        "messagebus": { "label": "Pub/Sub message" }
+      }
+    }
+  },
+  "lanes": [
+    { "id": "limiter", "label": "Limiter (caller)" },
+    { "id": "setup", "label": "Terms in force, by the Redis clock" },
+    { "id": "decide", "label": "Decide" },
+    { "id": "record", "label": "Record, atomically in the same script" }
+  ],
+  "mainPath": ["call", "terms", "period", "replay", "counters", "within", "count", "save", "store", "answer"],
+  "nodes": [
+    { "id": "call", "lane": "limiter", "col": 0, "type": "external", "label": "EVALSHA quota.lua", "sublabel": "limit, cost, policy, period",
+      "sources": [{ "path": "lua/quota.lua", "line": 1, "end_line": 38, "label": "arguments" }] },
+    { "id": "answer", "lane": "limiter", "col": 5, "type": "external", "label": "Answer", "sublabel": "allowed, used, remaining, limit",
+      "sources": [{ "path": "lua/quota.lua", "line": 149, "label": "return" }] },
+    { "id": "terms", "lane": "setup", "col": 0, "type": "backend", "label": "Limit in force", "sublabel": "plus boost, plus top-up",
+      "sources": [{ "path": "lua/quota.lua", "line": 40, "end_line": 44, "label": "TIME, boost" },
+                  { "path": "lua/quota.lua", "line": 69, "end_line": 70, "label": "top-up" }] },
+    { "id": "period", "lane": "setup", "col": 1, "type": "backend", "label": "This period", "sublabel": "UTC day or month",
+      "sources": [{ "path": "lua/quota.lua", "line": 47, "end_line": 68, "label": "day or calendar month" }] },
+    { "id": "replay", "lane": "setup", "col": 2, "type": "security", "label": "Request id seen?", "sublabel": "within 5 minutes",
+      "sources": [{ "path": "lua/quota.lua", "line": 72, "end_line": 79, "label": "stored answer" }] },
+    { "id": "stored", "lane": "setup", "col": 4, "type": "database", "label": "Stored answer", "sublabel": "replayed, not counted",
+      "sources": [{ "path": "lua/quota.lua", "line": 74, "end_line": 78, "label": "GET req:<id>" }] },
+    { "id": "counters", "lane": "decide", "col": 2, "type": "database", "label": "Period counters", "sublabel": "new period starts at 0",
+      "sources": [{ "path": "lua/quota.lua", "line": 81, "end_line": 91, "label": "HMGET, rollover" }] },
+    { "id": "within", "lane": "decide", "col": 3, "type": "security", "label": "Within the limit?", "sublabel": "used + cost <= limit",
+      "sources": [{ "path": "lua/quota.lua", "line": 93, "end_line": 97, "label": "within" }] },
+    { "id": "policy", "lane": "decide", "col": 4, "type": "security", "label": "Overage policy", "sublabel": "hard, grace or cap",
+      "sources": [{ "path": "lua/quota.lua", "line": 98, "end_line": 111, "label": "grace, cap" }] },
+    { "id": "denied", "lane": "decide", "col": 5, "type": "security", "label": "Denied", "sublabel": "nothing counted",
+      "sources": [{ "path": "lua/quota.lua", "line": 94, "label": "allowed = 0" }] },
+    { "id": "count", "lane": "record", "col": 3, "type": "backend", "label": "Count it", "sublabel": "used, or overage_used",
+      "sources": [{ "path": "lua/quota.lua", "line": 95, "end_line": 111, "label": "counts" }] },
+    { "id": "save", "lane": "record", "col": 4, "type": "database", "label": "Save counters", "sublabel": "alert bits, kept a period",
+      "sources": [{ "path": "lua/quota.lua", "line": 113, "end_line": 133, "label": "alerts, HSET, PEXPIRE" }] },
+    { "id": "store", "lane": "record", "col": 5, "type": "messagebus", "label": "Store answer, alert", "sublabel": "PUBLISH rl-alerts",
+      "sources": [{ "path": "lua/quota.lua", "line": 138, "end_line": 148, "label": "SET req:<id>, PUBLISH" }] }
+  ],
+  "edges": [
+    { "id": "e-terms", "from": "call", "to": "terms", "variant": "emphasis" },
+    { "id": "e-period", "from": "terms", "to": "period", "variant": "emphasis" },
+    { "id": "e-replay", "from": "period", "to": "replay", "variant": "emphasis" },
+    { "id": "e-seen", "from": "replay", "to": "stored", "label": "yes", "variant": "dashed", "role": "branch" },
+    { "id": "e-stored", "from": "stored", "to": "answer", "label": "replayed = 1", "variant": "dashed", "role": "return" },
+    { "id": "e-new", "from": "replay", "to": "counters", "label": "no, or no id", "variant": "emphasis" },
+    { "id": "e-within", "from": "counters", "to": "within", "variant": "emphasis" },
+    { "id": "e-yes", "from": "within", "to": "count", "label": "yes", "variant": "emphasis" },
+    { "id": "e-no", "from": "within", "to": "policy", "label": "no", "variant": "security" },
+    { "id": "e-room", "from": "policy", "to": "count", "label": "grace or cap has room", "variant": "default" },
+    { "id": "e-hard", "from": "policy", "to": "denied", "label": "hard, or no room", "variant": "security", "role": "error" },
+    { "id": "e-save", "from": "count", "to": "save", "variant": "emphasis" },
+    { "id": "e-denied-save", "from": "denied", "to": "save", "label": "denials too", "variant": "security" },
+    { "id": "e-store", "from": "save", "to": "store", "variant": "emphasis" },
+    { "id": "e-answer", "from": "store", "to": "answer", "variant": "emphasis", "role": "return" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "The three answers at the limit",
+      "items": ["hard: deny", "grace: admit `allowance` more, free", "cap (postpaid in the API): admit `allowance` more as billed overage, the spending cap"] },
+    { "dot": "amber", "title": "Alerts",
+      "items": ["80%, 100%, first overage, first denial: each once a period, by bits saved in the counter",
+                "A replayed answer sends none"] },
+    { "dot": "slate", "title": "Why one script",
+      "items": ["Reading, deciding and writing run atomically on the customer's slot, so two limiters can never both take the last unit"] }
+  ]
+}

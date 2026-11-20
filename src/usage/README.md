@@ -5,9 +5,12 @@
 ## What this module does
 
 Redis counters answer "may this request pass right now?". Usage events answer "what happened?"
-later: how many requests each customer made, how many were overage, how many were denied. Billing
-(out of scope) would read them to build an invoice, and you read them in the evaluation to prove
-there were no double counts. Redis counters expire every day; usage events are the durable record.
+later: how many requests each customer made, how many were overage, how many were denied, minute by
+minute. The evaluation reads them to prove there were no double counts.
+
+Billing does not read them (P3). It reads the quota counters, which are exact and atomic, and keep a
+month with billed overage until it is invoiced (`control/rlcontrol/billing.py`). `billing.py
+reconcile` compares these events with the counters and reports every difference.
 
 ## Design in one paragraph
 

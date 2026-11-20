@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sequence: A Limit Changed Live",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sequence-3-live-limit-change.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "participants": [
+    {
+      "id": "gateway",
+      "type": "external",
+      "label": "Merchant gateway",
+      "sublabel": "customer u42's calls",
+      "sources": [
+        {
+          "path": "proto/rate_limiter.proto",
+          "line": 23,
+          "end_line": 31,
+          "label": "Check"
+        }
+      ]
+    },
+    {
+      "id": "limiter",
+      "type": "backend",
+      "label": "Limiter, each instance",
+      "sublabel": "plan cache, deny cache",
+      "sources": [
+        {
+          "path": "src/server/main.cc",
+          "line": 262,
+          "end_line": 281,
+          "label": "listener"
+        },
+        {
+          "path": "src/plan/plan_store.cc",
+          "line": 122,
+          "end_line": 128,
+          "label": "Invalidate"
+        },
+        {
+          "path": "src/lease/deny_cache.h",
+          "line": 63,
+          "end_line": 68,
+          "label": "Clear"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis Cluster",
+      "sublabel": "plan hash, plan-changes",
+      "sources": [
+        {
+          "path": "control/rlcontrol/store.py",
+          "line": 90,
+          "end_line": 95,
+          "label": "UPDATE"
+        },
+        {
+          "path": "src/redis/plan_listener.cc",
+          "line": 21,
+          "end_line": 52,
+          "label": "subscription"
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Management API",
+      "sublabel": "custom limits",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 245,
+          "end_line": 264,
+          "label": "set_limits"
+        },
+        {
+          "path": "control/rlcontrol/store.py",
+          "line": 141,
+          "end_line": 142,
+          "label": "announce"
+        }
+      ]
+    },
+    {
+      "id": "merchant",
+      "type": "external",
+      "label": "Merchant admin",
+      "sublabel": "management key",
+      "sources": [
+        {
+          "path": "control/rlcontrol/api.py",
+          "line": 137,
+          "end_line": 141,
+          "label": "management key"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 162,
+      "to": 256,
+      "label": "Before: u42 is out"
+    },
+    {
+      "from": 284,
+      "to": 530,
+      "label": "The merchant switches u42 to postpaid"
+    },
+    {
+      "from": 558,
+      "to": 738,
+      "label": "After: the next check"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-check1",
+      "from": "gateway",
+      "to": "limiter",
+      "y": 176,
+      "label": "Check(u42)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-denied",
+      "from": "limiter",
+      "to": "gateway",
+      "y": 206,
+      "label": "QUOTA_EXHAUSTED",
+      "variant": "return",
+      "note": "this denial is cached until the reset"
+    },
+    {
+      "id": "m-patch",
+      "from": "merchant",
+      "to": "api",
+      "y": 298,
+      "label": "PATCH /v1/customers/u42/limits",
+      "variant": "emphasis",
+      "note": "overage: postpaid, allowance: 2"
+    },
+    {
+      "id": "m-update",
+      "from": "api",
+      "to": "redis",
+      "y": 360,
+      "label": "UPDATE script on the plan hash",
+      "variant": "default",
+      "note": "one atomic write"
+    },
+    {
+      "id": "m-pub",
+      "from": "api",
+      "to": "redis",
+      "y": 422,
+      "label": "PUBLISH plan-changes acme|u42",
+      "variant": "dashed"
+    },
+    {
+      "id": "m-msg",
+      "from": "redis",
+      "to": "limiter",
+      "y": 452,
+      "label": "acme|u42",
+      "variant": "dashed",
+      "note": "every instance drops the cached plan and the denial"
+    },
+    {
+      "id": "m-done",
+      "from": "api",
+      "to": "merchant",
+      "y": 514,
+      "label": "200, the customer",
+      "variant": "return"
+    },
+    {
+      "id": "m-check2",
+      "from": "gateway",
+      "to": "limiter",
+      "y": 572,
+      "label": "Check(u42)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-read",
+      "from": "limiter",
+      "to": "redis",
+      "y": 602,
+      "label": "HGETALL {acme|u42}:plan",
+      "variant": "default"
+    },
+    {
+      "id": "m-terms",
+      "from": "redis",
+      "to": "limiter",
+      "y": 632,
+      "label": "new terms",
+      "variant": "return"
+    },
+    {
+      "id": "m-quota",
+      "from": "limiter",
+      "to": "redis",
+      "y": 662,
+      "label": "quota.lua, policy cap",
+      "variant": "default"
+    },
+    {
+      "id": "m-over",
+      "from": "redis",
+      "to": "limiter",
+      "y": 692,
+      "label": "allowed, overage",
+      "variant": "return"
+    },
+    {
+      "id": "m-answer",
+      "from": "limiter",
+      "to": "gateway",
+      "y": 722,
+      "label": "OVERAGE: allowed, billed",
+      "variant": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Why the change is immediate",
+      "items": [
+        "The plan hash is the only copy of the terms; caches are dropped by message, not by waiting",
+        "A message missed while a subscription was down is covered by the 5 s cache TTL and a full drop on resubscribing"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Same path for every change",
+      "items": [
+        "Plans, custom limits, boosts, top-ups, suspension: one script on the plan hash, then the message"
+      ]
+    }
+  ]
+}

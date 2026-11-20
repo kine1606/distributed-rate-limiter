@@ -63,5 +63,96 @@ TEST(Plan, ZeroIsAValidLimit) {  // the suspended preset
   EXPECT_EQ(p.refill, 0u);
 }
 
+TEST(Plan, PeriodAndBoost) {  // Phase 2, P1
+  const Plan p = ParsePlan({{"daily", "50000"}, {"period", "month"}, {"boost", "500"}, {"boost_until", "1792900000000"}});
+  EXPECT_EQ(p.period, QuotaPeriod::kMonth);
+  EXPECT_EQ(p.boost, 500u);
+  EXPECT_EQ(p.boost_until_ms, 1792900000000);
+  const Plan bad = ParsePlan({{"period", "week"}, {"boost", "-3"}, {"boost_until", "soon"}});
+  EXPECT_EQ(bad.period, QuotaPeriod::kDay);  // unknown: the daily default
+  EXPECT_EQ(bad.boost, 0u);
+  EXPECT_EQ(bad.boost_until_ms, 0);
+}
+
+TEST(Plan, QuotaStampChangesWithABoostOrThePeriod) {
+  const Plan base = ParsePlan({{"daily", "2000"}});
+  Plan boosted = base, longer = base, monthly = base;
+  boosted.boost = 100;
+  longer.boost = 100;
+  longer.boost_until_ms = 5;
+  monthly.period = QuotaPeriod::kMonth;
+  EXPECT_NE(QuotaStamp(base), QuotaStamp(boosted));
+  EXPECT_NE(QuotaStamp(boosted), QuotaStamp(longer));
+  EXPECT_NE(QuotaStamp(base), QuotaStamp(monthly));
+  EXPECT_EQ(QuotaStamp(base), QuotaStamp(ParsePlan({{"daily", "2000"}})));
+}
+
+TEST(Plan, TopUpNeedsAWellFormedPeriod) {  // Phase 2, P2
+  const Plan p = ParsePlan({{"topup", "500"}, {"topup_period", "d20751"}});
+  EXPECT_EQ(p.topup, 500u);
+  EXPECT_EQ(p.topup_period, "d20751");
+  EXPECT_EQ(ParsePlan({{"topup", "500"}, {"topup_period", "m24321"}}).topup_period, "m24321");
+  for (const char* bad : {"x20751", "d", "d12a", "m12345678901"}) {
+    const Plan b = ParsePlan({{"topup", "500"}, {"topup_period", bad}});
+    EXPECT_EQ(b.topup, 0u) << bad;  // units for no period apply to none
+    EXPECT_EQ(b.topup_period, "") << bad;
+  }
+  EXPECT_EQ(ParsePlan({{"topup", "500"}}).topup, 0u);
+  Plan topped = ParsePlan({{"daily", "2000"}});
+  const std::uint64_t before = QuotaStamp(topped);
+  topped.topup = 500;
+  topped.topup_period = "d20751";
+  EXPECT_NE(QuotaStamp(topped), before);
+}
+
+TEST(Plan, APlanWithAFeeIsPaid) {  // Phase 2, P3: it may use the merchant's reserve
+  EXPECT_FALSE(ParsePlan({}).paid);
+  EXPECT_FALSE(ParsePlan({{"plan", "free"}, {"fee", "0"}}).paid);
+  EXPECT_TRUE(ParsePlan({{"plan", "pay"}, {"fee", "1900"}}).paid);
+  EXPECT_FALSE(ParsePlan({{"fee", "-5"}}).paid);  // malformed: Free
+}
+
+TEST(Plan, AnAnchorIsADayFrom1To28AndPartOfTheStamp) {  // Phase 2, P5: billing from the subscription date
+  EXPECT_EQ(ParsePlan({}).anchor, 1);  // the calendar month
+  EXPECT_EQ(ParsePlan({{"anchor", "17"}}).anchor, 17);
+  for (const char* bad : {"0", "29", "31", "x", "-3", ""}) EXPECT_EQ(ParsePlan({{"anchor", bad}}).anchor, 1) << bad;
+  EXPECT_NE(QuotaStamp(ParsePlan({{"anchor", "17"}})), QuotaStamp(ParsePlan({})));  // a denial under other terms
+}
+
+
+// ---- Week 2 edge cases (2026-11-01): what a plan hash written by hand can hold ----
+
+TEST(Plan, ANumberBeyondUint32KeepsTheDefault) {
+  EXPECT_EQ(ParsePlan({{"daily", "4294967295"}}).daily, 4294967295u);  // the largest that fits
+  EXPECT_EQ(ParsePlan({{"daily", "4294967296"}}).daily, 200u);
+  EXPECT_EQ(ParsePlan({{"burst", "99999999999999999999"}}).burst, 2u);
+}
+
+TEST(Plan, SignsSpacesDecimalsAndHexAreMalformed) {
+  for (const char* v : {"+5", " 5", "5 ", "1.5", "-1", "", "0x10", "1e3", "5abc"}) {
+    EXPECT_EQ(ParsePlan({{"daily", v}}).daily, 200u) << '"' << v << '"';
+  }
+}
+
+TEST(Plan, LeadingZerosAreANumber) { EXPECT_EQ(ParsePlan({{"daily", "007"}}).daily, 7u); }
+
+TEST(Plan, UnknownFieldsAreIgnored) {
+  const Plan p = ParsePlan({{"daily", "500"}, {"colour", "blue"}, {"Daily", "9"}, {"note", "VIP"}});
+  EXPECT_EQ(p.daily, 500u);  // field names are case-sensitive: "Daily" is someone else's field
+}
+
+TEST(Plan, ValuesAreCaseSensitive) {  // only the exact words the tools write change a default
+  EXPECT_EQ(ParsePlan({{"overage", "CAP"}}).overage, Overage::kHard);
+  EXPECT_EQ(ParsePlan({{"period", "Month"}}).period, QuotaPeriod::kDay);
+  EXPECT_EQ(ParsePlan({{"failure", "OPEN"}}).failure, FailurePolicy::kFailClosed);
+  EXPECT_FALSE(ParsePlan({{"plan", "Suspended"}}).suspended);
+}
+
+TEST(Plan, ABoostEndMustBeANonNegativeWholeNumber) {
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "-5"}}).boost_until_ms, 0);
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "soon"}}).boost_until_ms, 0);
+  EXPECT_EQ(ParsePlan({{"boost", "5"}, {"boost_until", "1893456000000"}}).boost_until_ms, 1893456000000);
+}
+
 }  // namespace
 }  // namespace ratelimiter

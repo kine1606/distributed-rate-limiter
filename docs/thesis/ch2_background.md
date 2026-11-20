@@ -1,8 +1,5 @@
 # Chapter 2. Background and related work
 
-> Draft, Week 2 (2026-10-18). Target length 8 to 10 pages. Citations refer to `references.md`;
-> entries marked L there still need their bibliographic details checked.
-
 This chapter introduces what the design in Chapter 3 builds on: the algorithms used to limit
 request rates (2.1), the properties of Redis that make an exact distributed counter possible
 (2.2), the gRPC and Protocol Buffers stack that carries every check (2.3), and the existing systems

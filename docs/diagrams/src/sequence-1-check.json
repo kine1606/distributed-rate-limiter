@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sequence: One Check, End to End",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/sequence-1-check.html",
+    "repository": {
+      "url": "git@github.com:kine1606/distributed-rate-limiter.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "4fc8dcdd5147631d17f6e15b3e7f006b3d7fda9a"
+    }
+  },
+  "participants": [
+    {
+      "id": "gateway",
+      "type": "external",
+      "label": "Merchant gateway",
+      "sublabel": "one call per API call",
+      "sources": [
+        {
+          "path": "proto/rate_limiter.proto",
+          "line": 23,
+          "end_line": 31,
+          "label": "RateLimiter service"
+        }
+      ]
+    },
+    {
+      "id": "service",
+      "type": "backend",
+      "label": "gRPC service",
+      "sublabel": "validate, key, admit",
+      "sources": [
+        {
+          "path": "src/server/service.h",
+          "line": 67,
+          "end_line": 104,
+          "label": "Check"
+        },
+        {
+          "path": "src/server/merchants.h",
+          "line": 88,
+          "end_line": 102,
+          "label": "Resolve"
+        }
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "CompositeCore",
+      "sublabel": "the customer rule",
+      "sources": [
+        {
+          "path": "src/core/composite_core.cc",
+          "line": 63,
+          "end_line": 148,
+          "label": "Check"
+        }
+      ]
+    },
+    {
+      "id": "plans",
+      "type": "backend",
+      "label": "PlanStore",
+      "sublabel": "plan cache, 5 s",
+      "sources": [
+        {
+          "path": "src/plan/plan_store.cc",
+          "line": 37,
+          "end_line": 81,
+          "label": "Get"
+        }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis Cluster",
+      "sublabel": "plan hash, Lua scripts",
+      "sources": [
+        {
+          "path": "src/redis/keys.h",
+          "line": 15,
+          "end_line": 27,
+          "label": "key names"
+        },
+        {
+          "path": "lua/token_bucket.lua",
+          "line": 1,
+          "end_line": 8,
+          "label": "burst"
+        },
+        {
+          "path": "lua/quota.lua",
+          "line": 1,
+          "end_line": 17,
+          "label": "quota"
+        }
+      ]
+    }
+  ],
+  "segments": [
+    {
+      "from": 162,
+      "to": 288,
+      "label": "Authenticate"
+    },
+    {
+      "from": 316,
+      "to": 502,
+      "label": "Plan and local gates"
+    },
+    {
+      "from": 530,
+      "to": 682,
+      "label": "Burst, then quota"
+    },
+    {
+      "from": 710,
+      "to": 804,
+      "label": "Answer"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-check",
+      "from": "gateway",
+      "to": "service",
+      "y": 176,
+      "label": "Check(cust:42, customer, cost, id)",
+      "variant": "emphasis",
+      "note": "x-api-key in the call's metadata"
+    },
+    {
+      "id": "m-core",
+      "from": "service",
+      "to": "core",
+      "y": 238,
+      "label": "Check(acme|cust:42)",
+      "variant": "emphasis",
+      "note": "valid, key known, under the in-flight cap"
+    },
+    {
+      "id": "m-get",
+      "from": "core",
+      "to": "plans",
+      "y": 330,
+      "label": "Get(acme|cust:42)",
+      "variant": "default"
+    },
+    {
+      "id": "m-hgetall",
+      "from": "plans",
+      "to": "redis",
+      "y": 360,
+      "label": "HGETALL {acme|cust:42}:plan",
+      "variant": "dashed",
+      "note": "only on a cache miss"
+    },
+    {
+      "id": "m-fields",
+      "from": "redis",
+      "to": "plans",
+      "y": 422,
+      "label": "plan fields",
+      "variant": "return"
+    },
+    {
+      "id": "m-plan",
+      "from": "plans",
+      "to": "core",
+      "y": 452,
+      "label": "plan",
+      "variant": "return",
+      "note": "suspended, or denied till reset: answered here"
+    },
+    {
+      "id": "m-burst",
+      "from": "core",
+      "to": "redis",
+      "y": 544,
+      "label": "EVALSHA token_bucket.lua",
+      "variant": "default"
+    },
+    {
+      "id": "m-burst-r",
+      "from": "redis",
+      "to": "core",
+      "y": 574,
+      "label": "allowed, tokens left",
+      "variant": "return"
+    },
+    {
+      "id": "m-quota",
+      "from": "core",
+      "to": "redis",
+      "y": 604,
+      "label": "EVALSHA quota.lua",
+      "variant": "emphasis",
+      "note": "none on a lease hit (large daily plans)"
+    },
+    {
+      "id": "m-quota-r",
+      "from": "redis",
+      "to": "core",
+      "y": 666,
+      "label": "allowed, used, remaining, reset",
+      "variant": "return"
+    },
+    {
+      "id": "m-result",
+      "from": "core",
+      "to": "service",
+      "y": 724,
+      "label": "CheckResult",
+      "variant": "return"
+    },
+    {
+      "id": "m-response",
+      "from": "service",
+      "to": "gateway",
+      "y": 754,
+      "label": "CheckResponse, status OK",
+      "variant": "return",
+      "note": "a denial is a reason, not an error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Redis calls per check",
+      "items": [
+        "Usually two scripts on the customer's own slot: burst and quota",
+        "One when the quota comes from a lease, none when denied locally"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Errors instead of answers",
+      "items": [
+        "INVALID_ARGUMENT, UNAUTHENTICATED (unknown key), RESOURCE_EXHAUSTED (limiter overloaded)"
+      ]
+    }
+  ]
+}

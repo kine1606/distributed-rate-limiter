@@ -20,6 +20,7 @@
 #include "plan/plan_store.h"
 #include "redis/keys.h"
 #include "redis/redispp_backend.h"
+#include "server/merchants.h"
 #include "server/service.h"
 
 namespace ratelimiter {
@@ -36,6 +37,7 @@ class GrpcQuotaIT : public ::testing::Test {
     if (!admin_) GTEST_SKIP() << "Redis Cluster not reachable at " << ClusterSeed().first << ":" << ClusterSeed().second;
     const std::string src = RL_SOURCE_DIR;
     RuleTable rules = LoadRules(src + "/config/rules.yaml");
+    rules_ = rules;
     quota_rule_ = rules.at("daily_quota");
     burst_rule_ = rules.at("burst");
     backend_ = std::make_unique<RedisPPBackend>(ClusterSeed().first, ClusterSeed().second, src + "/lua");
@@ -92,6 +94,7 @@ class GrpcQuotaIT : public ::testing::Test {
 
   std::unique_ptr<sw::redis::RedisCluster> admin_;
   Rule quota_rule_, burst_rule_;
+  RuleTable rules_;
   std::unique_ptr<RedisPPBackend> backend_;
   std::unique_ptr<PlanStore> plans_;
   DenyCache deny_;
@@ -100,6 +103,51 @@ class GrpcQuotaIT : public ::testing::Test {
   std::unique_ptr<grpc::Server> server_;  // after the service: shut down and destroyed first
   std::unique_ptr<v1::RateLimiter::Stub> stub_;
 };
+
+// Phase 2, P1, end to end: a merchant's API key registered in Redis as rlctl does (hashed), loaded by
+// the real backend; a call without it or with another key is refused; with it, the merchant's customer
+// is limited under "<merchant>|<customer>", and the same id without tenancy is someone else.
+TEST_F(GrpcQuotaIT, AMerchantsKeyNamesItsOwnCustomers) {
+  const std::string api_key = "rl_it_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  admin_->hset(std::string(kMerchantKeysHash), Sha256Hex(api_key), "itmerchant");
+  Seed("itmerchant|cust:t1", "2");
+  Seed("cust:t1", "5");
+  MerchantKeys merchants(*backend_);
+  ASSERT_TRUE(merchants.ReloadAndWait(std::chrono::seconds(2)));
+  RateLimiterService tenant_service(std::make_shared<CompositeCore>(std::make_shared<StrictCore>(*backend_, *plans_, rules_),
+                                                                    *strict_, *plans_, deny_, rules_),
+                                    10'000, nullptr, &merchants);
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+  builder.RegisterService(&tenant_service);
+  auto server = builder.BuildAndStart();
+  ASSERT_TRUE(server && port > 0);
+  auto stub = v1::RateLimiter::NewStub(grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+  const auto check = [&stub](const std::string& key, v1::CheckResponse* resp) {
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    if (!key.empty()) ctx.AddMetadata(std::string(kApiKeyHeader), key);
+    v1::CheckRequest req;
+    req.set_key("cust:t1");
+    req.set_rule("customer");
+    return stub->Check(&ctx, req, resp);
+  };
+  v1::CheckResponse resp;
+  EXPECT_EQ(check("", &resp).error_code(), grpc::StatusCode::UNAUTHENTICATED);
+  EXPECT_EQ(check("rl_someone_else", &resp).error_code(), grpc::StatusCode::UNAUTHENTICATED);
+  for (int i = 0; i < 2; ++i) {
+    ASSERT_TRUE(check(api_key, &resp).ok());
+    EXPECT_TRUE(resp.allowed());
+    EXPECT_EQ(resp.limit(), 2u);  // the merchant's customer's plan, not cust:t1's
+  }
+  ASSERT_TRUE(check(api_key, &resp).ok());
+  EXPECT_FALSE(resp.allowed());
+  EXPECT_EQ(admin_->hget(RedisKey(quota_rule_, "itmerchant|cust:t1"), "used").value_or(""), "2");
+  EXPECT_FALSE(admin_->exists(RedisKey(quota_rule_, "cust:t1")));  // the untenanted cust:t1 was never charged
+  server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(1));
+  admin_->hdel(std::string(kMerchantKeysHash), Sha256Hex(api_key));
+}
 
 // 400 concurrent requests from 8 threads for one Free customer: exactly 200 pass, the other 200 are
 // told the quota is exhausted until the daily reset, and Redis counted 200.

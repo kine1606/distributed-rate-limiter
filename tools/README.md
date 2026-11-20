@@ -15,9 +15,23 @@ not on the hot path.
 | --- | --- | --- |
 | `plans.sh` | The plan catalogue (`PLAN[name]`), sourced by `seed_plans.sh` and `rlctl` | 4 |
 | `seed_plans.sh` | Create many customers on Free, Pay and Enterprise for tests and benchmarks | 2 |
-| `rlctl` (bash, `redis-cli`) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer | 4 |
+| `rlctl` (bash, `redis-cli`) | `create`, `upgrade`, `downgrade`, `suspend`, `show` for one customer; Phase 2: `--merchant`, `set` (custom limits), `boost`, `plan-define` (a merchant's catalogue), `merchant-add` and `merchant-revoke` (API keys, stored hashed) | 4, P1 |
 | `usage_report.py` | Sum usage-event files per customer across instances (`--self-check` tests it) | 4 |
 | `plots/*.py` | Turn `results/` files into thesis figures | 7, 8 |
+
+Evaluation tools (the table and model tools have `--self-check`, which `scripts/reproduce.sh` runs;
+`tests/tools_test.py` tests their edge cases):
+
+| File | Purpose | Week |
+| --- | --- | --- |
+| `open_loop_table.py` | Chapter 5's latency table from `bench/open_loop.sh` | 5 |
+| `matrix_tables.py` | Chapter 5's throughput tables from `bench/run_matrix.sh` | 7 |
+| `profile_summary.py` | CPU self time by category from folded `perf` stacks (`bench/profile.sh`) | 7 |
+| `usl_fit.py` | Universal Scalability Law fit and Little's law check over `bench/concurrency_sweep.sh` | 8 |
+| `extrapolate.py` | What 1,000,000 checks/s would need and cost: an estimate, each input naming its evidence | 8 |
+| `coverage_report.py` | Line and branch coverage of `src/` and `include/` (`scripts/coverage.sh`) | 9 |
+| `build_dashboard.py` | `dashboard/data.js` from the roadmap, `results/`, ctest and git | 9 |
+| `live_dashboard.py` | Serves `dashboard/live.html` and relays a running limiter's metrics (`scripts/live_demo.sh`) | 9 |
 
 ## Skeleton
 
